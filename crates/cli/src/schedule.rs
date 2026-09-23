@@ -459,6 +459,9 @@ mod tests {
             threads: vec![],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 

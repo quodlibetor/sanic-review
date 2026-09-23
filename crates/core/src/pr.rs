@@ -68,6 +68,13 @@ pub struct PrSnapshot {
     pub threads: Vec<Thread>,
     /// Changed file paths; only fetched when path-scoped config needs them.
     pub files: Option<Vec<String>>,
+    /// GitHub's `reviewDecision`: `APPROVED`, `CHANGES_REQUESTED` or
+    /// `REVIEW_REQUIRED`; `None` when no review is required.
+    pub review_decision: Option<String>,
+    /// GitHub's `mergeStateStatus`, e.g. `CLEAN`, `BLOCKED`, `UNSTABLE`.
+    pub merge_state: Option<String>,
+    /// The head commit's combined checks: `SUCCESS`, `PENDING`, `FAILURE`…
+    pub checks: Option<String>,
     /// When GitHub last saw activity on the PR, as it writes timestamps.
     /// `None` if it didn't say.
     pub updated_at: Option<String>,
@@ -151,6 +158,12 @@ pub struct Comment {
     pub author: String,
     pub body: String,
     pub created_at: String,
+    /// Left by a bot account, which never needs an answer.
+    pub by_bot: bool,
+    /// When you reacted to it with an emoji, which counts as answering it.
+    /// The comment's own time stands in if GitHub didn't give the
+    /// reaction's.
+    pub reacted_at: Option<String>,
 }
 
 impl PrSnapshot {

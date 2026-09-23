@@ -508,12 +508,24 @@ impl Store {
         else {
             return Ok(None);
         };
+        Ok(Some(PrContext {
+            title,
+            body,
+            url,
+            author,
+            threads: self.threads(key)?,
+        }))
+    }
+
+    /// `key`'s threads as last polled, each's comments oldest first.
+    pub fn threads(&self, key: &PrKey) -> Result<Vec<Thread>> {
+        let repo = key.repo.to_string();
         let mut threads_stmt = self.conn.prepare_cached(
             "SELECT thread_id, path, line, resolved FROM threads
              WHERE repo = ?1 AND number = ?2 ORDER BY rowid",
         )?;
         let mut comments_stmt = self.conn.prepare_cached(
-            "SELECT id, author, body, created_at FROM comments
+            "SELECT id, author, body, created_at, by_bot, reacted_at FROM comments
              WHERE repo = ?1 AND number = ?2 AND thread_id = ?3 ORDER BY created_at, rowid",
         )?;
         let mut threads: Vec<Thread> = threads_stmt
@@ -535,17 +547,13 @@ impl Store {
                         author: row.get(1)?,
                         body: row.get(2)?,
                         created_at: row.get(3)?,
+                        by_bot: row.get(4)?,
+                        reacted_at: row.get(5)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
         }
-        Ok(Some(PrContext {
-            title,
-            body,
-            url,
-            author,
-            threads,
-        }))
+        Ok(threads)
     }
 }
 
@@ -619,17 +627,24 @@ mod tests {
                         author: "alice".into(),
                         body: "because".into(),
                         created_at: "2026-01-02T00:00:00Z".into(),
+                        by_bot: false,
+                        reacted_at: None,
                     },
                     Comment {
                         id: "c1".into(),
                         author: "bob".into(),
                         body: "why?".into(),
                         created_at: "2026-01-01T00:00:00Z".into(),
+                        by_bot: false,
+                        reacted_at: None,
                     },
                 ],
             }],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 

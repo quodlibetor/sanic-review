@@ -180,6 +180,8 @@ mod tests {
             author: author.into(),
             body: body.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            by_bot: false,
+            reacted_at: None,
         };
         PrContext {
             title: "Add retries".into(),

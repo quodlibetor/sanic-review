@@ -13,6 +13,7 @@ use color_eyre::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
     pr::{PrKey, PrSnapshot},
+    state::{PrState, StateFacts},
     trigger::{Known, Trigger},
 };
 
@@ -29,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_views.sql"),
     include_str!("migrations/0009_closed_prs.sql"),
     include_str!("migrations/0010_review_commit.sql"),
+    include_str!("migrations/0011_pr_state.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -344,6 +346,27 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Where `key` stands, as last polled; see [`PrState`]. `mine` says
+    /// it's your own PR.
+    pub fn pr_state(&self, key: &PrKey, me: &str, mine: bool) -> Result<PrState> {
+        let (decision, merge, checks): (Option<String>, Option<String>, Option<String>) =
+            self.conn.query_row(
+                "SELECT review_decision, merge_state, checks FROM prs
+                 WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let threads = self.threads(key)?;
+        Ok(PrState::new(&StateFacts {
+            review_decision: decision.as_deref(),
+            merge_state: merge.as_deref(),
+            checks: checks.as_deref(),
+            threads: &threads,
+            me,
+            mine,
+        }))
+    }
+
     pub fn tracked_prs(&self) -> Result<u32> {
         Ok(self
             .conn
@@ -398,8 +421,9 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
         &format!(
             "INSERT INTO prs (repo, number, title, url, author, head_sha, base_sha, is_draft,
                               review_requested, profile, body, open, github_updated_at,
-                              first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, {NOW}, {NOW})
+                              review_decision, merge_state, checks, first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?15,
+                     {NOW}, {NOW})
              ON CONFLICT (repo, number) DO UPDATE SET
                  title = excluded.title, body = excluded.body, url = excluded.url,
                  author = excluded.author,
@@ -407,6 +431,8 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
                  is_draft = excluded.is_draft, review_requested = excluded.review_requested,
                  profile = excluded.profile, open = 1,
                  github_updated_at = excluded.github_updated_at,
+                 review_decision = excluded.review_decision,
+                 merge_state = excluded.merge_state, checks = excluded.checks,
                  updated_at = excluded.updated_at"
         ),
         params![
@@ -421,7 +447,10 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
             snap.review_requested,
             profile,
             snap.body,
-            snap.updated_at
+            snap.updated_at,
+            snap.review_decision,
+            snap.merge_state,
+            snap.checks
         ],
     )?;
     tx.execute(
@@ -431,6 +460,14 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
         ),
         params![repo, number, snap.head_sha, snap.base_sha],
     )?;
+    write_threads(tx, snap)?;
+    Ok(())
+}
+
+/// `snap`'s threads, their comments and its reviews.
+fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
+    let repo = snap.key.repo.to_string();
+    let number = snap.key.number;
     for thread in &snap.threads {
         tx.execute(
             "INSERT INTO threads (repo, number, thread_id, path, line, resolved)
@@ -448,9 +485,11 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
         )?;
         for c in &thread.comments {
             tx.execute(
-                "INSERT INTO comments (id, repo, number, thread_id, author, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (id) DO UPDATE SET body = excluded.body",
+                "INSERT INTO comments (id, repo, number, thread_id, author, body, created_at,
+                                       by_bot, reacted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT (id) DO UPDATE SET body = excluded.body,
+                     by_bot = excluded.by_bot, reacted_at = excluded.reacted_at",
                 params![
                     c.id,
                     repo,
@@ -458,7 +497,9 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
                     thread.id,
                     c.author,
                     c.body,
-                    c.created_at
+                    c.created_at,
+                    c.by_bot,
+                    c.reacted_at
                 ],
             )?;
         }
@@ -529,10 +570,15 @@ mod tests {
                     author: "bob".into(),
                     body: "why?".into(),
                     created_at: "2026-01-01T00:00:00Z".into(),
+                    by_bot: false,
+                    reacted_at: None,
                 }],
             }],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 

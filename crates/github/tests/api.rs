@@ -191,6 +191,29 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
     assert_eq!(snap.body, "Retries flaky fetches.\n\nCloses #3.");
     assert_eq!(snap.head_sha, "aaa111");
     assert_eq!(snap.updated_at.as_deref(), Some("2026-09-20T08:00:00Z"));
+    assert_eq!(snap.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+    assert_eq!(snap.merge_state.as_deref(), Some("BLOCKED"));
+    assert_eq!(snap.checks.as_deref(), Some("PENDING"));
+    let conversation = &snap.threads[0].comments;
+    // Your reaction, not someone else's, by its own time.
+    assert_eq!(
+        conversation[0].reacted_at.as_deref(),
+        Some("2026-09-20T07:10:00Z")
+    );
+    assert!(!conversation[0].by_bot);
+    // Without the reaction's time, the comment's stands in.
+    assert_eq!(
+        conversation[1].reacted_at.as_deref(),
+        Some("2026-09-20T07:30:00Z")
+    );
+    assert!(conversation[1].by_bot);
+    // In review threads only whether you reacted comes back.
+    let thread = &snap.threads[1].comments;
+    assert_eq!(
+        thread[1].reacted_at.as_deref(),
+        Some("2026-09-20T09:30:00Z")
+    );
+    assert_eq!(thread[0].reacted_at, None);
     assert!(
         snap.review_requested,
         "direct request for `Me` matches `me`"

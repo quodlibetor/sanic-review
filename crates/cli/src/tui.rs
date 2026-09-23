@@ -35,8 +35,9 @@ use sanic_core::{
     clock::{Clock, window_start},
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
+    state::{PrState, Urgency},
 };
-use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCounts, Store};
+use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
@@ -843,6 +844,30 @@ const RERUN_HINT: &str = "r reviews a failed, held, skipped or archived PR you o
 /// keeps a label as long as the column off what follows it.
 const STATUS_WIDTH: usize = 15;
 
+/// Width of the PR state column left of the status in "Reviews you owe".
+const OWED_STATE_WIDTH: usize = 10;
+
+/// Width of the PR state column in "Your PRs", where it's the status.
+const MY_STATE_WIDTH: usize = 17;
+
+/// `state` in at most `width - 1` characters and a space, coloured by how
+/// much it asks of you.
+fn state_cell(state: PrState, width: usize) -> Span<'static> {
+    let color = match state.urgency() {
+        Urgency::Act => Color::Yellow,
+        Urgency::Good => Color::Green,
+        Urgency::Quiet => Color::DarkGray,
+    };
+    let text = state.fitted(width - 1);
+    let style = Style::new().fg(color);
+    let style = if state.urgency() == Urgency::Act {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    };
+    Span::styled(format!("{text:<w$} ", w = width - 1), style)
+}
+
 fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -> ListItem<'a> {
     let latest = pr.latest_run.as_ref();
     let waiting = overview.waiting.get(&pr.key).copied();
@@ -861,6 +886,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -
         (None, Some(other)) => (other.into(), Color::DarkGray),
     };
     let mut lines = vec![Line::from(vec![
+        state_cell(pr.state, OWED_STATE_WIDTH),
         Span::styled(
             format!("{label:<w$} ", w = STATUS_WIDTH - 1),
             Style::new().fg(color),
@@ -875,7 +901,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -
     // doesn't need attention.
     if let Some(error) = latest.and_then(|run| run.error.as_deref()) {
         lines.push(Line::from(vec![
-            Span::raw(" ".repeat(STATUS_WIDTH)),
+            Span::raw(" ".repeat(OWED_STATE_WIDTH + STATUS_WIDTH)),
             Span::styled(first_line(error), Style::new().fg(Color::Red)),
         ]));
     }
@@ -898,17 +924,16 @@ fn first_line(text: &str) -> &str {
 }
 
 fn my_row(pr: &MyPr) -> ListItem<'_> {
-    let (label, color) = match pr.review_state {
-        _ if pr.archived => ("archived", Color::DarkGray),
-        ReviewState::Approved => ("approved", Color::Green),
-        ReviewState::ChangesRequested => ("changes", Color::Red),
-        ReviewState::Waiting => ("waiting", Color::DarkGray),
+    let state = if pr.archived {
+        Span::styled(
+            format!("{:<w$} ", "archived", w = MY_STATE_WIDTH - 1),
+            Style::new().fg(Color::DarkGray),
+        )
+    } else {
+        state_cell(pr.state, MY_STATE_WIDTH)
     };
     let mut spans = vec![
-        Span::styled(
-            format!("{label:<w$} ", w = STATUS_WIDTH - 1),
-            Style::new().fg(color),
-        ),
+        state,
         drafts(pr.pending_drafts),
         Span::raw(pr.key.url()),
         Span::raw("  "),
@@ -929,13 +954,13 @@ fn dim_if_archived(item: ListItem<'_>, archived: bool) -> ListItem<'_> {
 }
 
 /// A fixed-width pending draft count; blank when there are none.
+/// Short, to leave the URL room at 80 columns: `✎3` for three.
 fn drafts(n: u32) -> Span<'static> {
     let text = match n {
         0 => String::new(),
-        1 => "1 draft".into(),
-        n => format!("{n} drafts"),
+        n => format!("✎{n}"),
     };
-    Span::styled(format!("{text:<8} "), Style::new().fg(Color::Magenta))
+    Span::styled(format!("{text:<3} "), Style::new().fg(Color::Magenta))
 }
 
 /// A `held` queued review (`--manual-reviews`) waits until you start it.
@@ -1098,8 +1123,9 @@ fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
+    use sanic_core::state::{Approval, Checks};
     use sanic_core::{pr::PrKey, repo::RepoName};
-    use sanic_store::LatestRun;
+    use sanic_store::{LatestRun, ReviewState};
 
     use super::*;
 
@@ -1130,8 +1156,23 @@ mod tests {
             head_sha: "h1".into(),
             head_reviewers: vec![],
             chat_run: None,
+            state: PrState::default(),
             latest_run: None,
             pending_drafts: 0,
+        }
+    }
+
+    /// One of your PRs with nothing going on.
+    fn my(repo: &str, number: u32, title: &str) -> MyPr {
+        MyPr {
+            key: pr(repo, number),
+            title: title.into(),
+            is_draft: false,
+            archived: false,
+            review_state: ReviewState::Waiting,
+            pending_drafts: 0,
+            chat_run: None,
+            state: PrState::default(),
         }
     }
 
@@ -1140,12 +1181,20 @@ mod tests {
             owed: vec![
                 OwedReview {
                     latest_run: Some(latest("succeeded", None)),
+                    state: PrState {
+                        approval: Approval::Approved(Checks::Pending),
+                        unanswered: 0,
+                    },
                     pending_drafts: 3,
                     ..owed("org/api", 481, "Retry webhook deliveries", "alice")
                 },
                 owed("org/api", 490, "build(deps): bump tokio", "dependabot"),
                 OwedReview {
                     latest_run: Some(latest("queued", None)),
+                    state: PrState {
+                        approval: Approval::None,
+                        unanswered: 2,
+                    },
                     ..owed("org/web", 77, "Fix login flake", "bob")
                 },
                 owed("org/web", 78, "Bump serde", "dana"),
@@ -1159,31 +1208,23 @@ mod tests {
             ],
             mine: vec![
                 MyPr {
-                    key: pr("org/api", 470),
-                    title: "Speed up search".into(),
-                    is_draft: false,
-                    archived: false,
-                    review_state: ReviewState::ChangesRequested,
-                    pending_drafts: 0,
-                    chat_run: None,
+                    state: PrState {
+                        approval: Approval::ChangesRequested,
+                        unanswered: 1,
+                    },
+                    ..my("org/api", 470, "Speed up search")
                 },
                 MyPr {
-                    key: pr("org/web", 80),
-                    title: "New settings page".into(),
                     is_draft: true,
-                    archived: false,
-                    review_state: ReviewState::Waiting,
-                    pending_drafts: 0,
-                    chat_run: None,
+                    state: PrState {
+                        approval: Approval::Mergeable,
+                        unanswered: 0,
+                    },
+                    ..my("org/web", 80, "New settings page")
                 },
                 MyPr {
-                    key: pr("org/web", 60),
-                    title: "Abandoned experiment".into(),
-                    is_draft: false,
                     archived: true,
-                    review_state: ReviewState::Waiting,
-                    pending_drafts: 0,
-                    chat_run: None,
+                    ..my("org/web", 60, "Abandoned experiment")
                 },
             ],
             activity: vec![
@@ -1386,7 +1427,7 @@ mod tests {
         let row: String = (0..80)
             .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_owned())
             .collect();
-        assert!(row.starts_with("│skipped: draft "), "{row}");
+        assert!(row.starts_with("│—         skipped: draft "), "{row}");
     }
 
     #[test]
@@ -1415,6 +1456,9 @@ mod tests {
                 threads: vec![],
                 files: None,
                 updated_at: Some(updated.into()),
+                review_decision: None,
+                merge_state: None,
+                checks: None,
             };
             store.record(&snapshot, "p", &[]).unwrap();
         }

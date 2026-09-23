@@ -259,6 +259,7 @@ mod tests {
             head_sha: "h".into(),
             head_reviewers: vec![],
             chat_run: None,
+            state: sanic_core::state::PrState::default(),
             latest_run: None,
             pending_drafts: 0,
         }

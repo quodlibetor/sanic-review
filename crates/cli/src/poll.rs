@@ -456,6 +456,9 @@ mod tests {
             }],
             files: Some(files.iter().map(|f| (*f).into()).collect()),
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 
@@ -651,6 +654,8 @@ mod tests {
             author: "me".into(),
             body: "q".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            by_bot: false,
+            reacted_at: None,
         });
         let github = FakeGithub::default();
         github.prs.borrow_mut().insert(pr.clone(), snap.clone());
@@ -662,6 +667,8 @@ mod tests {
             author: "alice".into(),
             body: "a".into(),
             created_at: "2026-01-02T00:00:00Z".into(),
+            by_bot: false,
+            reacted_at: None,
         });
         poller.github.prs.borrow_mut().insert(pr.clone(), snap);
         let triggers = poller.refresh(&pr).await.unwrap().unwrap().triggers;
