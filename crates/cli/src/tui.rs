@@ -683,7 +683,25 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let pane = Pane::Mine.frame(*focus, &title("Your PRs", rows.len(), archived));
     pane.render(frame, mine, rows, mine_state, "No open PRs of yours.");
 
-    let rows: Vec<_> = overview.activity.iter().map(activity_row).collect();
+    let events = &overview.activity;
+    let rows: Vec<_> = events
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            // Newest first: a held review is one nothing newer for its PR
+            // has started or finished, so history from runs that went ahead
+            // still reads "queued".
+            let held = *manual_reviews
+                && !events[..i].iter().any(|newer| {
+                    newer.key == a.key
+                        && matches!(
+                            newer.kind,
+                            ActivityKind::RunStarted | ActivityKind::RunFinished { .. }
+                        )
+                });
+            activity_row(a, held)
+        })
+        .collect();
     let pane = Pane::Activity.frame(*focus, "Activity");
     pane.render(frame, activity, rows, activity_state, "Nothing yet.");
 
@@ -853,9 +871,11 @@ fn drafts(n: u32) -> Span<'static> {
     Span::styled(format!("{text:<8} "), Style::new().fg(Color::Magenta))
 }
 
-fn activity_row(activity: &Activity) -> ListItem<'_> {
+/// A `held` queued review (`--manual-reviews`) waits until you start it.
+fn activity_row(activity: &Activity, held: bool) -> ListItem<'_> {
     let what = match &activity.kind {
         ActivityKind::Trigger(kind) => kind.replace('_', " "),
+        ActivityKind::RunQueued if held => "review held".into(),
         ActivityKind::RunQueued => "review queued".into(),
         ActivityKind::RunStarted => "review started".into(),
         ActivityKind::RunFinished { status, .. } if status == "succeeded" => {
@@ -1356,6 +1376,45 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 23)].symbol().to_owned())
             .collect();
         assert!(row.starts_with(" refreshing 37/264 "), "{row}");
+    }
+
+    #[test]
+    fn queued_reviews_read_as_held_under_manual_reviews() {
+        let queued = |manual: bool| {
+            let mut app = App::new(manual);
+            let mut overview = Overview::default();
+            overview.activity.push(Activity {
+                at: "2026-09-23T16:36:00.000Z".into(),
+                key: pr("org/web", 79),
+                kind: ActivityKind::RunQueued,
+            });
+            app.set_overview(overview);
+            draw(&mut app, 80, 16).backend().to_string()
+        };
+        assert!(queued(true).contains("review held "), "{}", queued(true));
+        assert!(
+            queued(false).contains("review queued "),
+            "{}",
+            queued(false)
+        );
+
+        // One that has since started isn't held.
+        let mut app = App::new(true);
+        let mut overview = Overview::default();
+        for (at, kind) in [
+            ("2026-09-23T16:37:00.000Z", ActivityKind::RunStarted),
+            ("2026-09-23T16:36:00.000Z", ActivityKind::RunQueued),
+        ] {
+            overview.activity.push(Activity {
+                at: at.into(),
+                key: pr("org/web", 79),
+                kind,
+            });
+        }
+        app.set_overview(overview);
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(screen.contains("review queued "), "{screen}");
+        assert!(!screen.contains("review held "), "{screen}");
     }
 
     #[test]

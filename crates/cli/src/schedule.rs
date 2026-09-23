@@ -173,14 +173,16 @@ impl Debouncer {
 
 /// Debounces `updates` and sends each run the store accepts to `runs`,
 /// publishing pending reviews' due times to `due`. A PR `skips` rules out
-/// when its review comes due is logged and not queued. Returns when
-/// `updates` closes.
+/// when its review comes due is logged and not queued. With `manual`
+/// (`--manual-reviews`), what `runs` receives is held, and it says so
+/// itself. Returns when `updates` closes.
 pub async fn schedule(
     mut updates: mpsc::UnboundedReceiver<Update>,
     store: Arc<Mutex<Store>>,
     runs: mpsc::UnboundedSender<QueuedRun>,
     due: watch::Sender<DueTimes>,
     skips: watch::Receiver<SkipRules>,
+    manual: bool,
 ) -> Result<()> {
     let mut debouncer = Debouncer::default();
     loop {
@@ -220,7 +222,11 @@ pub async fn schedule(
                     let queued = store.queue_review(&request);
                     match queued {
                         Ok(Some(run)) => {
-                            info!(url = %request.key.url(), run = run.id, "review queued");
+                            if manual {
+                                debug!(url = %request.key.url(), run = run.id, "review queued");
+                            } else {
+                                info!(url = %request.key.url(), run = run.id, "review queued");
+                            }
                             if runs.send(run).is_err() {
                                 return Ok(());
                             }
@@ -465,7 +471,7 @@ mod tests {
         let (runs_tx, mut runs) = mpsc::unbounded_channel();
         let (due_tx, due) = watch::channel(DueTimes::new());
         let (_skips_tx, skips) = watch::channel(SkipRules::default());
-        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips, false));
         let start = Instant::now();
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -509,7 +515,7 @@ mod tests {
             config.skip_rules()
         };
         let (skips_tx, skips) = watch::channel(skipping("t*"));
-        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips, false));
 
         // The stored title is "t".
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -538,7 +544,14 @@ mod tests {
             .unwrap()
             .record(&draft, "default", &[])
             .unwrap();
-        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(
+            rx,
+            Arc::clone(&store),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+        ));
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(QUIET * 2).await;
@@ -568,7 +581,7 @@ mod tests {
         let (_skips_tx, skips) = watch::channel(SkipRules::default());
         let store = store();
         store.lock().unwrap().set_archived(&key(1), true).unwrap();
-        let task = tokio::spawn(schedule(rx, store, runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(rx, store, runs_tx, due_tx, skips, false));
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(QUIET * 2).await;
         drop(tx);
@@ -596,7 +609,14 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(
+            rx,
+            Arc::clone(&store),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+        ));
 
         // The restart's standing request for the same head.
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -636,7 +656,14 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+        let task = tokio::spawn(schedule(
+            rx,
+            Arc::clone(&store),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+        ));
 
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
         tokio::task::yield_now().await;

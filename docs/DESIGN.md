@@ -35,7 +35,9 @@ no separate daemon mode.
 holds them: nothing runs until you start it, so you can look before
 spending anything. You start one review at a time, with `r` in the TUI or
 `sanic-review review <PR url>`, and just that one runs, now. Held reviews
-stay queued and run on the next start without the flag.
+stay queued and run on the next start without the flag. Under the flag the
+log and the TUI's Activity pane say "review held" where they'd otherwise
+say "review queued", since nothing will run until you start it.
 
 `sanic-review review <PR url>` asks the running `serve` to review a PR now:
 its held review, or else a full review of its current head, subject to the
