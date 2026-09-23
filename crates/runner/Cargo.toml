@@ -1,0 +1,9 @@
+[package]
+name = "sanic-runner"
+description = "Claude invocation and jj/git checkouts."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

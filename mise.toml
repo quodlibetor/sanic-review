@@ -1,0 +1,33 @@
+[tools]
+rust = { version = "1.98.1", components = "clippy,rustfmt,llvm-tools-preview" }
+cargo-deny = "0.20.2"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.146"
+"aqua:taiki-e/cargo-llvm-cov" = "0.9.1"
+cargo-insta = "1.48.0"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+description = "Run clippy with warnings as errors"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.deny]
+description = "Check advisories, licenses, bans and sources"
+run = "cargo deny --locked check"
+
+[tasks.test]
+description = "Run unit, integration and doc tests"
+run = [
+  "cargo nextest run --workspace --locked",
+  "cargo test --workspace --doc --locked",
+]
+
+[tasks.coverage]
+description = "Report test coverage (informational, not part of check)"
+run = "cargo llvm-cov nextest --workspace --locked"
+
+[tasks.check]
+description = "The gate every change must pass"
+depends = ["fmt", "lint", "deny", "test"]
