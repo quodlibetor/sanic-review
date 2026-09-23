@@ -4,6 +4,12 @@ description = "Human-guided LLM review of GitHub PRs."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# publish = false would otherwise keep dist from building it.
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 clap.workspace = true

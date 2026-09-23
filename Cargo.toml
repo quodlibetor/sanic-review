@@ -6,6 +6,8 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 publish = false
+repository = "https://github.com/quodlibetor/sanic-review"
+homepage = "https://github.com/quodlibetor/sanic-review"
 
 [workspace.dependencies]
 sanic-core = { path = "crates/core" }
@@ -53,3 +55,8 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

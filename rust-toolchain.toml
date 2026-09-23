@@ -1,0 +1,11 @@
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt", "llvm-tools"]
+# The release targets, so a cross build such as x86_64 macOS on the arm64
+# runner doesn't depend on dist adding the target.
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]

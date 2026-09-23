@@ -800,9 +800,11 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
 
 ### Tooling
 
-- `mise.toml` pins every tool: `rust` (with `clippy` and `rustfmt`),
-  `cargo-deny`, `cargo-nextest`, `cargo-llvm-cov`, `cargo-insta`. There is no
-  `rust-toolchain.toml`.
+- `rust-toolchain.toml` pins Rust (with `clippy` and `rustfmt`). mise reads
+  it as Rust's version file, and rustup reads it directly, so local builds,
+  `check` CI and release builds use the same toolchain.
+- `mise.toml` pins every other tool: `cargo-deny`, `cargo-nextest`,
+  `cargo-llvm-cov`, `cargo-insta`, `dist`.
 - mise is also the task runner:
 
   | Task | Runs |
@@ -818,6 +820,47 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   `CLAUDE.md`, because jj has no commit hooks. In CI, a GitHub Actions
   workflow in `quodlibetor/sanic-review` runs the same `mise run check` on
   each push and PR.
+
+### Releases
+
+Pushing a version tag such as `v0.1.0` runs `.github/workflows/release.yml`,
+which builds the `sanic-review` binary, creates a GitHub Release, and pushes
+a formula to the `quodlibetor/homebrew-tap` tap.
+
+- [dist](https://github.com/axodotdev/cargo-dist) generates the workflow from
+  `dist-workspace.toml`. Don't edit `release.yml` by hand: change the config
+  and run `dist generate`. `dist plan` shows what a release would build.
+- The version comes from `[workspace.package]` in `Cargo.toml` and must match
+  the tag.
+- Targets are macOS and Linux (glibc), each on arm64 and x86_64. Linux builds
+  run on Ubuntu 22.04 so the binaries run on Debian 12, Ubuntu 22.04 and
+  newer. The x86_64 macOS binary is cross-compiled on the arm64 macOS runner.
+  Runners are pinned in `dist-workspace.toml` rather than following GitHub's
+  `-latest` labels.
+- Actions in the workflow are pinned to commit SHAs through
+  `github-action-commits`. Binaries get GitHub artifact attestations, so
+  `gh attestation verify <file> --repo quodlibetor/sanic-review` checks a
+  download. `cargo-auditable` is off, since dist installs it unpinned.
+- The crates stay unpublished. The binary crate opts back in to dist with
+  `[package.metadata.dist] dist = true`, since `publish = false` would
+  otherwise exclude it.
+- The tap job pushes with the `HOMEBREW_TAP_TOKEN` repository secret: a token
+  with write access to `quodlibetor/homebrew-tap`'s contents.
+- macOS binaries aren't signed or notarized.
+
+Installing:
+
+```sh
+brew install quodlibetor/tap/sanic-review
+# or
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/quodlibetor/sanic-review/releases/latest/download/sanic-review-installer.sh | sh
+# or
+cargo binstall --git https://github.com/quodlibetor/sanic-review sanic-review
+```
+
+Homebrew and the installer script don't set macOS's quarantine flag. A
+tarball downloaded with a browser does, and Gatekeeper then refuses the
+unsigned binary; clear it with `xattr -d com.apple.quarantine sanic-review`.
 
 ### Cargo workspace
 
