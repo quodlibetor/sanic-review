@@ -108,7 +108,7 @@ impl ReviewRunner {
         tokio::fs::create_dir_all(&run_dir)
             .await
             .wrap_err_with(|| format!("creating {}", run_dir.display()))?;
-        let dest = self.data_dir.join("worktrees").join(run.id.to_string());
+        let dest = self.worktree_path(run);
         let worktree = self
             .mirrors
             .checkout(
@@ -128,6 +128,19 @@ impl ReviewRunner {
         };
         worktree.remove().await;
         result.transpose()
+    }
+
+    /// Removes `run`'s worktree when [`ReviewRunner::review`] didn't get to,
+    /// because its task panicked.
+    pub async fn discard_worktree(&self, run: &QueuedRun) {
+        let path = self.worktree_path(run);
+        self.mirrors
+            .remove_worktree(&run.request.key.repo, &path)
+            .await;
+    }
+
+    fn worktree_path(&self, run: &QueuedRun) -> PathBuf {
+        self.data_dir.join("worktrees").join(run.id.to_string())
     }
 
     async fn review_in(

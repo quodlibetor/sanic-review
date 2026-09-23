@@ -17,8 +17,13 @@ use std::{
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    DefaultTerminal, Frame, Terminal,
+    backend::CrosstermBackend,
+    crossterm::{
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        execute,
+        terminal::{EnterAlternateScreen, enable_raw_mode},
+    },
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
@@ -47,7 +52,7 @@ impl Tui {
     /// Takes over the terminal. `db` must already be migrated.
     pub fn start(db: &Path, me: String, no_reviews: bool, logs: LogLines) -> Result<Self> {
         let store = Store::open_read_only(db)?;
-        let mut terminal = ratatui::try_init().wrap_err("starting the terminal UI")?;
+        let mut terminal = init_terminal().wrap_err("starting the terminal UI")?;
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, done) = oneshot::channel();
         let thread = std::thread::Builder::new().name("tui".into()).spawn({
@@ -78,6 +83,30 @@ impl Tui {
             .await
             .unwrap_or_else(|_| Err(eyre!("the terminal UI stopped unexpectedly")))
     }
+}
+
+/// Like [`ratatui::try_init`], but a panic on a runtime worker thread
+/// leaves the terminal alone: the worker records a panicking review as
+/// crashed and `serve` carries on.
+fn init_terminal() -> std::io::Result<DefaultTerminal> {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if matches!(std::thread::current().name(), Some("main" | "tui")) {
+            ratatui::restore();
+            previous(info);
+        } else {
+            // Printing it would corrupt the screen; the log pane shows it,
+            // under the span of whatever panicked.
+            tracing::error!("{info}");
+        }
+    }));
+    let started = enable_raw_mode()
+        .and_then(|()| execute!(std::io::stdout(), EnterAlternateScreen))
+        .and_then(|()| Terminal::new(CrosstermBackend::new(std::io::stdout())));
+    if started.is_err() {
+        ratatui::restore();
+    }
+    started
 }
 
 impl Drop for Tui {
