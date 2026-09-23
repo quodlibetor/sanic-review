@@ -27,6 +27,15 @@ const DEFAULT_GIT_URL: &str = "https://github.com";
 const DEFAULT_CLAUDE: &str = "claude";
 const DEFAULT_MAX_RUNS: usize = 2;
 const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
+/// The `model` value that leaves the choice to `claude`, which then uses your
+/// own default model at run time.
+/// Matched ignoring case; setup writes it lowercase.
+pub const AUTO_MODEL: &str = "auto";
+
+#[must_use]
+pub fn is_auto_model(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case(AUTO_MODEL)
+}
 
 /// The version control system backing a local checkout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +142,8 @@ pub struct Profile {
     pub name: String,
     pub instructions: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
+    /// The profile's own `model`, or else `runner.model`. `None` is
+    /// [`AUTO_MODEL`]: `claude` gets no `--model`.
     pub model: Option<String>,
     pub auto_fix: bool,
     pub targets: Vec<Target>,
@@ -324,11 +335,13 @@ impl Config {
             .map(|p| paths.expand(p))
             .collect::<Result<_>>()
             .wrap_err("in `runner.read_paths`")?;
+        // Folded into each profile, which is all a run reads.
+        let default_model = resolve_model(raw.runner.model, None).wrap_err("in `runner.model`")?;
         let profiles = raw
             .profile
             .into_iter()
             .map(|(name, p)| {
-                resolve_profile(&name, p, &paths, resolver)
+                resolve_profile(&name, p, &paths, resolver, default_model.as_deref())
                     .wrap_err_with(|| format!("in profile `{name}`"))
             })
             .collect::<Result<_>>()?;
@@ -440,6 +453,7 @@ fn resolve_profile(
     raw: RawProfile,
     paths: &PathContext<'_>,
     resolver: &dyn CheckoutResolver,
+    default_model: Option<&str>,
 ) -> Result<Profile> {
     if raw.repos.is_empty() {
         return Err(eyre!("`repos` is empty"))
@@ -460,10 +474,24 @@ fn resolve_profile(
         name: name.into(),
         instructions: expand_all(&raw.instructions)?,
         skills: expand_all(&raw.skills)?,
-        model: raw.model,
+        model: resolve_model(raw.model, default_model)?,
         auto_fix: raw.auto_fix,
         targets,
     })
+}
+
+/// `default` when unset. [`AUTO_MODEL`] resolves to `None`, even over a
+/// named default.
+fn resolve_model(raw: Option<String>, default: Option<&str>) -> Result<Option<String>> {
+    let Some(model) = raw else {
+        return Ok(default.map(String::from));
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(eyre!("`model` is empty"))
+            .suggestion(format!("use \"{AUTO_MODEL}\" for your Claude default"));
+    }
+    Ok((!is_auto_model(model)).then(|| model.to_owned()))
 }
 
 const TARGET_SHAPE: &str = "expected a checkout path, `{ repo = \"<path>\", paths = [...], remote = \"...\" }`, \
@@ -580,6 +608,7 @@ struct RawRunner {
     timeout_secs: Option<u64>,
     #[serde(default)]
     read_paths: Vec<String>,
+    model: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -791,6 +820,69 @@ mod tests {
                 "/base/extra".into()
             ]
         );
+    }
+
+    #[test]
+    fn runner_model_is_the_default_and_profiles_override_it() {
+        let config = parse(
+            r#"
+            [runner]
+            model = "claude-sonnet-5"
+            [profile.own]
+            model = "claude-opus-5-5"
+            repos = [{ github = "a/b" }]
+            [profile.inherits]
+            repos = [{ github = "c/d" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(config.profiles[1].model.as_deref(), Some("claude-sonnet-5"));
+        let unset = parse("[profile.p]\nrepos = [{ github = \"a/b\" }]").unwrap();
+        assert_eq!(
+            unset.profiles[0].model, None,
+            "unset leaves claude's default"
+        );
+    }
+
+    #[test]
+    fn auto_model_means_claudes_default_and_overrides_runner_model() {
+        let config = parse(
+            r#"
+            [runner]
+            model = "claude-sonnet-5"
+            [profile.auto]
+            model = "Auto"
+            repos = [{ github = "a/b" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles[0].model, None);
+        let config = parse(
+            r#"
+            [runner]
+            model = "AUTO"
+            [profile.inherits]
+            repos = [{ github = "a/b" }]
+            [profile.own]
+            model = "claude-opus-5-5"
+            repos = [{ github = "c/d" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles[0].model, None);
+        assert_eq!(config.profiles[1].model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn empty_model_is_an_error() {
+        for text in [
+            "[runner]\nmodel = \" \"\n[profile.p]\nrepos = [{ github = \"a/b\" }]",
+            "[profile.p]\nmodel = \"\"\nrepos = [{ github = \"a/b\" }]",
+        ] {
+            let err = parse(text).unwrap_err();
+            assert!(format!("{err:?}").contains("`model` is empty"), "{err:?}");
+        }
     }
 
     #[test]

@@ -22,12 +22,17 @@ pub struct Selections {
     pub orgs: Vec<(String, bool)>,
     /// Profile that newly selected orgs are added to.
     pub org_profile: String,
+    /// Written to `runner.model`; `None` leaves it as it is.
+    pub model: Option<String>,
 }
 
 /// Rewrites `doc` to match `sel`. `base` is the config file's directory.
 pub fn apply(doc: &mut DocumentMut, sel: &Selections, base: &Path) -> Result<()> {
     if !sel.teams.is_empty() {
-        set_teams(doc, &sel.teams);
+        set_teams(doc, &sel.teams)?;
+    }
+    if let Some(model) = &sel.model {
+        set_value(doc, "runner", "model", model.as_str().into())?;
     }
 
     let repo_selected = |p: &Path| sel.repos.iter().find(|(r, _)| r == p).map(|(_, on)| *on);
@@ -92,7 +97,7 @@ pub fn apply(doc: &mut DocumentMut, sel: &Selections, base: &Path) -> Result<()>
 
 /// `["*"]` plus an exclusion per deselected team, so teams you join later
 /// count until you exclude them.
-fn set_teams(doc: &mut DocumentMut, teams: &[(TeamRef, bool)]) {
+fn set_teams(doc: &mut DocumentMut, teams: &[(TeamRef, bool)]) -> Result<()> {
     let mut patterns = Array::new();
     patterns.push("*");
     for (team, on) in teams {
@@ -100,10 +105,23 @@ fn set_teams(doc: &mut DocumentMut, teams: &[(TeamRef, bool)]) {
             patterns.push(format!("!{team}"));
         }
     }
-    let table = doc
-        .entry("review_requests")
-        .or_insert_with(|| Item::Table(new_table()));
-    table["teams"] = Item::Value(Value::Array(patterns));
+    set_value(doc, "review_requests", "teams", Value::Array(patterns))
+}
+
+/// Sets `[table].key`, creating the table as needed. A replaced value keeps
+/// its surrounding whitespace and trailing comment.
+fn set_value(doc: &mut DocumentMut, table: &str, key: &str, mut value: Value) -> Result<()> {
+    let item = doc.entry(table).or_insert_with(|| Item::Table(new_table()));
+    let Some(item) = item.as_table_like_mut() else {
+        bail!("`{table}` in the config is not a table");
+    };
+    if let Some(old) = item.get_mut(key).and_then(Item::as_value_mut) {
+        *value.decor_mut() = old.decor().clone();
+        *old = value;
+    } else {
+        item.insert(key, Item::Value(value));
+    }
+    Ok(())
 }
 
 enum Entry {
@@ -276,6 +294,34 @@ repos = [{ github = "gone-org" }]
             };
             assert_eq!(apply_to(text, &sel), text, "selected: {on}");
         }
+    }
+
+    #[test]
+    fn model_is_set_replaced_and_kept() {
+        let set = |model: Option<&str>| Selections {
+            model: model.map(String::from),
+            ..Selections::default()
+        };
+        let base = "[profile.p]\nrepos = [\"/x\"]\n";
+        let with = apply_to(base, &set(Some("claude-sonnet-5")));
+        assert!(
+            with.contains("[runner]\nmodel = \"claude-sonnet-5\""),
+            "{with}"
+        );
+        let auto = apply_to(&with, &set(Some("auto")));
+        assert!(auto.contains("model = \"auto\""), "{auto}");
+        assert!(!auto.contains("sonnet"), "{auto}");
+        assert_eq!(apply_to(&with, &set(None)), with);
+        assert_eq!(apply_to(base, &set(None)), base);
+
+        let commented = "[runner]\nmodel = \"m\"  # mine\n";
+        assert_eq!(
+            apply_to(commented, &set(Some("n"))),
+            "[runner]\nmodel = \"n\"  # mine\n"
+        );
+        let mut doc: DocumentMut = "runner = \"x\"\n".parse().unwrap();
+        let err = apply(&mut doc, &set(Some("n")), Path::new(BASE)).unwrap_err();
+        assert!(err.to_string().contains("not a table"), "{err}");
     }
 
     #[test]
