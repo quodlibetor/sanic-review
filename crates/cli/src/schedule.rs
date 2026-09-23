@@ -334,6 +334,7 @@ mod tests {
         PrSnapshot {
             key: key(1),
             title: "t".into(),
+            body: String::new(),
             url: "u".into(),
             author: author.into(),
             head_sha: "h1".into(),

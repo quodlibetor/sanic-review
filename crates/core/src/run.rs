@@ -75,6 +75,8 @@ impl ReviewRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrContext {
     pub title: String,
+    /// The PR description.
+    pub body: String,
     pub url: String,
     pub author: String,
     pub threads: Vec<Thread>,
