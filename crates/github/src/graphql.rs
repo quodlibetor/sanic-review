@@ -17,6 +17,8 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       number title body url isDraft state headRefOid baseRefOid updatedAt
+      reviewDecision mergeStateStatus
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       author { login }
       reviewRequests(first: 100) {
         nodes {
@@ -33,7 +35,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
       comments(last: 100) {
         pageInfo { hasPreviousPage }
-        nodes { id author { login } body createdAt }
+        nodes { ...comment reactions(last: 20) { nodes { createdAt user { login } } } }
       }
       reviewThreads(last: 100) {
         pageInfo { hasPreviousPage }
@@ -41,12 +43,20 @@ query($owner: String!, $name: String!, $number: Int!) {
           id path line isResolved
           comments(last: 100) {
             pageInfo { hasPreviousPage }
-            nodes { id author { login } body createdAt }
+            nodes { ...comment }
           }
         }
       }
     }
   }
+}
+
+# Your reaction answers a comment. `reactionGroups` says whether for free;
+# the reactions themselves say when, but on every thread comment they'd
+# double the query's rate-limit cost, so only the conversation gets them.
+fragment comment on Comment {
+  id author { __typename login } body createdAt
+  ... on Reactable { reactionGroups { viewerHasReacted } }
 }";
 
 const SEARCH_QUERY: &str = r"
@@ -388,6 +398,12 @@ struct RawPr {
     // Always sent by GitHub; hand-written mocks may omit it.
     #[serde(default)]
     updated_at: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    commits: Option<RawCommits>,
     author: Option<Login>,
     review_requests: Connection<RawReviewRequest>,
     reviews: Connection<RawReview>,
@@ -438,9 +454,49 @@ struct RawCommit {
 #[serde(rename_all = "camelCase")]
 struct RawComment {
     id: String,
-    author: Option<Login>,
+    author: Option<RawAuthor>,
     body: String,
     created_at: String,
+    // Always asked for; hand-written mocks may omit it.
+    #[serde(default)]
+    reaction_groups: Vec<RawReactionGroup>,
+    /// Only asked for on conversation comments.
+    #[serde(default)]
+    reactions: Option<Connection<RawReaction>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawReactionGroup {
+    viewer_has_reacted: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawReaction {
+    created_at: Option<String>,
+    user: Option<Login>,
+}
+
+#[derive(Deserialize)]
+struct RawCommits {
+    nodes: Vec<RawCommitNode>,
+}
+
+#[derive(Deserialize)]
+struct RawCommitNode {
+    commit: RawHeadCommit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHeadCommit {
+    status_check_rollup: Option<RawRollup>,
+}
+
+#[derive(Deserialize)]
+struct RawRollup {
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -453,13 +509,43 @@ struct RawThread {
     comments: Connection<RawComment>,
 }
 
-impl From<RawComment> for Comment {
-    fn from(raw: RawComment) -> Self {
-        Self {
-            id: raw.id,
-            author: login(raw.author),
-            body: raw.body,
-            created_at: raw.created_at,
+/// GitHub Apps are `Bot`s; `[bot]` also catches accounts whose type isn't
+/// sent, as in hand-written mocks.
+fn is_bot(author: Option<&RawAuthor>) -> bool {
+    author.is_some_and(|a| a.kind.as_deref() == Some("Bot") || a.login.ends_with("[bot]"))
+}
+
+impl RawComment {
+    fn into_comment(self, me: &str) -> Comment {
+        let by_bot = is_bot(self.author.as_ref());
+        let created_at = self.created_at;
+        let reacted_at = self
+            .reactions
+            .map(|r| r.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| {
+                r.user
+                    .as_ref()
+                    .is_some_and(|u| u.login.eq_ignore_ascii_case(me))
+            })
+            .map(|r| r.created_at.unwrap_or_else(|| created_at.clone()))
+            .max()
+            // The token is yours, so the viewer's reaction is yours; when
+            // is unknown, so the comment's time stands in.
+            .or_else(|| {
+                self.reaction_groups
+                    .iter()
+                    .any(|g| g.viewer_has_reacted)
+                    .then(|| created_at.clone())
+            });
+        Comment {
+            id: self.id,
+            author: self.author.map_or_else(|| "ghost".into(), |a| a.login),
+            body: self.body,
+            created_at,
+            by_bot,
+            reacted_at,
         }
     }
 }
@@ -499,11 +585,7 @@ impl RawPr {
             .into_nodes("reviews", &key)
             .into_iter()
             .map(|r| {
-                // GitHub Apps are `Bot`s; `[bot]` also catches accounts
-                // whose type isn't sent, as in hand-written mocks.
-                let by_bot = r.author.as_ref().is_some_and(|a| {
-                    a.kind.as_deref() == Some("Bot") || a.login.ends_with("[bot]")
-                });
+                let by_bot = is_bot(r.author.as_ref());
                 Review {
                     state: review_state(&r.state),
                     id: r.id,
@@ -524,7 +606,7 @@ impl RawPr {
                 .comments
                 .into_nodes("conversation comments", &key)
                 .into_iter()
-                .map(Comment::from)
+                .map(|c| c.into_comment(me))
                 .collect(),
         }];
         for t in self.review_threads.into_nodes("review threads", &key) {
@@ -533,7 +615,7 @@ impl RawPr {
                     .comments
                     .into_nodes("thread comments", &key)
                     .into_iter()
-                    .map(Comment::from)
+                    .map(|c| c.into_comment(me))
                     .collect(),
                 id: t.id,
                 path: t.path,
@@ -555,6 +637,13 @@ impl RawPr {
             threads,
             files,
             updated_at: self.updated_at,
+            review_decision: self.review_decision,
+            merge_state: self.merge_state_status,
+            checks: self
+                .commits
+                .and_then(|c| c.nodes.into_iter().next())
+                .and_then(|n| n.commit.status_check_rollup)
+                .map(|r| r.state),
             key,
         }
     }

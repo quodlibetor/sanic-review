@@ -491,6 +491,9 @@ mod tests {
             threads: vec![],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
@@ -581,16 +584,10 @@ mod tests {
         newer_head_stops_older(2, 2).await;
     }
 
-    /// Sends the review of the first head `sends` times, then queues the
-    /// second head once the first is under way, and checks it stopped the
-    /// first.
-    async fn newer_head_stops_older(sends: usize, max_concurrent: usize) {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (base, first, second) = pushed_twice(&dir.path().join("github"));
-        // Hangs until killed when briefed on the first head; answers on any
-        // other.
-        let fake = dir.path().join("fake");
-        std::fs::create_dir(&fake).unwrap();
+    /// A fake `claude` in `fake` that hangs until killed when briefed on
+    /// `head`, and answers on any other.
+    fn hangs_on(fake: &Path, head: &str) -> PathBuf {
+        std::fs::create_dir(fake).unwrap();
         let answer = serde_json::json!({
             "type": "result", "subtype": "success", "is_error": false,
             "structured_output": {
@@ -603,7 +600,7 @@ mod tests {
             &script,
             format!(
                 "#!/bin/sh\nd='{}'\ncat > \"$d/stdin.$$\"\n\
-                 if grep -q {first} \"$d/stdin.$$\"; then touch \"$d/started\"; exec sleep 30; fi\n\
+                 if grep -q {head} \"$d/stdin.$$\"; then touch \"$d/started\"; exec sleep 30; fi\n\
                  cat \"$d/answer.jsonl\"\n",
                 fake.display()
             ),
@@ -611,6 +608,17 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
+        script
+    }
+
+    /// Sends the review of the first head `sends` times, then queues the
+    /// second head once the first is under way, and checks it stopped the
+    /// first.
+    async fn newer_head_stops_older(sends: usize, max_concurrent: usize) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (base, first, second) = pushed_twice(&dir.path().join("github"));
+        let fake = dir.path().join("fake");
+        let script = hangs_on(&fake, &first);
         let config = Config::parse(
             &format!(
                 "[github]\ngit_url = \"{}\"\n\
@@ -644,6 +652,9 @@ mod tests {
             threads: vec![],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
         let store = Arc::new(Mutex::new(store));

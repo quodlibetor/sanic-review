@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use color_eyre::eyre::Result;
 use rusqlite::{Row, params, types::Type};
-use sanic_core::{pr::PrKey, repo::RepoName};
+use sanic_core::{pr::PrKey, repo::RepoName, state::PrState};
 
 use crate::Store;
 
@@ -27,6 +27,8 @@ pub struct OwedReview {
     pub head_reviewers: Vec<String>,
     /// The latest run with an agent session to chat with.
     pub chat_run: Option<i64>,
+    /// Where it stands; see [`Store::pr_state`].
+    pub state: PrState,
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
@@ -50,6 +52,8 @@ pub struct MyPr {
     pub pending_drafts: u32,
     /// The latest run with an agent session to chat with.
     pub chat_run: Option<i64>,
+    /// Where it stands; see [`Store::pr_state`].
+    pub state: PrState,
 }
 
 /// Where reviewers stand on one of your PRs, from each reviewer's latest
@@ -126,11 +130,13 @@ impl Store {
                     head_sha: row.get(11)?,
                     head_reviewers: Vec::new(),
                     chat_run: row.get(12)?,
+                    state: PrState::default(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for pr in &mut owed {
             pr.head_reviewers = self.head_reviewers(&pr.key, &pr.head_sha)?;
+            pr.state = self.pr_state(&pr.key, me, false)?;
         }
         Ok(owed)
     }
@@ -166,6 +172,7 @@ impl Store {
                     Ok(MyPr {
                         review_state: self.review_state(&repo, number, me)?,
                         chat_run: self.latest_session_run(&key)?.map(|s| s.run.id),
+                        state: self.pr_state(&key, me, true)?,
                         key,
                         title,
                         is_draft,
@@ -297,6 +304,9 @@ mod tests {
             threads: vec![],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 
@@ -361,6 +371,7 @@ mod tests {
                 head_sha: "h1".into(),
                 head_reviewers: vec![],
                 chat_run: None,
+                state: PrState::default(),
                 latest_run: None,
                 pending_drafts: 0,
             }]
@@ -500,6 +511,51 @@ mod tests {
         assert_eq!(store.owed_reviews("me", None).unwrap().len(), 3);
         assert!(store.my_prs("me", since).unwrap().is_empty());
         assert_eq!(store.my_prs("me", None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prs_carry_their_state() {
+        use sanic_core::{
+            pr::{CONVERSATION_THREAD, Comment, Thread},
+            state::{Approval, PrState},
+        };
+        let comment = |author: &str, at: &str| Comment {
+            id: format!("{author}{at}"),
+            author: author.into(),
+            body: String::new(),
+            created_at: at.into(),
+            by_bot: false,
+            reacted_at: None,
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        let mut mine = snapshot(1, "me");
+        mine.review_decision = Some("APPROVED".into());
+        mine.merge_state = Some("CLEAN".into());
+        mine.threads = vec![Thread {
+            id: CONVERSATION_THREAD.into(),
+            path: None,
+            line: None,
+            resolved: false,
+            comments: vec![comment("bob", "2026-01-02T00:00:00Z")],
+        }];
+        let mut owed = snapshot(2, "alice");
+        owed.review_requested = true;
+        // Bob's question in a thread you haven't joined doesn't count here.
+        owed.threads = mine.threads.clone();
+        store.record(&mine, "default", &[]).unwrap();
+        store.record(&owed, "default", &[]).unwrap();
+
+        assert_eq!(
+            store.my_prs("me", None).unwrap()[0].state,
+            PrState {
+                approval: Approval::Mergeable,
+                unanswered: 1,
+            }
+        );
+        assert_eq!(
+            store.owed_reviews("me", None).unwrap()[0].state,
+            PrState::default()
+        );
     }
 
     #[test]

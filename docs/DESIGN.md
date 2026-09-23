@@ -503,8 +503,8 @@ embedded in the binary, so nothing is fetched at runtime.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
   TUI. Its only actions are rerunning a review, archiving a PR and adding
   a `skip_titles` pattern to the config.
-  - **Reviews you owe:** open PRs by others that request your review, with the
-    latest run's status (queued, held by `--manual-reviews`, running, drafted,
+  - **Reviews you owe:** open PRs by others that request your review, with
+    their PR state (below), then the latest run's status (queued, held by `--manual-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A review still waiting
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
@@ -515,12 +515,32 @@ embedded in the binary, so nothing is fetched at runtime.
     `sanic_core::skip::SkipRules::decide` makes that decision and
     `Skip::status` words it, for the TUI and the dashboard alike. A failed
     or crashed run also shows the first line of its error.
-  - **Your PRs:** every open PR you authored, with its review state
-    (approved, changes requested, waiting) and pending drafts.
+  - **Your PRs:** every open PR you authored, with its PR state (below)
+    and pending drafts.
   - **Activity:** recent triggers and run queues, starts and finishes, with
     the first line of the error for runs that failed or crashed.
   - **Log:** the tracing output.
 
+  **PR state** says where a PR stands, in words that combine:
+  - `mergeable`: approved and GitHub's `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`
+    (without one, or while it's `UNKNOWN`, approved with passing checks);
+  - `approved`, when approved but not mergeable yet, with `ci failing` or
+    `ci pending` when that's why;
+  - `changes requested`;
+  - `N unanswered`: threads, the conversation counting as one, that aren't
+    resolved and have someone's comment newer than your latest answer.
+    Your own comment answers, and so does your emoji reaction to any comment
+    in the thread, as of the reaction's time; review threads only say
+    whether you reacted, not when, so the comment's time stands in. Bots'
+    comments never need an answer. On your own PRs every thread counts; on
+    reviews you owe, only threads you've commented in.
+
+  e.g. `approved · 2 unanswered`, or `—` when there's nothing to say.
+  Unanswered comments and changes requested are highlighted: you need to
+  act. Narrow columns shorten it (`approved · 2 new`, `2 new`).
+  `sanic_core::state::PrState` works it out and words it (`status()` in
+  full, `fitted(width)` to fit), for the TUI and the dashboard; the store's
+  `pr_state` fills it in for each listed PR.
   Every PR row shows its github.com URL, so it's clickable. Until the
   dashboard exists there are no dashboard URLs or `views`, so both PR panes
   list every open tracked PR updated within the window. Filtering to unseen items arrives with the

@@ -204,6 +204,9 @@ mod tests {
             threads: vec![],
             files: None,
             updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
         }
     }
 
@@ -213,6 +216,8 @@ mod tests {
             author: author.into(),
             body: "b".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            by_bot: false,
+            reacted_at: None,
         }
     }
 

@@ -93,6 +93,9 @@ fn snapshot(number: u32, author: &str, title: &str) -> PrSnapshot {
         threads: vec![],
         files: None,
         updated_at: None,
+        review_decision: None,
+        merge_state: None,
+        checks: None,
     }
 }
 
