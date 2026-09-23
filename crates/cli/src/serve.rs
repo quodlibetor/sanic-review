@@ -7,7 +7,7 @@
 //! debounces them into queued runs for the worker.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -37,7 +37,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
     ServeArgs, Ui, logging,
-    poll::{GithubApi, Poller, Refreshed},
+    poll::{GithubApi, Poller, Priority, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
     tui::{Request, Shared, Tui},
     watch::ConfigWatcher,
@@ -375,7 +375,7 @@ async fn poll_forever<G: GithubApi>(
     let mut next_reconcile = Instant::now();
     let mut next_notifications = Instant::now();
     // Survives across cycles so a rate limit doesn't drop queued PRs.
-    let mut pending: BTreeSet<PrKey> = BTreeSet::new();
+    let mut pending = RefreshQueue::default();
     // PRs refreshed since startup; the first refresh of each checks for a
     // standing review request.
     let mut seen: HashSet<PrKey> = HashSet::new();
@@ -399,7 +399,10 @@ async fn poll_forever<G: GithubApi>(
         if now >= next_reconcile {
             next_reconcile = now + reconcile_every;
             match poller.reconcile().instrument(info_span!("reconcile")).await {
-                Ok(keys) => pending.extend(keys),
+                Ok(found) => {
+                    pending.extend(found.requested, Priority::Requested);
+                    pending.extend(found.involved, Priority::Involved);
+                }
                 Err(err) => backoff = handle(err)?,
             }
         }
@@ -410,7 +413,7 @@ async fn poll_forever<G: GithubApi>(
                 .await
             {
                 Ok((keys, interval)) => {
-                    pending.extend(keys);
+                    pending.extend(keys, Priority::Notified);
                     next_notifications = now + interval.unwrap_or_default().max(min_notification);
                 }
                 Err(err) => {
@@ -422,7 +425,7 @@ async fn poll_forever<G: GithubApi>(
 
         let mut triggered = 0;
         while backoff.is_none()
-            && let Some(key) = pending.pop_first()
+            && let Some((key, priority)) = pending.pop()
         {
             match poller
                 .refresh(&key)
@@ -447,7 +450,7 @@ async fn poll_forever<G: GithubApi>(
                 }
                 Ok(None) => {}
                 Err(err @ (ApiError::RateLimited { .. } | ApiError::Unauthorized)) => {
-                    pending.insert(key);
+                    pending.push(key, priority);
                     backoff = handle(err)?;
                 }
                 Err(err) => {
