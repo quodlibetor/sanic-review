@@ -114,6 +114,9 @@ async fn serve_logs_a_review_request_and_reloads_config() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
         .arg("serve")
+        // The config uses the real `claude` and github.com; only the quiet
+        // period would otherwise keep a review from running.
+        .arg("--no-reviews")
         .arg("--config")
         .arg(&config)
         .arg("--data-dir")

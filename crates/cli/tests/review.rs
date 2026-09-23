@@ -205,8 +205,13 @@ impl World {
     /// Runs `serve` until it prints a line containing `needle`, then kills
     /// it and returns that line.
     async fn serve_until(&self, needle: &'static str) -> String {
+        self.serve_with_until(&[], needle).await
+    }
+
+    async fn serve_with_until(&self, extra: &[&str], needle: &'static str) -> String {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
             .arg("serve")
+            .args(extra)
             .arg("--config")
             .arg(&self.config)
             .arg("--data-dir")
@@ -298,4 +303,23 @@ async fn a_request_debounced_across_a_restart_is_still_reviewed() {
     // Once reviewed, another restart doesn't review the same head again.
     w.serve_until("already reviewed").await;
     assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_reviews_queues_without_running_until_a_normal_start() {
+    let w = world().await;
+    let line = w
+        .serve_with_until(&["--no-reviews"], "review queued, not run")
+        .await;
+    assert!(line.contains("org/repo#7"), "{line}");
+    assert!(
+        !w.fake.join("env").exists(),
+        "claude ran despite --no-reviews"
+    );
+    let store = Store::open(&w.data.join("state.db")).unwrap();
+    assert_eq!(store.run_counts().unwrap().queued, 1);
+
+    // Held runs are still queued, so a normal start runs them.
+    w.serve_until("drafted").await;
+    assert!(w.fake.join("env").exists());
 }
