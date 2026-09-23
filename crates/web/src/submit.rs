@@ -1,6 +1,8 @@
 //! Submitting a review: a preview of the exact payload, then, only when
 //! you confirm, the one GitHub write.
 
+use std::fmt::Write as _;
+
 use axum::{
     Form,
     extract::{Path, Query, State},
@@ -75,7 +77,20 @@ pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result
         if let Some(comment) = inline(draft) {
             comments.push(comment);
         } else {
-            sections.push(format!("**{}**\n\n{}", pr::anchor(draft), draft.body()));
+            let anchor = pr::anchor(draft);
+            let heading = match blob_link(draft, &run.head_sha) {
+                // Brackets in a path would end the link text early, and a
+                // backslash before one would undo its escape.
+                Some(url) => format!(
+                    "[{}]({url})",
+                    anchor
+                        .replace('\\', "\\\\")
+                        .replace('[', "\\[")
+                        .replace(']', "\\]")
+                ),
+                None => anchor,
+            };
+            sections.push(format!("**{heading}**\n\n{}", draft.body()));
             in_body += 1;
         }
     }
@@ -94,6 +109,41 @@ pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result
         in_body,
         replies: accepted().filter(|d| d.kind == "reply").count(),
     })
+}
+
+/// A link to `draft`'s lines in the file at `head`, so a comment that
+/// can't go inline still points at them. `None` without a path and line,
+/// or for lines of the old file, which `head` doesn't have. `plain=1`, or
+/// GitHub shows a Markdown file rendered, without its lines.
+fn blob_link(draft: &DraftRow, head: &str) -> Option<String> {
+    let (path, line) = (draft.path.as_deref()?, draft.line?);
+    if draft.side.as_deref() == Some("LEFT") {
+        return None;
+    }
+    let path: Vec<String> = path.split('/').map(percent_encode).collect();
+    let lines = match draft.start_line {
+        Some(start) if start != line => format!("L{start}-L{line}"),
+        _ => format!("L{line}"),
+    };
+    Some(format!(
+        "https://github.com/{}/blob/{head}/{}?plain=1#{lines}",
+        draft.key.repo,
+        path.join("/")
+    ))
+}
+
+/// `segment` with everything but RFC 3986's unreserved characters
+/// percent-encoded, byte by byte.
+fn percent_encode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 /// `draft` as an inline comment, if GitHub will take it inline.
@@ -226,7 +276,8 @@ pub async fn preview(
         @if built.in_body > 0 {
             p.warn {
                 "Accepted comments that aren't on a line of the diff are in the body "
-                "instead of inline: " (built.in_body) "."
+                "instead of inline, each headed by a link to its lines at the reviewed "
+                "commit: " (built.in_body) "."
             }
         }
         @if built.replies > 0 {
@@ -381,4 +432,57 @@ pub async fn submit(
         }
     };
     Ok(page::layout(&app, Kind::Other, "Posted", &content).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use sanic_core::{pr::PrKey, repo::RepoName};
+
+    use super::*;
+
+    fn draft(path: Option<&str>, start: Option<u32>, line: Option<u32>, side: &str) -> DraftRow {
+        DraftRow {
+            id: 1,
+            run_id: 1,
+            key: PrKey {
+                repo: RepoName::new("Org", "Repo"),
+                number: 7,
+            },
+            kind: "comment".into(),
+            path: path.map(Into::into),
+            line,
+            start_line: start,
+            side: Some(side.into()),
+            severity: None,
+            confidence: None,
+            original_body: String::new(),
+            edited_body: None,
+            status: "accepted".into(),
+            unanchored: true,
+        }
+    }
+
+    #[test]
+    fn body_links_point_at_the_reviewed_commit() {
+        let link = |d: &DraftRow| blob_link(d, "abc123");
+        assert_eq!(
+            link(&draft(Some("src/lib.rs"), None, Some(4), "RIGHT")).as_deref(),
+            Some("https://github.com/org/repo/blob/abc123/src/lib.rs?plain=1#L4")
+        );
+        assert_eq!(
+            link(&draft(Some("src/lib.rs"), Some(2), Some(4), "RIGHT")).as_deref(),
+            Some("https://github.com/org/repo/blob/abc123/src/lib.rs?plain=1#L2-L4")
+        );
+        assert_eq!(
+            link(&draft(Some("docs/a b#c?é.md"), Some(4), Some(4), "RIGHT")).as_deref(),
+            Some("https://github.com/org/repo/blob/abc123/docs/a%20b%23c%3F%C3%A9.md?plain=1#L4")
+        );
+        // Lines of the old file aren't in the reviewed commit; no line, no link.
+        assert_eq!(
+            link(&draft(Some("src/lib.rs"), None, Some(4), "LEFT")),
+            None
+        );
+        assert_eq!(link(&draft(Some("src/lib.rs"), None, None, "RIGHT")), None);
+        assert_eq!(link(&draft(None, None, Some(4), "RIGHT")), None);
+    }
 }
