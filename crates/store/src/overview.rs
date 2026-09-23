@@ -14,6 +14,8 @@ use crate::Store;
 pub struct OwedReview {
     pub key: PrKey,
     pub title: String,
+    /// The PR description.
+    pub body: String,
     pub author: String,
     /// The profile it matched when last polled.
     pub profile: String,
@@ -84,7 +86,8 @@ impl Store {
             "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft, p.archived,
                     latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
+                     WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending'),
+                    p.body
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -106,6 +109,7 @@ impl Store {
                     archived: row.get(6)?,
                     latest_run: status.map(|status| LatestRun { status, error }),
                     pending_drafts: row.get(9)?,
+                    body: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -323,6 +327,7 @@ mod tests {
             [OwedReview {
                 key: requested.key.clone(),
                 title: "PR 2".into(),
+                body: String::new(),
                 author: "alice".into(),
                 profile: "default".into(),
                 is_draft: false,

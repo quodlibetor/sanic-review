@@ -1,6 +1,7 @@
 //! The `sanic-review` command line.
 
 mod archive;
+mod config_edit;
 pub mod logging;
 pub mod poll;
 pub mod schedule;

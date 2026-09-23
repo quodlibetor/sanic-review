@@ -300,6 +300,7 @@ impl Config {
         SkipRules {
             titles: self.review_requests.skip_titles.clone(),
             drafts: self.review_requests.skip_drafts,
+            profile_names: self.profiles.iter().map(|p| p.name.clone()).collect(),
             profiles: self
                 .profiles
                 .iter()

@@ -27,6 +27,7 @@ use sanic_runner::vcs::VcsResolver;
 use toml_edit::DocumentMut;
 
 use self::edit::{Selections, apply};
+use crate::config_edit::write_atomically;
 
 const MULTI_HELP: &str = "space: toggle · →: all · ←: none · type to filter · enter: done";
 const NEW_PROFILE: &str = "(new profile)";
@@ -387,17 +388,6 @@ fn print_diff(old: &str, new: &str, path: &Path) {
     let diff = similar::TextDiff::from_lines(old, new);
     let name = path.display().to_string();
     print!("{}", diff.unified_diff().header(&name, &name));
-}
-
-/// Writes via a temporary file and rename, so `serve` never reads a
-/// half-written config.
-fn write_atomically(path: &Path, text: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
-    }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).wrap_err_with(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).wrap_err_with(|| format!("replacing {}", path.display()))
 }
 
 #[cfg(test)]
