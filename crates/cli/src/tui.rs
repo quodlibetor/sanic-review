@@ -68,7 +68,7 @@ impl Tui {
         let thread = std::thread::Builder::new().name("tui".into()).spawn({
             let stop = Arc::clone(&stop);
             move || {
-                let mut app = App::new(shared.no_reviews);
+                let mut app = App::new(shared.manual_reviews);
                 let result = run(&mut terminal, &mut app, &store, &shared, &stop);
                 ratatui::restore();
                 let _ = tx.send(result);
@@ -132,8 +132,8 @@ impl Drop for Tui {
 pub struct Shared {
     /// The GitHub login everything is judged relative to.
     pub me: String,
-    /// `serve --no-reviews`.
-    pub no_reviews: bool,
+    /// `serve --manual-reviews`.
+    pub manual_reviews: bool,
     pub logs: LogLines,
     /// When the scheduler will queue each debounced review.
     pub due: watch::Receiver<DueTimes>,
@@ -305,8 +305,8 @@ pub struct App {
     logs: Vec<String>,
     /// Log lines dropped from the front of `logs` so far.
     logs_dropped: u64,
-    /// `serve --no-reviews`: queued reviews are held, not waiting their turn.
-    no_reviews: bool,
+    /// `serve --manual-reviews`: queued reviews are held, not waiting their turn.
+    manual_reviews: bool,
     focus: Pane,
     /// Per pane, by [`Pane::index`].
     lists: [ListState; 4],
@@ -323,12 +323,22 @@ pub struct App {
 enum Overlay {
     Help,
     Ignore(Box<IgnoreEditor>),
-    /// Waiting for a yes before asking for a review of this PR. `skipped`
-    /// says why it wouldn't be reviewed automatically, if it wouldn't.
+    /// Waiting for a yes before asking for a review of this PR now.
     ConfirmRerun {
         key: PrKey,
-        skipped: Option<&'static str>,
+        why: Why,
     },
+}
+
+/// Why a review may be started by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// The latest run failed or crashed.
+    Failed,
+    /// `--manual-reviews` is holding its queued review.
+    Held,
+    /// It isn't reviewed automatically, for this [`Skip::label`].
+    Skipped(&'static str),
 }
 
 /// What the loop does after a key.
@@ -359,13 +369,13 @@ pub enum Request {
 
 impl App {
     #[must_use]
-    pub fn new(no_reviews: bool) -> Self {
+    pub fn new(manual_reviews: bool) -> Self {
         Self {
             loaded: Overview::default(),
             overview: Overview::default(),
             logs: Vec::new(),
             logs_dropped: 0,
-            no_reviews,
+            manual_reviews,
             focus: Pane::Owed,
             lists: Default::default(),
             follow_log: true,
@@ -492,7 +502,7 @@ impl App {
     }
 
     /// Asks to confirm a review of the selected PR you owe, if its latest
-    /// run failed or crashed, or it's skipped or archived.
+    /// run failed or crashed, it's held, or it's skipped or archived.
     fn ask_rerun(&mut self) {
         let selected = self.lists[Pane::Owed.index()]
             .selected()
@@ -507,18 +517,20 @@ impl App {
         } else {
             self.overview.skipped.get(&pr.key).map(Skip::label)
         };
-        let failed = pr
-            .latest_run
-            .as_ref()
-            .is_some_and(|run| matches!(run.status.as_str(), "failed" | "crashed"));
-        if failed || skipped.is_some() {
-            self.overlay = Some(Overlay::ConfirmRerun {
-                key: pr.key.clone(),
-                skipped,
-            });
-        } else {
-            self.notice = Some(RERUN_HINT.into());
-        }
+        let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
+        let why = match (skipped, status) {
+            (Some(label), _) => Why::Skipped(label),
+            (None, Some("failed" | "crashed")) => Why::Failed,
+            (None, Some("queued")) if self.manual_reviews => Why::Held,
+            _ => {
+                self.notice = Some(RERUN_HINT.into());
+                return;
+            }
+        };
+        self.overlay = Some(Overlay::ConfirmRerun {
+            key: pr.key.clone(),
+            why,
+        });
     }
 
     /// Opens the ignore editor on the selected review you owe.
@@ -605,7 +617,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let App {
         overview,
         logs,
-        no_reviews,
+        manual_reviews,
         focus,
         lists,
         follow_log,
@@ -628,7 +640,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let rows: Vec<_> = overview
         .owed
         .iter()
-        .map(|pr| owed_row(pr, overview, *no_reviews))
+        .map(|pr| owed_row(pr, overview, *manual_reviews))
         .collect();
     let archived = loaded.owed.iter().filter(|pr| pr.archived).count();
     let pane = Pane::Owed.frame(*focus, &title("Reviews you owe", rows.len(), archived));
@@ -654,13 +666,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         frame,
         status,
         &overview.counts,
-        *no_reviews,
+        *manual_reviews,
         notice.as_deref(),
     );
     match overlay {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
-        Some(Overlay::ConfirmRerun { key, skipped }) => render_confirm(frame, key, *skipped),
+        Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, *why),
         None => {}
     }
 }
@@ -711,13 +723,13 @@ impl PaneFrame<'_> {
     }
 }
 
-const RERUN_HINT: &str = "r reviews a failed, crashed, skipped or archived PR you owe";
+const RERUN_HINT: &str = "r reviews a failed, held, skipped or archived PR you owe now";
 
 /// Width of the status column in both PR panes, including the space that
 /// keeps a label as long as the column off what follows it.
 const STATUS_WIDTH: usize = 15;
 
-fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, no_reviews: bool) -> ListItem<'a> {
+fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -> ListItem<'a> {
     let latest = pr.latest_run.as_ref();
     let waiting = overview.waiting.get(&pr.key).copied();
     // A skip says why nothing will happen; a review waiting out the quiet
@@ -729,7 +741,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, no_reviews: bool) -> Li
         }
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
         (None, None) => ("waiting".into(), Color::DarkGray),
-        (None, Some("queued")) if no_reviews => ("held".into(), Color::Yellow),
+        (None, Some("queued")) if manual_reviews => ("held".into(), Color::Yellow),
         (None, Some("queued")) => ("queued".into(), Color::Yellow),
         (None, Some("running")) => ("running".into(), Color::Cyan),
         (None, Some("succeeded")) => ("drafted".into(), Color::Green),
@@ -847,7 +859,7 @@ fn render_status(
     frame: &mut Frame<'_>,
     area: Rect,
     counts: &RunCounts,
-    no_reviews: bool,
+    manual_reviews: bool,
     notice: Option<&str>,
 ) {
     // A notice takes the whole line, so it isn't cut off at 80 columns.
@@ -860,8 +872,8 @@ fn render_status(
         "{} queued · {} running · {} pending drafts ",
         counts.queued, counts.running, counts.pending_drafts
     );
-    if no_reviews {
-        right.insert_str(0, "reviews held · ");
+    if manual_reviews {
+        right.insert_str(0, "manual reviews · ");
     }
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Fill(1),
@@ -877,7 +889,7 @@ const HELP: &[(&str, &str)] = &[
     ("Tab, Shift-Tab", "next, previous pane"),
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
-    ("r", "review a failed or skipped PR again"),
+    ("r", "review now: failed, held or skipped"),
     ("a", "archive or unarchive the selected PR"),
     ("A", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
@@ -899,22 +911,32 @@ fn render_help(frame: &mut Frame<'_>) {
     render_popup(frame, " Keys ", lines);
 }
 
-fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, skipped: Option<&str>) {
-    let head = match skipped {
-        Some(reason) => format!(" Review this {reason}-skipped PR anyway,"),
-        None => " Rerun the review of".into(),
+fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: Why) {
+    let (head, tail) = match why {
+        Why::Skipped(reason) => (
+            format!(" Review this {reason}-skipped PR anyway,"),
+            " at its current head? This spends tokens.",
+        ),
+        Why::Failed => (
+            " Rerun the review of".into(),
+            " at its current head? This spends tokens.",
+        ),
+        Why::Held => (
+            " Start the held review of".into(),
+            " now? This spends tokens.",
+        ),
     };
     let lines = vec![
         Line::raw(head),
         Line::raw(format!(" {}", pr.url())),
-        Line::raw(" at its current head? This spends tokens."),
+        Line::raw(tail),
         Line::raw(""),
         Line::from(vec![
             Span::raw(" y").bold(),
-            Span::raw(" rerun · any other key cancels"),
+            Span::raw(" review now · any other key cancels"),
         ]),
     ];
-    render_popup(frame, " Rerun ", lines);
+    render_popup(frame, " Review now ", lines);
 }
 
 fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
@@ -1058,8 +1080,8 @@ mod tests {
         }
     }
 
-    fn app(no_reviews: bool) -> App {
-        let mut app = App::new(no_reviews);
+    fn app(manual_reviews: bool) -> App {
+        let mut app = App::new(manual_reviews);
         app.set_overview(overview());
         app.set_logs(
             vec![
@@ -1092,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn held_reviews_and_help_overlay() {
+    fn manual_reviews_hold_and_help_overlay() {
         let mut app = app(true);
         press(&mut app, KeyCode::Char('?'));
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
@@ -1173,7 +1195,7 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 79),
-                skipped: None,
+                why: Why::Failed,
             })
         );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
@@ -1247,7 +1269,7 @@ mod tests {
         let (window_tx, window) = watch::channel(Some(14));
         let shared = Shared {
             me: "me".into(),
-            no_reviews: false,
+            manual_reviews: false,
             logs: LogLines::default(),
             due: watch::channel(DueTimes::new()).1,
             skips: watch::channel(SkipRules::default()).1,
@@ -1321,7 +1343,7 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/api", 490),
-                skipped: Some("title"),
+                why: Why::Skipped("title"),
             })
         );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
@@ -1371,6 +1393,36 @@ mod tests {
         assert!(matches!(app.overlay, Some(Overlay::Ignore(_))));
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.overlay, None);
+    }
+
+    #[test]
+    fn r_starts_a_held_review_under_manual_reviews() {
+        let mut manual = app(true);
+        // The queued "Fix login flake".
+        for _ in 0..3 {
+            press(&mut manual, KeyCode::Char('j'));
+        }
+        press(&mut manual, KeyCode::Char('r'));
+        assert_eq!(
+            manual.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 77),
+                why: Why::Held,
+            })
+        );
+        insta::assert_snapshot!(draw(&mut manual, 80, 24).backend());
+        assert_eq!(
+            manual.handle_key(key(KeyCode::Char('y'))),
+            Flow::Request(Request::Rerun(pr("org/web", 77)))
+        );
+
+        // Without the flag, a queued review runs on its own.
+        let mut auto = app(false);
+        for _ in 0..3 {
+            press(&mut auto, KeyCode::Char('j'));
+        }
+        press(&mut auto, KeyCode::Char('r'));
+        assert_eq!(auto.overlay, None);
     }
 
     #[test]

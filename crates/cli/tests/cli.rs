@@ -33,7 +33,7 @@ fn unknown_ui_is_rejected() {
 }
 
 #[test]
-fn archive_and_unarchive_update_the_store() {
+fn pr_commands_update_the_store() {
     let dir = tempfile::TempDir::new().unwrap();
     let key = PrKey {
         repo: RepoName::new("org", "repo"),
@@ -59,6 +59,13 @@ fn archive_and_unarchive_update_the_store() {
 
     assert!(run("unarchive", &key.url()).status.success());
     assert!(!archived(&store));
+
+    let output = run("review", &key.url());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        store.take_start_requests().unwrap(),
+        std::slice::from_ref(&key)
+    );
 
     let output = run("archive", "https://github.com/org/repo/pull/8");
     assert!(!output.status.success());

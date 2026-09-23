@@ -15,7 +15,7 @@ not a v1 limitation. The agent never has write credentials.
 One binary, `sanic-review`, running on a tokio runtime:
 
 ```
-sanic-review serve [--ui logs|tui] [--port N] [--config PATH] [--data-dir PATH] [--no-reviews]
+sanic-review serve [--ui logs|tui] [--port N] [--config PATH] [--data-dir PATH] [--manual-reviews]
 ```
 
 It runs these tasks in one process:
@@ -31,9 +31,18 @@ It runs these tasks in one process:
 Running it as a daemon means wrapping `serve` in a systemd user unit. There is
 no separate daemon mode.
 
-`serve --no-reviews` watches, detects triggers and queues reviews without
-running any, so you can look before spending anything. Held reviews stay
-queued and run on the next start without the flag.
+`serve --manual-reviews` watches, detects triggers and queues reviews, but
+holds them: nothing runs until you start it, so you can look before
+spending anything. You start one review at a time, with `r` in the TUI or
+`sanic-review review <PR url>`, and just that one runs, now. Held reviews
+stay queued and run on the next start without the flag.
+
+`sanic-review review <PR url>` asks the running `serve` to review a PR now:
+its held review, or else a full review of its current head, subject to the
+usual idempotency. It writes a row to a `start_requests` table in the
+shared SQLite database, which `serve` checks every couple of seconds and
+empties as it goes. There's no network listener. A request made while
+`serve` isn't running is handled when it next starts.
 
 `serve` watches its config file. A valid edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous
@@ -356,6 +365,7 @@ invited to draft replies or fixes on someone else's PR.
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |
+| `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
 
 A run's summary is stored as a `summary` draft, so it can be edited like any
@@ -396,7 +406,7 @@ available when tuning instruction files.
   TUI. Its only actions are rerunning a review, archiving a PR and adding
   a `skip_titles` pattern to the config.
   - **Reviews you owe:** open PRs by others that request your review, with the
-    latest run's status (queued, held by `--no-reviews`, running, drafted,
+    latest run's status (queued, held by `--manual-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A review still waiting
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
@@ -432,12 +442,14 @@ available when tuning instruction files.
   there. The file is edited in place, keeping comments and layout, and
   written atomically; `serve` picks the change up through its normal
   config reload.
-  `r` on a review you owe whose latest run failed or crashed, or that's
-  skipped or archived, asks for confirmation, since it spends tokens, then
-  queues a full review of the PR's head as last polled. For a skipped or
+  `r` on a review you owe whose latest run failed or crashed, that's
+  skipped or archived, or that `--manual-reviews` is holding, asks for
+  confirmation, since it spends tokens, then starts it: the held run, or
+  a full review of the PR's head as last polled. For a skipped or
   archived PR that's the way to review it anyway; it stays skipped or
-  archived. It goes through the store like any queued
-  review: idempotency applies, `--no-reviews` holds it, and it's logged.
+  archived. It goes through the store like any queued review, so
+  idempotency applies, and it's logged. It runs right away, even under
+  `--manual-reviews`.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
   terminal alone and shows in the log pane instead.

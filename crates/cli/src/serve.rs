@@ -85,20 +85,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let mut watcher = ConfigWatcher::new(&config_path)?;
     let (updates, updates_rx) = mpsc::unbounded_channel();
     let (runs, runs_rx) = mpsc::unbounded_channel();
-    let recovered = run_store
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .recover_runs()?;
-    if !recovered.is_empty() {
-        if args.no_reviews {
-            info!(runs = recovered.len(), "queued runs held by --no-reviews");
-        } else {
-            info!(runs = recovered.len(), "resuming queued runs");
-        }
-    }
-    for run in recovered {
-        let _ = runs.send(run);
-    }
+    // With `--manual-reviews`, reviews started by hand skip the hold.
+    let (started, started_rx) = if args.manual_reviews {
+        let (started, started_rx) = mpsc::unbounded_channel();
+        (started, Some(started_rx))
+    } else {
+        (runs.clone(), None)
+    };
+    resume_queued(&run_store, args.manual_reviews, &runs)?;
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
@@ -109,7 +103,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             &db_path,
             Shared {
                 me: me.clone(),
-                no_reviews: args.no_reviews,
+                manual_reviews: args.manual_reviews,
                 logs,
                 due,
                 skips: live.skips.subscribe(),
@@ -142,8 +136,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
         ) => result,
-        () = handle_requests(requests_rx, run_store, runs) => Ok(()),
-        () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
+        () = handle_requests(requests_rx, run_store, Starter {
+            manual: args.manual_reviews,
+            start: started,
+        }) => Ok(()),
+        () = run_reviews(Arc::clone(&worker), runs_rx, started_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
@@ -172,77 +169,149 @@ impl Live {
     }
 }
 
-/// Carries out what the TUI asks for. Never returns: without the TUI
-/// nothing sends requests.
+/// Sends the runs a previous process left queued or running to `runs`.
+fn resume_queued(
+    store: &Mutex<Store>,
+    manual: bool,
+    runs: &mpsc::UnboundedSender<QueuedRun>,
+) -> Result<()> {
+    let recovered = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .recover_runs()?;
+    if !recovered.is_empty() {
+        if manual {
+            info!(
+                runs = recovered.len(),
+                "queued runs held by --manual-reviews"
+            );
+        } else {
+            info!(runs = recovered.len(), "resuming queued runs");
+        }
+    }
+    for run in recovered {
+        let _ = runs.send(run);
+    }
+    Ok(())
+}
+
+/// How often `serve` looks for `sanic-review review` requests.
+const START_POLL: Duration = Duration::from_secs(2);
+
+/// Where reviews started by hand go: straight to the worker, even with
+/// `--manual-reviews`. Without it, that's the queue every run goes to.
+struct Starter {
+    manual: bool,
+    start: mpsc::UnboundedSender<QueuedRun>,
+}
+
+/// Carries out what the TUI and `sanic-review review` ask for. Never
+/// returns.
 async fn handle_requests(
     mut requests: mpsc::UnboundedReceiver<Request>,
     store: Arc<Mutex<Store>>,
-    runs: mpsc::UnboundedSender<QueuedRun>,
+    starter: Starter,
 ) {
-    while let Some(request) = requests.recv().await {
-        match request {
-            Request::Rerun(key) => rerun(&key, &store, &runs),
-            Request::Archive { key, archived } => {
-                let set = store
+    // Closed from the start without the TUI; `review` requests still come.
+    let mut open = true;
+    let mut poll = tokio::time::interval(START_POLL);
+    loop {
+        tokio::select! {
+            request = requests.recv(), if open => match request {
+                Some(Request::Rerun(key)) => review_now(&key, &store, &starter),
+                Some(Request::Archive { key, archived }) => archive(&key, archived, &store),
+                None => open = false,
+            },
+            _ = poll.tick() => {
+                let taken = store
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .set_archived(&key, archived);
-                let url = key.url();
-                match set {
-                    Ok(true) if archived => info!(url = %url, "archived"),
-                    Ok(true) => info!(url = %url, "unarchived"),
-                    Ok(false) => warn!(url = %url, "not archived: the PR isn't tracked"),
-                    Err(err) => warn!(url = %url, "archiving failed: {err:?}"),
+                    .take_start_requests();
+                match taken {
+                    Ok(keys) => {
+                        for key in keys {
+                            review_now(&key, &store, &starter);
+                        }
+                    }
+                    Err(err) => warn!("reading `sanic-review review` requests failed: {err:?}"),
                 }
             }
         }
     }
-    std::future::pending::<()>().await;
 }
 
-/// Queues a review of `key`'s current head, as the scheduler would, so
-/// `--no-reviews` holds it and a head that already has a queued, running
-/// or succeeded review is left alone.
-fn rerun(key: &PrKey, store: &Mutex<Store>, runs: &mpsc::UnboundedSender<QueuedRun>) {
-    let _span = info_span!("rerun", url = %key.url()).entered();
-    let queued = {
+fn archive(key: &PrKey, archived: bool, store: &Mutex<Store>) {
+    let set = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .set_archived(key, archived);
+    let url = key.url();
+    match set {
+        Ok(true) if archived => info!(url = %url, "archived"),
+        Ok(true) => info!(url = %url, "unarchived"),
+        Ok(false) => warn!(url = %url, "not archived: the PR isn't tracked"),
+        Err(err) => warn!(url = %url, "archiving failed: {err:?}"),
+    }
+}
+
+/// Starts a review of `key` now. With `--manual-reviews` that's its held
+/// review if it has one; otherwise a full review of its current head is
+/// queued, as the scheduler would, so a head that already has a queued,
+/// running or succeeded review is left alone.
+fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
+    let _span = info_span!("review_now", url = %key.url()).entered();
+    let run = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        store.review_request(key).and_then(|req| match req {
-            Some(req) => store.queue_review(&req),
-            None => Ok(None),
+        let held = if starter.manual {
+            store.queued_review(key)
+        } else {
+            Ok(None)
+        };
+        held.and_then(|held| match held {
+            Some(run) => Ok(Some(run)),
+            None => store.review_request(key).and_then(|req| match req {
+                Some(req) => store.queue_review(&req),
+                None => Ok(None),
+            }),
         })
     };
-    match queued {
+    match run {
         Ok(Some(run)) => {
-            info!(head = %run.request.head_sha, "review queued again by hand");
-            let _ = runs.send(run);
+            info!(head = %run.request.head_sha, "review started by hand");
+            let _ = starter.start.send(run);
         }
         Ok(None) => info!(
-            "not rerun: the PR isn't tracked, or its head already has a queued, \
+            "not started: the PR isn't tracked, or its head already has a queued, \
              running or finished review"
         ),
-        Err(err) => warn!(url = %key.url(), "rerunning the review failed: {err:?}"),
+        Err(err) => warn!(url = %key.url(), "starting the review failed: {err:?}"),
     }
 }
 
-/// Runs queued reviews, or with `--no-reviews` only logs them; they stay
-/// queued in the store either way until a worker runs them.
-async fn run_or_hold(
-    hold: bool,
+/// Runs queued reviews. With `--manual-reviews` they're only logged, and
+/// stay queued in the store, and just the ones started by hand run.
+async fn run_reviews(
     worker: Arc<Worker>,
     mut runs: mpsc::UnboundedReceiver<QueuedRun>,
+    started: Option<mpsc::UnboundedReceiver<QueuedRun>>,
 ) {
-    if !hold {
+    let Some(started) = started else {
         return worker.work(runs).await;
-    }
-    info!("--no-reviews: reviews are queued but not run");
-    while let Some(run) = runs.recv().await {
-        info!(
-            url = %run.request.key.url(),
-            head = %run.request.head_sha,
-            "review queued, not run (--no-reviews)"
-        );
-    }
+    };
+    info!(
+        "--manual-reviews: reviews are queued and held; start one with `r` in the TUI \
+         or `sanic-review review <PR url>`"
+    );
+    let hold = async {
+        while let Some(run) = runs.recv().await {
+            info!(
+                url = %run.request.key.url(),
+                head = %run.request.head_sha,
+                "review held (--manual-reviews)"
+            );
+        }
+    };
+    tokio::join!(hold, worker.work(started));
 }
 
 async fn poll_forever<G: GithubApi>(
@@ -447,12 +516,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test(start_paused = true)]
-    async fn requests_rerun_once_and_archive() {
-        let key = PrKey {
-            repo: RepoName::new("org", "repo"),
-            number: 7,
-        };
+    fn store_with_pr(key: &PrKey) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         let snapshot = PrSnapshot {
             key: key.clone(),
@@ -471,6 +535,36 @@ mod tests {
             updated_at: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
+        store
+    }
+
+    fn key() -> PrKey {
+        PrKey {
+            repo: RepoName::new("org", "repo"),
+            number: 7,
+        }
+    }
+
+    /// Runs `handle_requests` until it has handled everything sent, and
+    /// returns the runs it started.
+    async fn handle(store: &Arc<Mutex<Store>>, manual: bool, sent: Vec<Request>) -> Vec<QueuedRun> {
+        let (requests, requests_rx) = mpsc::unbounded_channel();
+        for request in sent {
+            requests.send(request).unwrap();
+        }
+        let (start, mut started) = mpsc::unbounded_channel();
+        let handled = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle_requests(requests_rx, Arc::clone(store), Starter { manual, start }),
+        );
+        assert!(handled.await.is_err(), "handle_requests never returns");
+        std::iter::from_fn(|| started.try_recv().ok()).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_rerun_once_and_archive() {
+        let key = key();
+        let mut store = store_with_pr(&key);
         let failed = store
             .queue_review(&store.review_request(&key).unwrap().unwrap())
             .unwrap()
@@ -479,29 +573,48 @@ mod tests {
         store.fail_run(failed.id, "boom").unwrap();
         let store = Arc::new(Mutex::new(store));
 
-        let (requests, requests_rx) = mpsc::unbounded_channel();
-        let (runs, mut runs_rx) = mpsc::unbounded_channel();
         // The second request finds the first one's run queued.
-        requests.send(Request::Rerun(key.clone())).unwrap();
-        requests.send(Request::Rerun(key.clone())).unwrap();
-        requests
-            .send(Request::Archive {
-                key: key.clone(),
-                archived: true,
-            })
-            .unwrap();
-        let handled = tokio::time::timeout(
-            Duration::from_secs(1),
-            handle_requests(requests_rx, Arc::clone(&store), runs),
+        let archive = Request::Archive {
+            key: key.clone(),
+            archived: true,
+        };
+        let sent = vec![
+            Request::Rerun(key.clone()),
+            Request::Rerun(key.clone()),
+            archive,
+        ];
+        assert_eq!(
+            handle(&store, false, sent).await,
+            std::slice::from_ref(&failed)
         );
-        assert!(handled.await.is_err(), "rerun never returns");
-
-        assert_eq!(runs_rx.try_recv().unwrap(), failed);
-        assert!(runs_rx.try_recv().is_err());
         // Archiving then superseded the requeued run.
         let store = store.lock().unwrap();
         assert_eq!(store.run(failed.id).unwrap().unwrap().status, "superseded");
         assert!(store.pr_summary(&key).unwrap().unwrap().archived);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_reviews_start_the_held_run_including_from_the_cli() {
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let held = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        // What `sanic-review review <url>` writes.
+        store.request_start(&key).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        // The CLI's request starts the held run; `r` then finds nothing
+        // left to start, since that head's review is under way.
+        let started = handle(&store, true, vec![]).await;
+        assert_eq!(started, std::slice::from_ref(&held));
+        store.lock().unwrap().claim_run(held.id).unwrap();
+        assert!(
+            handle(&store, true, vec![Request::Rerun(key)])
+                .await
+                .is_empty()
+        );
     }
 
     #[test]
