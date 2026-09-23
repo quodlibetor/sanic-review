@@ -27,12 +27,16 @@ expression: "readable(&f, &page.body)"
 <h2>Reviews you owe (3)</h2>
 <ol class="rows">
 <li class="row" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
+<span class="state act" title="1 unanswered">1 unanswered</span>
 <span class="status ok">drafted</span>
 <span class="drafts">3 drafts</span>
+<span class="new-cell">
 <span class="unseen" title="a review you haven't looked at yet">new</span>
+</span>
 <a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a>
-<a class="title" href="/pr/org/repo/7">Add the thing</a>
-<span class="author dim">(alice)</span>
+<span class="title-cell">
+<a class="title" href="/pr/org/repo/7">Add the thing</a> <span class="author dim">(alice)</span>
+</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
 <a class="button" href="/pr/org/repo/7#chat">Chat</a>
@@ -45,12 +49,16 @@ expression: "readable(&f, &page.body)"
 </span>
 </li>
 <li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now" data-ignore="/pr/org/repo/8/ignore">
+<span class="state act" title="changes requested">changes requested</span>
 <span class="status bad">failed</span>
 <span class="drafts">
 </span>
+<span class="new-cell">
+</span>
 <a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a>
-<a class="title" href="/pr/org/repo/8">Fix &lt;script&gt; escaping</a>
-<span class="author dim">(bob)</span>
+<span class="title-cell">
+<a class="title" href="/pr/org/repo/8">Fix &lt;script&gt; escaping</a> <span class="author dim">(bob)</span>
+</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/8/review-now">Review now</a>
 <a class="button" href="/pr/org/repo/8/ignore">Ignore by title</a>
@@ -64,12 +72,16 @@ expression: "readable(&f, &page.body)"
 <div class="error">claude exited with 1</div>
 </li>
 <li class="row" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now" data-ignore="/pr/org/repo/10/ignore">
+<span class="state quiet" title="—">—</span>
 <span class="status dim">skipped: draft</span>
 <span class="drafts">
 </span>
+<span class="new-cell">
+</span>
 <a class="gh" href="https://github.com/org/repo/pull/10">https://github.com/org/repo/pull/10</a>
-<a class="title" href="/pr/org/repo/10">WIP: try things</a>
-<span class="author dim">(carol)</span>
+<span class="title-cell">
+<a class="title" href="/pr/org/repo/10">WIP: try things</a> <span class="author dim">(carol)</span>
+</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/10/review-now">Review now</a>
 <a class="button" href="/pr/org/repo/10/ignore">Ignore by title</a>
@@ -87,11 +99,15 @@ expression: "readable(&f, &page.body)"
 <h2>Your PRs (1)</h2>
 <ol class="rows">
 <li class="row" data-href="/pr/org/repo/9">
-<span class="status dim">waiting</span>
+<span class="state good" title="mergeable">mergeable</span>
 <span class="drafts">
 </span>
+<span class="new-cell">
+</span>
 <a class="gh" href="https://github.com/org/repo/pull/9">https://github.com/org/repo/pull/9</a>
+<span class="title-cell">
 <a class="title" href="/pr/org/repo/9">My change</a>
+</span>
 <span class="actions">
 <form class="archive" method="post" action="/pr/org/repo/9/archive">
 <input type="hidden" name="csrf" value="<token>">

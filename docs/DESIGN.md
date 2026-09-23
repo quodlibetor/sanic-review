@@ -447,7 +447,15 @@ embedded in the binary, so nothing is fetched at runtime.
   you owe" and "Your PRs". It rereads them every few seconds. A PR whose
   latest review finished since you last opened its page, or that you've
   never opened, is marked `new`. Every row links to the PR on github.com
-  and to its dashboard page.
+  and to its dashboard page. Each shows its PR state, as the TUI defines
+  it: left of the run status in "Reviews you owe", and as the status in
+  "Your PRs". The lists keep their columns aligned, as the TUI does, and
+  a state too long for its column is cut, with the whole of it on hover.
+  Short of room, a row cuts its GitHub link and wraps its actions before
+  it narrows the title.
+  Urgent states are highlighted, approved and mergeable ones green, the
+  rest muted. The PR page's header, which has room, shows it in full too,
+  for an open PR whether or not either list has it, and leaves out `—`.
 - **PR page.** The PR's description, its review runs, and the drafts of the
   latest one that succeeded (or of any run you pick). Each comment draft
   shows the lines around its anchor from the run's `pr.diff`. A draft that

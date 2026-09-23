@@ -23,7 +23,7 @@ expression: "readable(&f, &page.body)"
 <main>
 <h1>Add the thing</h1>
 <p class="meta">
-<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="status ok">drafted</span>
+<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="state act" title="1 unanswered">1 unanswered</span> · <span class="status ok">drafted</span>
 </p>
 <div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
 <a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
