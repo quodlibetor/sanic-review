@@ -112,6 +112,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
 fn context() -> PrContext {
     PrContext {
         title: "Tweak lib".into(),
+        body: "Check the second line.".into(),
         url: "https://github.com/org/repo/pull/7".into(),
         author: "alice".into(),
         threads: vec![],
@@ -162,7 +163,9 @@ async fn review_flags_comments_outside_the_diff() {
     let worktree = s.data.path().join("worktrees/3");
     assert_eq!(read(fake, "cwd").trim(), worktree.to_string_lossy());
     assert!(read(fake, "ls").contains("lib.rs"));
-    assert!(read(fake, "stdin").contains("Tweak lib"));
+    let stdin = read(fake, "stdin");
+    assert!(stdin.contains("Tweak lib"), "{stdin}");
+    assert!(stdin.contains("Check the second line."), "{stdin}");
     let args = read(fake, "args");
     assert!(args.contains("Prefer small diffs."), "{args}");
     assert!(args.contains("claude-sonnet-5"), "{args}");
@@ -265,7 +268,7 @@ async fn agents_that_never_read_the_prompt_are_killed() {
     settings.claude = stuck;
     // Bigger than a pipe buffer, so sending it blocks until the agent reads.
     let ctx = PrContext {
-        title: "x".repeat(1 << 20),
+        body: "x".repeat(1 << 20),
         ..context()
     };
     let err = s.runner.review(&s.run, &ctx, &settings).await.unwrap_err();

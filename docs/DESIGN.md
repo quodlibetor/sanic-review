@@ -205,6 +205,9 @@ Rules:
    brief: PR metadata, the diff or interdiff, relevant threads, previous drafts
    and how you handled them. PR text goes in as quoted data, never as
    instructions.
+   The metadata includes the PR's title and description. Each piece of
+   PR-authored text is fenced with more backticks than it contains, so it
+   can't close its own block.
 3. **Invoke.** Headless `claude -p` with JSON output against a schema,
    `--append-system-prompt` for instructions, and skill dirs from the profile.
    Only read-only tools are allowed (Read, Grep, Glob, and read-only Bash if
@@ -265,7 +268,7 @@ invited to draft replies or fixes on someone else's PR.
 | Table | Contents |
 |-------|----------|
 | `repos` | owner, name, mirror path |
-| `prs` | repo, number, author, is_mine, state, matched profile |
+| `prs` | repo, number, title, description, author, is_mine, state, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |

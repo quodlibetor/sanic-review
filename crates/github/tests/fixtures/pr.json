@@ -4,6 +4,7 @@
       "pullRequest": {
         "number": 7,
         "title": "Add retries",
+        "body": "Retries flaky fetches.\n\nCloses #3.",
         "url": "https://github.com/org/repo/pull/7",
         "isDraft": false,
         "headRefOid": "aaa111",

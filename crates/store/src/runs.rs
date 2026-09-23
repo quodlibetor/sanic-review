@@ -302,15 +302,16 @@ impl Store {
         )?)
     }
 
-    /// The PR's title, author and threads as last polled, for a brief.
+    /// The PR's title, description, author and threads as last polled, for a
+    /// brief.
     pub fn pr_context(&self, key: &PrKey) -> Result<Option<PrContext>> {
         let repo = key.repo.to_string();
-        let Some((title, url, author)) = self
+        let Some((title, body, url, author)) = self
             .conn
             .query_row(
-                "SELECT title, url, author FROM prs WHERE repo = ?1 AND number = ?2",
+                "SELECT title, body, url, author FROM prs WHERE repo = ?1 AND number = ?2",
                 params![repo, key.number],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
         else {
@@ -349,6 +350,7 @@ impl Store {
         }
         Ok(Some(PrContext {
             title,
+            body,
             url,
             author,
             threads,
@@ -386,6 +388,7 @@ mod tests {
                 number: 7,
             },
             title: "Add thing".into(),
+            body: "Adds the thing.\n\nFixes #3.".into(),
             url: "https://github.com/org/repo/pull/7".into(),
             author: "alice".into(),
             head_sha: "h1".into(),
@@ -570,6 +573,7 @@ mod tests {
         let store = store();
         let ctx = store.pr_context(&snapshot().key).unwrap().unwrap();
         assert_eq!(ctx.title, "Add thing");
+        assert_eq!(ctx.body, "Adds the thing.\n\nFixes #3.");
         assert_eq!(ctx.threads.len(), 1);
         let ids: Vec<_> = ctx.threads[0].comments.iter().map(|c| &c.id).collect();
         assert_eq!(ids, ["c1", "c2"]);

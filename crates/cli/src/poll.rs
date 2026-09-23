@@ -288,6 +288,7 @@ mod tests {
         PrSnapshot {
             key: key.clone(),
             title: "t".into(),
+            body: String::new(),
             url: format!("https://github.com/{}/pull/{}", key.repo, key.number),
             author: author.into(),
             head_sha: "h1".into(),

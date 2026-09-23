@@ -187,6 +187,7 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
         .unwrap()
         .unwrap();
     assert_eq!(snap.author, "alice");
+    assert_eq!(snap.body, "Retries flaky fetches.\n\nCloses #3.");
     assert_eq!(snap.head_sha, "aaa111");
     assert!(
         snap.review_requested,

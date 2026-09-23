@@ -21,6 +21,8 @@ impl fmt::Display for PrKey {
 pub struct PrSnapshot {
     pub key: PrKey,
     pub title: String,
+    /// The PR description, as written.
+    pub body: String,
     pub url: String,
     pub author: String,
     pub head_sha: String,

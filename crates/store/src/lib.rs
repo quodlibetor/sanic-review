@@ -19,6 +19,7 @@ use sanic_core::{
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_initial.sql"),
     include_str!("migrations/0002_runs_drafts.sql"),
+    include_str!("migrations/0003_pr_body.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -208,10 +209,11 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
     tx.execute(
         &format!(
             "INSERT INTO prs (repo, number, title, url, author, head_sha, base_sha, is_draft,
-                              review_requested, profile, first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, {NOW}, {NOW})
+                              review_requested, profile, body, first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, {NOW}, {NOW})
              ON CONFLICT (repo, number) DO UPDATE SET
-                 title = excluded.title, url = excluded.url, author = excluded.author,
+                 title = excluded.title, body = excluded.body, url = excluded.url,
+                 author = excluded.author,
                  head_sha = excluded.head_sha, base_sha = excluded.base_sha,
                  is_draft = excluded.is_draft, review_requested = excluded.review_requested,
                  profile = excluded.profile, updated_at = excluded.updated_at"
@@ -226,7 +228,8 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
             snap.base_sha,
             snap.is_draft,
             snap.review_requested,
-            profile
+            profile,
+            snap.body
         ],
     )?;
     tx.execute(
@@ -303,6 +306,7 @@ mod tests {
                 number: 7,
             },
             title: "Add thing".into(),
+            body: "Adds the thing.".into(),
             url: "https://github.com/org/repo/pull/7".into(),
             author: "alice".into(),
             head_sha: "h1".into(),

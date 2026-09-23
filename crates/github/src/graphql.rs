@@ -16,7 +16,7 @@ const PR_QUERY: &str = r"
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      number title url isDraft headRefOid baseRefOid
+      number title body url isDraft headRefOid baseRefOid
       author { login }
       reviewRequests(first: 100) {
         nodes {
@@ -348,6 +348,9 @@ impl<T> Connection<T> {
 #[serde(rename_all = "camelCase")]
 struct RawPr {
     title: String,
+    // Always sent by GitHub; defaulted so hand-written mocks can omit it.
+    #[serde(default)]
+    body: String,
     url: String,
     is_draft: bool,
     head_ref_oid: String,
@@ -483,6 +486,7 @@ impl RawPr {
         }
         PrSnapshot {
             title: self.title,
+            body: self.body,
             url: self.url,
             author: login(self.author),
             head_sha: self.head_ref_oid,
