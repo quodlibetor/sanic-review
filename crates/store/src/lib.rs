@@ -1,5 +1,6 @@
 //! SQLite schema, migrations and queries.
 
+mod dashboard;
 mod overview;
 mod runs;
 
@@ -25,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_pr_archived.sql"),
     include_str!("migrations/0006_pr_github_updated_at.sql"),
     include_str!("migrations/0007_start_requests.sql"),
+    include_str!("migrations/0008_views.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -32,6 +34,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
+pub use dashboard::{DraftRow, DraftStatus, PrPage, ReviewRun};
 pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview, ReviewState};
 pub use runs::{Draft, RunCounts, RunRecord};
 
