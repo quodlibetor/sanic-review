@@ -31,6 +31,10 @@ It runs these tasks in one process:
 Running it as a daemon means wrapping `serve` in a systemd user unit. There is
 no separate daemon mode.
 
+`serve` watches its config file. A valid edit applies between poll cycles and
+starts a reconcile right away. An invalid one is logged and the previous
+config stays in force. `github.api_url` is only read at startup.
+
 The web server binds to `127.0.0.1` only. Remote access goes through SSH or
 port forwarding.
 

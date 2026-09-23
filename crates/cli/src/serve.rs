@@ -2,9 +2,10 @@
 //!
 //! One task does everything in turn: reconcile and notification polls queue
 //! PRs, then each queued PR is refreshed. Keeping it sequential means a PR
-//! is never refreshed twice at once.
+//! is never refreshed twice at once. A config file change is picked up
+//! between cycles.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use color_eyre::{
     Section,
@@ -24,6 +25,7 @@ use tracing::{Instrument, info, info_span, warn};
 use crate::{
     ServeArgs, Ui,
     poll::{GithubApi, Poller, Refreshed},
+    watch::ConfigWatcher,
 };
 
 pub async fn run(args: ServeArgs) -> Result<()> {
@@ -47,9 +49,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         .wrap_err("identifying the GitHub user")?;
     info!(user = %me, config = %config_path.display(), "watching GitHub");
 
+    let mut watcher = ConfigWatcher::new(&config_path)?;
     let mut poller = Poller::new(github, store, config, me);
     tokio::select! {
-        result = poll_forever(&mut poller) => result,
+        result = poll_forever(&mut poller, &mut watcher, &config_path) => result,
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
@@ -57,16 +60,29 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
 }
 
-async fn poll_forever<G: GithubApi>(poller: &mut Poller<G>) -> Result<()> {
-    let reconcile_every = poller.config().poll.reconcile_interval;
-    let min_notification = poller.config().poll.min_notification_interval;
+async fn poll_forever<G: GithubApi>(
+    poller: &mut Poller<G>,
+    watcher: &mut ConfigWatcher,
+    config_path: &Path,
+) -> Result<()> {
     let mut next_reconcile = Instant::now();
     let mut next_notifications = Instant::now();
     // Survives across cycles so a rate limit doesn't drop queued PRs.
     let mut pending: BTreeSet<PrKey> = BTreeSet::new();
 
     loop {
-        sleep_until(next_reconcile.min(next_notifications)).await;
+        tokio::select! {
+            () = sleep_until(next_reconcile.min(next_notifications)) => {}
+            () = watcher.changed() => {
+                if reload(poller, config_path) {
+                    // New entries may cover PRs nothing has fetched yet.
+                    next_reconcile = Instant::now();
+                }
+                continue;
+            }
+        }
+        let reconcile_every = poller.config().poll.reconcile_interval;
+        let min_notification = poller.config().poll.min_notification_interval;
         let now = Instant::now();
         let mut backoff = None;
 
@@ -130,6 +146,25 @@ async fn poll_forever<G: GithubApi>(poller: &mut Poller<G>) -> Result<()> {
                 queued = pending.len(),
                 "summary"
             );
+        }
+    }
+}
+
+/// Swaps in the config at `path`, keeping the current one if the new one
+/// doesn't load. Returns whether it changed.
+fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path) -> bool {
+    match Config::load(path, &VcsResolver) {
+        Ok(config) => {
+            if config.github.api_url != poller.config().github.api_url {
+                warn!("`github.api_url` changed; restart to use it");
+            }
+            poller.set_config(config);
+            info!(config = %path.display(), "config reloaded");
+            true
+        }
+        Err(err) => {
+            warn!("config change not applied, keeping the previous config: {err:?}");
+            false
         }
     }
 }

@@ -95,6 +95,10 @@ impl<G: GithubApi> Poller<G> {
         &self.config
     }
 
+    pub fn set_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
     /// Open PRs that request your review or involve you, in watched repos.
     /// Also refreshes your team memberships.
     pub async fn reconcile(&mut self) -> Result<Vec<PrKey>, ApiError> {
