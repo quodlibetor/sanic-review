@@ -189,6 +189,7 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
     assert_eq!(snap.author, "alice");
     assert_eq!(snap.body, "Retries flaky fetches.\n\nCloses #3.");
     assert_eq!(snap.head_sha, "aaa111");
+    assert_eq!(snap.updated_at.as_deref(), Some("2026-09-20T08:00:00Z"));
     assert!(
         snap.review_requested,
         "direct request for `Me` matches `me`"

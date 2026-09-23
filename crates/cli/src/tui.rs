@@ -32,6 +32,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
 use sanic_core::{
+    clock::{Clock, window_start},
     pr::PrKey,
     skip::{Skip, SkipRules},
 };
@@ -138,6 +139,9 @@ pub struct Shared {
     pub due: watch::Receiver<DueTimes>,
     /// Which PRs aren't reviewed automatically; follows config reloads.
     pub skips: watch::Receiver<SkipRules>,
+    /// `poll.updated_within_days`: PRs quiet for longer are left out.
+    pub window: watch::Receiver<Option<u32>>,
+    pub clock: Arc<dyn Clock>,
     /// What you ask `serve` to do.
     pub requests: mpsc::UnboundedSender<Request>,
     /// The ignore editor adds `skip_titles` here; `serve` reloads it.
@@ -240,7 +244,8 @@ impl Overview {
             .iter()
             .map(|(key, due)| (key.clone(), due.saturating_duration_since(now)))
             .collect();
-        let owed = store.owed_reviews(&shared.me)?;
+        let since = window_start(shared.clock.now(), *shared.window.borrow());
+        let owed = store.owed_reviews(&shared.me, since.as_deref())?;
         let skips = shared.skips.borrow();
         let skipped = owed
             .iter()
@@ -258,7 +263,7 @@ impl Overview {
             owed,
             skipped,
             profiles,
-            mine: store.my_prs(&shared.me)?,
+            mine: store.my_prs(&shared.me, since.as_deref())?,
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
             waiting,
@@ -1208,6 +1213,56 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_owned())
             .collect();
         assert!(row.starts_with("│skipped: draft "), "{row}");
+    }
+
+    #[test]
+    fn prs_quiet_for_longer_than_the_window_are_left_out() {
+        struct FixedClock;
+        impl Clock for FixedClock {
+            fn now(&self) -> std::time::SystemTime {
+                // 2026-09-23T16:33:51Z.
+                std::time::UNIX_EPOCH + Duration::from_secs(1_790_181_231)
+            }
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        for (number, updated) in [(1, "2026-09-01T00:00:00Z"), (2, "2026-09-20T00:00:00Z")] {
+            let snapshot = sanic_core::pr::PrSnapshot {
+                key: pr("org/repo", number),
+                title: "t".into(),
+                body: String::new(),
+                url: String::new(),
+                author: "alice".into(),
+                head_sha: "h".into(),
+                base_sha: "b".into(),
+                is_draft: false,
+                review_requested: true,
+                requested_teams: vec![],
+                reviews: vec![],
+                threads: vec![],
+                files: None,
+                updated_at: Some(updated.into()),
+            };
+            store.record(&snapshot, "p", &[]).unwrap();
+        }
+        let (window_tx, window) = watch::channel(Some(14));
+        let shared = Shared {
+            me: "me".into(),
+            no_reviews: false,
+            logs: LogLines::default(),
+            due: watch::channel(DueTimes::new()).1,
+            skips: watch::channel(SkipRules::default()).1,
+            window,
+            clock: Arc::new(FixedClock),
+            requests: mpsc::unbounded_channel().0,
+            config_path: PathBuf::new(),
+        };
+        let owed = |shared: &Shared| -> Vec<u32> {
+            let overview = Overview::load(&store, shared).unwrap();
+            overview.owed.iter().map(|pr| pr.key.number).collect()
+        };
+        assert_eq!(owed(&shared), [2]);
+        window_tx.send_replace(None);
+        assert_eq!(owed(&shared), [1, 2]);
     }
 
     #[test]

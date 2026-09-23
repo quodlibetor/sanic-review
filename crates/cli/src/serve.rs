@@ -18,6 +18,7 @@ use color_eyre::{
     eyre::{Result, WrapErr},
 };
 use sanic_core::{
+    clock::SystemClock,
     config::{Config, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
@@ -102,7 +103,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
     let (due_tx, due) = watch::channel(DueTimes::new());
-    let (skips_tx, skips) = watch::channel(config.skip_rules());
+    let live = Live::new(&config);
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
@@ -111,7 +112,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 no_reviews: args.no_reviews,
                 logs,
                 due,
-                skips,
+                skips: live.skips.subscribe(),
+                window: live.window.subscribe(),
+                clock: Arc::new(SystemClock),
                 requests,
                 config_path: config_path.clone(),
             },
@@ -134,10 +137,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             result
         }
         result = poll_forever(
-            &mut poller, &mut watcher, &config_path, &updates, &worker, &skips_tx,
+            &mut poller, &mut watcher, &config_path, &updates, &worker, &live,
         ) => result,
         result = schedule(
-            updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, skips_tx.subscribe(),
+            updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
         ) => result,
         () = handle_requests(requests_rx, run_store, runs) => Ok(()),
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
@@ -145,6 +148,27 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             info!("shutting down");
             Ok(())
         }
+    }
+}
+
+/// Config the scheduler and the TUI follow across reloads.
+struct Live {
+    skips: watch::Sender<SkipRules>,
+    /// `poll.updated_within_days`.
+    window: watch::Sender<Option<u32>>,
+}
+
+impl Live {
+    fn new(config: &Config) -> Self {
+        Self {
+            skips: watch::Sender::new(config.skip_rules()),
+            window: watch::Sender::new(config.poll.updated_within_days),
+        }
+    }
+
+    fn publish(&self, config: &Config) {
+        self.skips.send_replace(config.skip_rules());
+        self.window.send_replace(config.poll.updated_within_days);
     }
 }
 
@@ -227,7 +251,7 @@ async fn poll_forever<G: GithubApi>(
     config_path: &Path,
     updates: &mpsc::UnboundedSender<Update>,
     worker: &Worker,
-    skips: &watch::Sender<SkipRules>,
+    live: &Live,
 ) -> Result<()> {
     let mut next_reconcile = Instant::now();
     let mut next_notifications = Instant::now();
@@ -241,7 +265,7 @@ async fn poll_forever<G: GithubApi>(
         tokio::select! {
             () = sleep_until(next_reconcile.min(next_notifications)) => {}
             () = watcher.changed() => {
-                if reload(poller, config_path, worker, skips) {
+                if reload(poller, config_path, worker, live) {
                     // New entries may cover PRs nothing has fetched yet.
                     next_reconcile = Instant::now();
                 }
@@ -331,19 +355,14 @@ async fn poll_forever<G: GithubApi>(
 
 /// Swaps in the config at `path`, keeping the current one if the new one
 /// doesn't load. Returns whether it changed.
-fn reload<G: GithubApi>(
-    poller: &mut Poller<G>,
-    path: &Path,
-    worker: &Worker,
-    skips: &watch::Sender<SkipRules>,
-) -> bool {
+fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path, worker: &Worker, live: &Live) -> bool {
     match Config::load(path, &VcsResolver) {
         Ok(config) => {
             if config.github.api_url != poller.config().github.api_url {
                 warn!("`github.api_url` changed; restart to use it");
             }
             worker.configure(&config);
-            skips.send_replace(config.skip_rules());
+            live.publish(&config);
             poller.set_config(config);
             info!(config = %path.display(), "config reloaded");
             true
@@ -449,6 +468,7 @@ mod tests {
             reviews: vec![],
             threads: vec![],
             files: None,
+            updated_at: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
         let failed = store

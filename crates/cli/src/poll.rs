@@ -1,10 +1,11 @@
 //! Turning GitHub state into stored snapshots and detected triggers.
 
-use std::{collections::HashSet, future::Future, time::Duration};
+use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
 
 use sanic_core::pr::TeamRef;
 
 use sanic_core::{
+    clock::{Clock, SystemClock, window_start},
     config::Config,
     pr::{PrKey, PrSnapshot},
     trigger::{Trigger, detect},
@@ -15,6 +16,17 @@ use sanic_store::Store;
 const LAST_MODIFIED_KEY: &str = "notifications.last_modified";
 const REVIEW_REQUESTED: &str = "review-requested:@me";
 const INVOLVES: &str = "involves:@me";
+
+/// Search `qualifiers`, limited to PRs updated from the day of `since` on
+/// when there's a window. GitHub's `updated:` works in whole days, so a
+/// refresh checks the exact time.
+#[must_use]
+pub fn recent(qualifiers: &str, since: Option<&str>) -> String {
+    match since.and_then(|s| s.get(..10)) {
+        Some(day) => format!("{qualifiers} updated:>={day}"),
+        None => qualifiers.to_owned(),
+    }
+}
 
 /// The GitHub reads the poller needs; a trait so tests can fake GitHub.
 pub trait GithubApi {
@@ -74,6 +86,8 @@ pub struct Poller<G> {
     /// Your teams, refreshed on each reconcile. A team review request counts
     /// as yours only if you're in the team and the config's filter allows it.
     teams: HashSet<TeamRef>,
+    /// Dates `poll.updated_within_days`.
+    clock: Arc<dyn Clock>,
 }
 
 impl<G: GithubApi> Poller<G> {
@@ -84,7 +98,20 @@ impl<G: GithubApi> Poller<G> {
             config,
             me,
             teams: HashSet::new(),
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Where `poll.updated_within_days` starts, as GitHub writes times.
+    #[must_use]
+    pub fn window_start(&self) -> Option<String> {
+        window_start(self.clock.now(), self.config.poll.updated_within_days)
     }
 
     pub fn store(&self) -> &Store {
@@ -118,8 +145,15 @@ impl<G: GithubApi> Poller<G> {
             ),
             Err(err) => return Err(err),
         }
-        let requested = self.github.search_prs(REVIEW_REQUESTED).await?;
-        let involved = self.github.search_prs(INVOLVES).await?;
+        let since = self.window_start();
+        let requested = self
+            .github
+            .search_prs(&recent(REVIEW_REQUESTED, since.as_deref()))
+            .await?;
+        let involved = self
+            .github
+            .search_prs(&recent(INVOLVES, since.as_deref()))
+            .await?;
         let mut keys: Vec<PrKey> = requested
             .into_iter()
             .chain(involved)
@@ -157,8 +191,9 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// Fetches `key`, detects triggers against the stored baseline, and
-    /// stores the new baseline. `None` if the PR is gone, closed or matches
-    /// no profile; a gone or closed PR is marked no longer open.
+    /// stores the new baseline. `None` if the PR is gone, closed, quiet for
+    /// longer than `poll.updated_within_days` or matches no profile; a gone
+    /// or closed PR is marked no longer open.
     pub async fn refresh(&mut self, key: &PrKey) -> Result<Option<Refreshed>, ApiError> {
         let with_files = self.config.needs_files(&key.repo);
         let Some(mut snapshot) = self.github.pull_request(key, &self.me, with_files).await? else {
@@ -166,6 +201,12 @@ impl<G: GithubApi> Poller<G> {
             self.store.mark_closed(key)?;
             return Ok(None);
         };
+        if let (Some(start), Some(updated)) = (self.window_start(), &snapshot.updated_at)
+            && updated.as_str() < start.as_str()
+        {
+            tracing::debug!(updated = %updated, "no activity within `poll.updated_within_days`; skipping");
+            return Ok(None);
+        }
         let filter = &self.config.review_requests.teams;
         snapshot.review_requested |= snapshot
             .requested_teams
@@ -204,7 +245,8 @@ mod tests {
 
     #[derive(Default)]
     struct FakeGithub {
-        searches: HashMap<&'static str, Vec<PrKey>>,
+        /// By the exact qualifiers searched for.
+        searches: HashMap<String, Vec<PrKey>>,
         prs: RefCell<HashMap<PrKey, PrSnapshot>>,
         notifications: Vec<Notification>,
         seen_since: RefCell<Vec<Option<String>>>,
@@ -308,7 +350,23 @@ mod tests {
                 comments: vec![],
             }],
             files: Some(files.iter().map(|f| (*f).into()).collect()),
+            updated_at: None,
         }
+    }
+
+    /// 2026-09-23T16:33:51Z.
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + Duration::from_secs(1_790_181_231)
+        }
+    }
+
+    /// The qualifiers a reconcile at [`FixedClock`] searches for, with the
+    /// default two-week window.
+    fn searched(qualifiers: &str) -> String {
+        format!("{qualifiers} updated:>=2026-09-09")
     }
 
     fn poller(github: FakeGithub) -> Poller<FakeGithub> {
@@ -318,18 +376,20 @@ mod tests {
             config(),
             "me".into(),
         )
+        .with_clock(Arc::new(FixedClock))
     }
 
     #[tokio::test]
     async fn reconcile_merges_searches_and_drops_unwatched_repos() {
         let mut github = FakeGithub::default();
         github.searches.insert(
-            REVIEW_REQUESTED,
+            searched(REVIEW_REQUESTED),
             vec![key("org/repo", 1), key("elsewhere/x", 9)],
         );
-        github
-            .searches
-            .insert(INVOLVES, vec![key("org/repo", 1), key("org/other", 2)]);
+        github.searches.insert(
+            searched(INVOLVES),
+            vec![key("org/repo", 1), key("org/other", 2)],
+        );
         let keys = poller(github).reconcile().await.unwrap();
         assert_eq!(keys, [key("org/other", 2), key("org/repo", 1)]);
     }
@@ -348,7 +408,7 @@ mod tests {
         poller.refresh(&requested).await.unwrap().unwrap();
         poller.refresh(&merged).await.unwrap().unwrap();
         let owed = |poller: &Poller<FakeGithub>| -> Vec<u32> {
-            let owed = poller.store().owed_reviews("me").unwrap();
+            let owed = poller.store().owed_reviews("me", None).unwrap();
             owed.into_iter().map(|pr| pr.key.number).collect()
         };
         assert_eq!(owed(&poller), [1, 2]);
@@ -362,9 +422,41 @@ mod tests {
         poller
             .github
             .searches
-            .insert(REVIEW_REQUESTED, vec![merged.clone()]);
+            .insert(searched(REVIEW_REQUESTED), vec![merged.clone()]);
         poller.reconcile().await.unwrap();
         assert_eq!(owed(&poller), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn searches_are_limited_to_the_window_by_day() {
+        assert_eq!(
+            recent(REVIEW_REQUESTED, Some("2026-09-09T16:33:51Z")),
+            "review-requested:@me updated:>=2026-09-09"
+        );
+        assert_eq!(recent(INVOLVES, None), "involves:@me");
+    }
+
+    #[tokio::test]
+    async fn prs_quiet_for_longer_than_the_window_are_ignored() {
+        let old = key("org/a", 1);
+        let github = FakeGithub::default();
+        let mut snap = snapshot(&old, "alice", &[]);
+        snap.review_requested = true;
+        // The window starts 2026-09-09T16:33:51Z.
+        snap.updated_at = Some("2026-09-09T16:33:50Z".into());
+        github.prs.borrow_mut().insert(old.clone(), snap.clone());
+        let mut poller = poller(github);
+        assert!(poller.refresh(&old).await.unwrap().is_none());
+        assert_eq!(poller.store().known(&old).unwrap(), None);
+
+        snap.updated_at = Some("2026-09-09T16:33:51Z".into());
+        poller.github.prs.borrow_mut().insert(old.clone(), snap);
+        assert!(poller.refresh(&old).await.unwrap().is_some());
+
+        // Without a window, any age counts.
+        let mut config = config_with("[poll]\nupdated_within_days = 0");
+        std::mem::swap(&mut config, &mut poller.config);
+        assert_eq!(poller.window_start(), None);
     }
 
     /// Refreshes a PR that requests review from `requested`, as a member of

@@ -427,6 +427,7 @@ mod tests {
             reviews: vec![],
             threads: vec![],
             files: None,
+            updated_at: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
@@ -564,6 +565,7 @@ mod tests {
             reviews: vec![],
             threads: vec![],
             files: None,
+            updated_at: None,
         };
         store.record(&snapshot, "p", &[]).unwrap();
         let store = Arc::new(Mutex::new(store));

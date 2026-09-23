@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0003_pr_body.sql"),
     include_str!("migrations/0004_pr_open.sql"),
     include_str!("migrations/0005_pr_archived.sql"),
+    include_str!("migrations/0006_pr_github_updated_at.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -331,14 +332,17 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
     tx.execute(
         &format!(
             "INSERT INTO prs (repo, number, title, url, author, head_sha, base_sha, is_draft,
-                              review_requested, profile, body, open, first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, {NOW}, {NOW})
+                              review_requested, profile, body, open, github_updated_at,
+                              first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, {NOW}, {NOW})
              ON CONFLICT (repo, number) DO UPDATE SET
                  title = excluded.title, body = excluded.body, url = excluded.url,
                  author = excluded.author,
                  head_sha = excluded.head_sha, base_sha = excluded.base_sha,
                  is_draft = excluded.is_draft, review_requested = excluded.review_requested,
-                 profile = excluded.profile, open = 1, updated_at = excluded.updated_at"
+                 profile = excluded.profile, open = 1,
+                 github_updated_at = excluded.github_updated_at,
+                 updated_at = excluded.updated_at"
         ),
         params![
             repo,
@@ -351,7 +355,8 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
             snap.is_draft,
             snap.review_requested,
             profile,
-            snap.body
+            snap.body,
+            snap.updated_at
         ],
     )?;
     tx.execute(
@@ -456,6 +461,7 @@ mod tests {
                 }],
             }],
             files: None,
+            updated_at: None,
         }
     }
 

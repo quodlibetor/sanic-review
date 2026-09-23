@@ -27,6 +27,7 @@ const DEFAULT_API_URL: &str = "https://api.github.com";
 const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
 const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
 const DEFAULT_QUIET: Duration = Duration::from_mins(2);
+const DEFAULT_UPDATED_WITHIN_DAYS: u32 = 14;
 const DEFAULT_GIT_URL: &str = "https://github.com";
 const DEFAULT_CLAUDE: &str = "claude";
 const DEFAULT_MAX_RUNS: usize = 2;
@@ -80,6 +81,9 @@ pub struct PollSettings {
     pub min_notification_interval: Duration,
     /// How long a PR must go without new triggers before its run starts.
     pub quiet_period: Duration,
+    /// Only PRs GitHub saw activity on within this many days are looked
+    /// at. `None` is no limit.
+    pub updated_within_days: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -396,6 +400,11 @@ impl Config {
                     .poll
                     .quiet_secs
                     .map_or(DEFAULT_QUIET, Duration::from_secs),
+                updated_within_days: match raw.poll.updated_within_days {
+                    None => Some(DEFAULT_UPDATED_WITHIN_DAYS),
+                    Some(0) => None,
+                    Some(days) => Some(days),
+                },
             },
             review_requests: ReviewRequestSettings {
                 teams: TeamFilter::new(
@@ -656,6 +665,7 @@ struct RawPoll {
     reconcile_secs: Option<u64>,
     min_notification_secs: Option<u64>,
     quiet_secs: Option<u64>,
+    updated_within_days: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -860,6 +870,21 @@ mod tests {
         let err = parse("[profile.a]\nskip_titles = [\"[\"]\nrepos = [{ github = \"org\" }]\n")
             .unwrap_err();
         assert!(format!("{err:#}").contains("in profile `a`"), "{err:#}");
+    }
+
+    #[test]
+    fn the_recency_window_defaults_to_two_weeks_and_zero_lifts_it() {
+        assert_eq!(parse(EXAMPLE).unwrap().poll.updated_within_days, Some(14));
+        let with = |days: u32| {
+            parse(&format!(
+                "[poll]\nupdated_within_days = {days}\n[profile.a]\nrepos = [{{ github = \"org\" }}]\n"
+            ))
+            .unwrap()
+            .poll
+            .updated_within_days
+        };
+        assert_eq!(with(3), Some(3));
+        assert_eq!(with(0), None);
     }
 
     #[test]

@@ -72,6 +72,7 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 # reconcile_secs = ...                 # GraphQL reconcile interval
 # min_notification_secs = ...          # floor under GitHub's X-Poll-Interval
 # quiet_secs = ...                     # debounce: how long a PR must go quiet
+# updated_within_days = 14             # ignore PRs quiet for longer; 0 = no limit
 
 [review_requests]
 teams = ["*", "!storage-platform"]     # which of your teams' requests count
@@ -164,6 +165,14 @@ polls:
 Both loops write normalized rows. Triggers are computed by diffing GitHub state
 against stored state, never from notification payloads.
 
+- **Recent PRs only.** Only PRs GitHub saw activity on within
+  `poll.updated_within_days` (default 14, 0 for no limit) are looked at.
+  The reconcile searches add `updated:>=<date>`, which also keeps the
+  first reconcile short, and a refresh skips a PR whose `updatedAt` is
+  older, so a notification about it changes nothing. The TUI leaves such
+  PRs out. They aren't forgotten: an old PR comes back as soon as it's
+  updated again. PRs a reconcile no longer returns are marked no longer
+  open, as below, until then.
 - **Open PRs only.** A notification can point at a closed or merged PR,
   which still lists its pending review requests. Refreshes skip those PRs,
   so they don't look like new requests.
@@ -340,7 +349,7 @@ invited to draft replies or fixes on someone else's PR.
 | Table | Contents |
 |-------|----------|
 | `repos` | owner, name, mirror path |
-| `prs` | repo, number, title, description, author, is_mine, open, archived, matched profile |
+| `prs` | repo, number, title, description, author, is_mine, open, archived, GitHub updated time, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |
@@ -403,7 +412,7 @@ available when tuning instruction files.
 
   Every PR row shows its github.com URL, so it's clickable. Until the
   dashboard exists there are no dashboard URLs or `views`, so both PR panes
-  list every open tracked PR. Filtering to unseen items arrives with the
+  list every open tracked PR updated within the window. Filtering to unseen items arrives with the
   dashboard.
   The TUI opens its own read-only connection and rereads the store on a
   short interval, so the poller, scheduler and runner don't know it exists.
