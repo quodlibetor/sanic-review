@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
 };
 
@@ -33,6 +33,7 @@ struct Settings {
     profiles: HashMap<String, AgentProfile>,
     runner: RunnerSettings,
     git_url: String,
+    reference_dirs: Vec<PathBuf>,
 }
 
 impl Settings {
@@ -45,6 +46,7 @@ impl Settings {
                 .collect(),
             runner: config.runner.clone(),
             git_url: config.github.git_url.clone(),
+            reference_dirs: config.reference_dirs(),
         }
     }
 }
@@ -92,6 +94,7 @@ impl Worker {
             agent.clone(),
             &settings.runner,
             &settings.git_url,
+            settings.reference_dirs.clone(),
         ))
     }
 
@@ -224,5 +227,17 @@ mod tests {
         worker.configure(&config(1, "new"));
         tokio::task::yield_now().await;
         assert_eq!(worker.limit.available_permits(), 1);
+
+        let with_refs = Config::parse(
+            "[runner]\nread_paths = [\"/refs\"]\n[profile.new]\nrepos = [{ github = \"org\" }]\n",
+            Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        worker.configure(&with_refs);
+        assert_eq!(
+            worker.run_settings("new").unwrap().reference_dirs,
+            [PathBuf::from("/refs")]
+        );
     }
 }

@@ -72,7 +72,7 @@ struct Setup {
 
 impl Setup {
     fn settings(&self, profile: AgentProfile) -> RunSettings {
-        RunSettings::new(profile, &self.settings, &self.git_url)
+        RunSettings::new(profile, &self.settings, &self.git_url, vec![])
     }
 }
 
@@ -84,6 +84,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
         claude: fake_claude(fake.path(), script_body, output),
         max_concurrent: 1,
         timeout,
+        read_paths: vec![],
     };
     let runner = ReviewRunner::new(data.path());
     let git_url = remote.root.path().to_string_lossy().into_owned();
@@ -175,6 +176,41 @@ async fn review_flags_comments_outside_the_diff() {
     assert!(read(&run_dir, "transcript.jsonl").contains("sess-1"));
     assert!(read(&run_dir, "pr.diff").contains("+2"));
     assert!(!worktree.exists());
+}
+
+#[tokio::test]
+async fn reference_checkouts_are_readable_and_missing_ones_skipped() {
+    let output = success(&json!({
+        "summary": "s", "suggested_verdict": "none", "comments": []
+    }));
+    let s = setup("", &output, Duration::from_secs(30));
+    let other = TempDir::new().unwrap();
+    let missing = s.fake.path().join("moved-away");
+    let mut settings = s.settings(profile(vec![]));
+    settings.reference_dirs = vec![other.path().to_owned(), missing.clone()];
+    s.runner
+        .review(&s.run, &context(), &settings)
+        .await
+        .unwrap();
+
+    let args: Vec<String> = read(s.fake.path(), "args")
+        .lines()
+        .map(String::from)
+        .collect();
+    let add_dirs: Vec<&str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--add-dir")
+        .map(|w| w[1].as_str())
+        .collect();
+    let run_dir = s.data.path().join("runs/3");
+    assert_eq!(
+        add_dirs,
+        [run_dir.to_str().unwrap(), other.path().to_str().unwrap()]
+    );
+    let system = read(&run_dir, "system.md");
+    assert!(system.contains("Reference checkouts"), "{system}");
+    assert!(system.contains(other.path().to_str().unwrap()), "{system}");
+    assert!(!system.contains("moved-away"), "{system}");
 }
 
 #[tokio::test]

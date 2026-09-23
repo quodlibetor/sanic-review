@@ -123,6 +123,9 @@ pub struct RunnerSettings {
     pub max_concurrent: usize,
     /// A run still going after this long is killed and marked failed.
     pub timeout: Duration,
+    /// Extra directories the agent may read, besides the configured
+    /// checkouts; see [`Config::reference_dirs`].
+    pub read_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -251,6 +254,23 @@ impl Config {
         best
     }
 
+    /// Directories a review agent may read for context beyond the PR: every
+    /// local checkout in any profile, then `runner.read_paths`, without
+    /// duplicates. They may be at other revisions than the PR.
+    #[must_use]
+    pub fn reference_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let checkouts = self
+            .targets()
+            .filter_map(|(_, t)| t.checkout.as_ref().map(|c| &c.path));
+        for dir in checkouts.chain(&self.runner.read_paths) {
+            if !dirs.contains(dir) {
+                dirs.push(dir.clone());
+            }
+        }
+        dirs
+    }
+
     fn targets(&self) -> impl Iterator<Item = (&Profile, &Target)> {
         self.profiles
             .iter()
@@ -297,6 +317,13 @@ impl Config {
             Some(claude) => PathBuf::from(claude),
             None => PathBuf::from(DEFAULT_CLAUDE),
         };
+        let read_paths = raw
+            .runner
+            .read_paths
+            .iter()
+            .map(|p| paths.expand(p))
+            .collect::<Result<_>>()
+            .wrap_err("in `runner.read_paths`")?;
         let profiles = raw
             .profile
             .into_iter()
@@ -339,6 +366,7 @@ impl Config {
                     .runner
                     .timeout_secs
                     .map_or(DEFAULT_RUN_TIMEOUT, Duration::from_secs),
+                read_paths,
             },
             profiles,
         })
@@ -530,6 +558,8 @@ struct RawRunner {
     claude: Option<String>,
     max_concurrent: Option<usize>,
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    read_paths: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -717,6 +747,29 @@ mod tests {
             !TeamFilter::new(vec![])
                 .unwrap()
                 .allows(&TeamRef::new("o", "t"))
+        );
+    }
+
+    #[test]
+    fn reference_dirs_are_checkouts_then_read_paths_deduplicated() {
+        let config = parse(
+            r#"
+            [runner]
+            read_paths = ["extra", "vuln-eval"]
+            [profile.a]
+            repos = ["vuln-eval", { github = "org" }]
+            [profile.b]
+            repos = [{ repo = "services", paths = ["x/**"] }, "vuln-eval"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.reference_dirs(),
+            [
+                PathBuf::from("/base/vuln-eval"),
+                "/base/services".into(),
+                "/base/extra".into()
+            ]
         );
     }
 

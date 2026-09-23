@@ -34,8 +34,8 @@ no separate daemon mode.
 `serve` watches its config file. A valid edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
-Profiles, `[runner]` and `github.git_url` apply to runs that start after
-the reload. Lowering `runner.max_concurrent` takes effect as running runs
+Profiles, `[runner]` (including `read_paths`), `github.git_url` and the
+set of reference checkouts apply to runs that start after the reload. Lowering `runner.max_concurrent` takes effect as running runs
 finish.
 
 The poller has its own SQLite connection; the scheduler and runner share a
@@ -76,6 +76,7 @@ teams = ["*", "!storage-platform"]     # which of your teams' requests count
 # claude = "claude"                    # executable; a bare name uses PATH
 # max_concurrent = ...                 # agent runs at once, across all PRs
 # timeout_secs = ...                   # kill a run that takes longer
+# read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
@@ -213,6 +214,13 @@ Rules:
    Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
    the agent reads their `SKILL.md` files directly. A run that outlives
    `runner.timeout_secs` is killed and fails.
+   So the agent can check changes that span repositories, every local
+   checkout named in any profile's `repos` (the PR's own repo's included)
+   is also an `--add-dir`, plus any `runner.read_paths`. The system prompt
+   lists them as read-only reference checkouts that may be at a different
+   revision than the PR. A directory that doesn't exist when the run
+   starts is skipped with a warning. The agent still can't write to them,
+   since it has no write tools.
 4. **Parse.** Validate the result against the schema. Check each inline
    comment's `(path, line, side)` against the PR diff hunks. A draft that
    fails the check is still stored, flagged `unanchored`, so you can re-anchor
@@ -345,6 +353,10 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   submit path writes with it.
 - Worktrees come from untrusted code. The agent never builds or runs that code
   unless a profile explicitly allows it (the default is off).
+- The agent can read your configured checkouts and `runner.read_paths`,
+  including untracked files such as `.env`. Injected PR text could get it
+  to copy their contents into a draft; nothing leaves the machine unless you
+  post that draft, so read drafts before posting them.
 
 ## Development
 

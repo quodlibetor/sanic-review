@@ -36,9 +36,13 @@ hunk. Don't repeat points already made in the existing threads.
 ";
 
 /// The system prompt: fixed review instructions, then each of the profile's
-/// instruction files, then where its skills are.
+/// instruction files, then where its skills and the reference checkouts are.
 #[must_use]
-pub fn system_prompt(instructions: &[(String, String)], skills: &[&Path]) -> String {
+pub fn system_prompt(
+    instructions: &[(String, String)],
+    skills: &[&Path],
+    references: &[&Path],
+) -> String {
     let mut out = String::from(REVIEW_INSTRUCTIONS);
     for (name, text) in instructions {
         let _ = write!(out, "\n# Instructions from {name}\n\n{}\n", text.trim_end());
@@ -49,6 +53,18 @@ pub fn system_prompt(instructions: &[(String, String)], skills: &[&Path]) -> Str
              Read the ones relevant to this PR.\n\n",
         );
         for dir in skills {
+            let _ = writeln!(out, "- {}", dir.display());
+        }
+    }
+    if !references.is_empty() {
+        out.push_str(
+            "\n# Reference checkouts\n\nThese are local checkouts you may read, for \
+             example to check how the PR fits code in other repositories. They are \
+             read-only reference material, not the PR: each may be at a different \
+             revision than the PR, and the PR's code is only in the working \
+             directory.\n\n",
+        );
+        for dir in references {
             let _ = writeln!(out, "- {}", dir.display());
         }
     }
@@ -248,10 +264,11 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_appends_instructions_and_skills() {
+    fn system_prompt_appends_instructions_skills_and_references() {
         insta::assert_snapshot!(system_prompt(
             &[("general.md".into(), "Be terse.\n".into())],
-            &[Path::new("/skills/vuln")]
+            &[Path::new("/skills/vuln")],
+            &[Path::new("/src/services"), Path::new("/src/vuln-eval")]
         ));
     }
 
