@@ -204,12 +204,28 @@ impl Store {
     }
 
     /// Requeues runs a previous process left running, and returns every
-    /// queued run, oldest first.
-    pub fn recover_runs(&self) -> Result<Vec<QueuedRun>> {
-        self.conn.execute(
+    /// queued run, oldest first. Where a PR has both, only the most recently
+    /// queued survives: a queued run can only sit beside a running one if it
+    /// came later, so it's for the newer head, and the rest are superseded.
+    pub fn recover_runs(&mut self) -> Result<Vec<QueuedRun>> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            &format!(
+                "UPDATE runs SET status = 'superseded', finished_at = {NOW}
+                 WHERE status IN ('queued', 'running') AND EXISTS (
+                     SELECT 1 FROM runs AS newer
+                     WHERE newer.repo = runs.repo AND newer.number = runs.number
+                       AND newer.kind = runs.kind
+                       AND newer.status IN ('queued', 'running')
+                       AND (newer.queued_at, newer.id) > (runs.queued_at, runs.id))"
+            ),
+            [],
+        )?;
+        tx.execute(
             "UPDATE runs SET status = 'queued', started_at = NULL WHERE status = 'running'",
             [],
         )?;
+        tx.commit().wrap_err("recovering interrupted runs")?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
              FROM runs WHERE status = 'queued' AND kind = ?1 ORDER BY id",
@@ -559,13 +575,23 @@ mod tests {
         let mut store = store();
         let running = store.queue_review(&request("h1")).unwrap().unwrap();
         store.claim_run(running.id).unwrap();
+        assert_eq!(store.recover_runs().unwrap(), [running]);
+        assert_eq!(store.run_counts().unwrap().queued, 1);
+    }
+
+    #[test]
+    fn an_interrupted_run_on_an_older_head_is_superseded() {
+        let mut store = store();
+        let running = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(running.id).unwrap();
         let mut push = request("h2");
         push.trigger = ReviewTrigger::Push {
             from_sha: "h1".into(),
         };
         let queued = store.queue_review(&push).unwrap().unwrap();
-        assert_eq!(store.recover_runs().unwrap(), [running, queued]);
-        assert_eq!(store.run_counts().unwrap().queued, 2);
+        assert_eq!(store.recover_runs().unwrap(), [queued]);
+        assert_eq!(status(&store, running.id), "superseded");
+        assert_eq!(store.run_counts().unwrap().queued, 1);
     }
 
     #[test]

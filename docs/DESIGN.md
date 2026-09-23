@@ -300,7 +300,8 @@ invited to draft replies or fixes on someone else's PR.
 
 A run's summary is stored as a `summary` draft, so it can be edited like any
 other draft. Runs left `running` by a previous process are requeued at
-startup.
+startup, unless the same PR also has a run queued after it: that one is for
+a newer head, so the older run is marked `superseded` instead.
 
 Keeping both the original and the edited body means the edit history is
 available when tuning instruction files.
