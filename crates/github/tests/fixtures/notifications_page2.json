@@ -1,0 +1,13 @@
+[
+  {
+    "id": "103",
+    "reason": "comment",
+    "updated_at": "2026-09-19T09:00:00Z",
+    "subject": {
+      "title": "Old thread",
+      "type": "PullRequest",
+      "url": "https://api.github.com/repos/org/other/pulls/3"
+    },
+    "repository": { "full_name": "org/other" }
+  }
+]
