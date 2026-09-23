@@ -7,6 +7,8 @@ mod client;
 mod graphql;
 mod notifications;
 mod review;
+#[cfg(test)]
+mod schema_check;
 mod token;
 
 pub use client::{ApiError, Client};

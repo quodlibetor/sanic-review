@@ -59,6 +59,17 @@ fragment comment on Comment {
   ... on Reactable { reactionGroups { viewerHasReacted } }
 }";
 
+const VIEWER_QUERY: &str = "query { viewer { login } }";
+
+/// Every GraphQL document sent, for the schema check in the tests. A new
+/// query goes here too.
+#[cfg(test)]
+pub(crate) const QUERIES: &[(&str, &str)] = &[
+    ("PR_QUERY", PR_QUERY),
+    ("SEARCH_QUERY", SEARCH_QUERY),
+    ("VIEWER_QUERY", VIEWER_QUERY),
+];
+
 const SEARCH_QUERY: &str = r"
 query($q: String!, $after: String) {
   search(query: $q, type: ISSUE, first: 50, after: $after) {
@@ -135,9 +146,7 @@ impl Client {
         struct Data {
             viewer: Login,
         }
-        let data: Data = self
-            .graphql("query { viewer { login } }", json!({}), "viewer")
-            .await?;
+        let data: Data = self.graphql(VIEWER_QUERY, json!({}), "viewer").await?;
         Ok(data.viewer.login)
     }
 
