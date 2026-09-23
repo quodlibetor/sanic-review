@@ -15,7 +15,7 @@ not a v1 limitation. The agent never has write credentials.
 One binary, `sanic-review`, running on a tokio runtime:
 
 ```
-sanic-review serve [--ui logs|tui] [--port N] [--config PATH]
+sanic-review serve [--ui logs|tui] [--port N] [--config PATH] [--data-dir PATH]
 ```
 
 It runs these tasks in one process:
@@ -113,6 +113,18 @@ polls:
 Both loops write normalized rows. Triggers are computed by diffing GitHub state
 against stored state, never from notification payloads.
 
+- **Team review requests.** The PR query only shows review requests made to
+  you directly. A PR in the latest `review-requested:@me` search result
+  counts as requested too, which covers requests made to your teams.
+- **Newest items only.** PR snapshots fetch the newest reviews, threads and
+  comments per connection, and log a warning when older ones were cut off.
+  A new reply in an old thread that falls outside the newest threads is
+  missed until pagination lands; the warning is the signal. Changed files
+  are paginated in full, and only fetched when a path-scoped entry covers
+  the repo.
+- **Sequential refreshes.** Both loops queue PR keys, and one task refreshes
+  the queue in turn. A rate limit pauses everything and keeps the queue.
+
 ## Triggers
 
 | Situation | Trigger | Run kind |
@@ -131,6 +143,11 @@ Rules:
   run is keyed by `(pr, newest comment id covered)`.
 - **Force pushes.** If the last reviewed SHA isn't an ancestor of the new
   head, the incremental review gets a range-diff instead of a plain diff.
+- **First sight is a baseline.** The first time a PR is seen, its existing
+  comments and reviews are recorded without triggering. Only a pending review
+  request triggers then, so starting the tool doesn't replay history.
+- **Bare approvals.** On your PRs, a review triggers `respond` only if it has
+  a body or requests changes.
 - **Stale drafts.** When a new head SHA arrives, pending drafts anchored on
   lines that changed are marked `stale`. They stay visible, not deleted.
 

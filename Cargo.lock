@@ -1552,9 +1552,17 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "sanic-core",
+ "sanic-github",
+ "sanic-runner",
+ "sanic-store",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
  "tracing-error",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
