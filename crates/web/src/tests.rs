@@ -511,7 +511,9 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
 
     let expected = json!({
         "commit_id": "head7",
-        "body": "Mostly fine; see inline.\n\n**src/gone.rs:40**\n\nThis file isn't in the diff.",
+        "body": "Mostly fine; see inline.\n\n\
+            **[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**\n\n\
+            This file isn't in the diff.",
         "event": "REQUEST_CHANGES",
         "comments": [
             { "path": "src/lib.rs", "body": "Why `m`?", "line": 3, "side": "RIGHT" },

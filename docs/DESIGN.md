@@ -436,7 +436,10 @@ embedded in the binary, so nothing is fetched at runtime.
   images, HTML tags and invisible characters. The body is the summary
   if you accepted it. Accepted comments go out as inline comments in one
   GitHub review, anchored to the reviewed run's head, and accepted comments
-  that aren't on a line of the diff are added to the body. You confirm, then
+  that aren't on a line of the diff are added to the body. Each one there is
+  headed by a link to its lines in the file at that head, shown as source
+  even for Markdown, or by its plain `path:line` for lines of the old
+  file. You confirm, then
   it posts, only if the payload is still exactly what the preview showed;
   otherwise nothing is sent and you preview again. It's sent once: a GitHub
   error is shown and nothing is retried or marked. Once GitHub has it, its
