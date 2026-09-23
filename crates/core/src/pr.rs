@@ -11,6 +11,15 @@ pub struct PrKey {
     pub number: u32,
 }
 
+impl PrKey {
+    /// The PR's page on github.com. Logs identify PRs by this so the link
+    /// is clickable in a terminal.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    }
+}
+
 impl fmt::Display for PrKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}#{}", self.repo, self.number)
@@ -122,5 +131,19 @@ impl PrSnapshot {
     #[must_use]
     pub fn is_authored_by(&self, login: &str) -> bool {
         self.author.eq_ignore_ascii_case(login)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_is_the_github_pull_page() {
+        let key = PrKey {
+            repo: RepoName::new("Org", "Repo"),
+            number: 7,
+        };
+        assert_eq!(key.url(), "https://github.com/org/repo/pull/7");
     }
 }

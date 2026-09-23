@@ -124,7 +124,7 @@ impl Store {
             )?;
         }
         tx.commit()
-            .wrap_err_with(|| format!("recording {}", snapshot.key))
+            .wrap_err_with(|| format!("recording {}", snapshot.key.url()))
     }
 
     /// Logged triggers, oldest first.

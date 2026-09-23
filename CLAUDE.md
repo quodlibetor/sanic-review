@@ -25,6 +25,9 @@ same task. `mise run coverage` is informational.
   outside tests.
 - Errors: `color_eyre::eyre::Result` with `.wrap_err(...)` at boundaries.
   Failures a caller branches on are return-type enums, not downcasts.
+- Logs and error messages identify a PR only by its URL (`PrKey::url()`),
+  never `owner/name#N`, so it's clickable. Put it on the span when one
+  covers the work, rather than repeating it on each event.
 - Tests never touch the network or spend tokens: GitHub, `claude` and the
   clock go behind traits with fakes.
 

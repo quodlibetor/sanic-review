@@ -114,7 +114,7 @@ async fn run_or_hold(
     info!("--no-reviews: reviews are queued but not run");
     while let Some(run) = runs.recv().await {
         info!(
-            pr = %run.request.key,
+            url = %run.request.key.url(),
             head = %run.request.head_sha,
             "review queued, not run (--no-reviews)"
         );
@@ -182,7 +182,7 @@ async fn poll_forever<G: GithubApi>(
         {
             match poller
                 .refresh(&key)
-                .instrument(info_span!("refresh", pr = %key))
+                .instrument(info_span!("refresh", url = %key.url()))
                 .await
             {
                 Ok(Some(refreshed)) => {
@@ -207,7 +207,7 @@ async fn poll_forever<G: GithubApi>(
                     backoff = handle(err)?;
                 }
                 Err(err) => {
-                    warn!(pr = %key, "refresh failed: {err}");
+                    warn!(url = %key.url(), "refresh failed: {err}");
                 }
             }
         }
@@ -270,9 +270,8 @@ fn log_triggers(refreshed: &Refreshed) {
     let snap = &refreshed.snapshot;
     for trigger in &refreshed.triggers {
         info!(
-            pr = %snap.key,
+            url = %snap.key.url(),
             profile = %refreshed.profile,
-            url = %snap.url,
             "{}",
             describe(trigger)
         );

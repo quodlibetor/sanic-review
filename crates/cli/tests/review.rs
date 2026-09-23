@@ -279,7 +279,10 @@ fn replace_number(text: &str, key: &str, value: u64) -> String {
 async fn serve_drafts_a_requested_review() {
     let w = world().await;
     let line = w.serve_until("drafted").await;
-    assert!(line.contains("org/repo#7"), "{line}");
+    assert!(
+        line.contains("url=https://github.com/org/repo/pull/7"),
+        "{line}"
+    );
     assert!(line.contains("Renames a line."), "{line}");
     assert!(line.contains("unanchored=1"), "{line}");
 
@@ -322,7 +325,10 @@ async fn no_reviews_queues_without_running_until_a_normal_start() {
     let line = w
         .serve_with_until(&["--no-reviews"], "review queued, not run")
         .await;
-    assert!(line.contains("org/repo#7"), "{line}");
+    assert!(
+        line.contains("url=https://github.com/org/repo/pull/7"),
+        "{line}"
+    );
     assert!(
         !w.fake.join("env").exists(),
         "claude ran despite --no-reviews"
@@ -343,7 +349,10 @@ async fn a_relative_data_dir_still_reviews() {
     let line = w
         .serve_with_data_dir_until(&[], OsStr::new("data"), "drafted")
         .await;
-    assert!(line.contains("org/repo#7"), "{line}");
+    assert!(
+        line.contains("url=https://github.com/org/repo/pull/7"),
+        "{line}"
+    );
     let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
     assert!(!w.data.join("worktrees/1").exists());

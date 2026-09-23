@@ -92,7 +92,7 @@ impl Mirrors {
             &["fetch", "--quiet", "--no-tags", &url, &pull_ref, base_sha],
         )
         .await
-        .wrap_err_with(|| format!("fetching {key} from {url}"))?;
+        .wrap_err_with(|| format!("fetching {} from {url}", key.url()))?;
         if git(
             &mirror,
             &["cat-file", "-e", &format!("{head_sha}^{{commit}}")],
@@ -101,7 +101,8 @@ impl Mirrors {
         .is_err()
         {
             return Err(eyre!(
-                "{key} head {head_sha} is gone; it was probably force-pushed away"
+                "{} head {head_sha} is gone; it was probably force-pushed away",
+                key.url()
             ));
         }
         let merge_base = git(&mirror, &["merge-base", base_sha, head_sha])
@@ -123,7 +124,7 @@ impl Mirrors {
             ],
         )
         .await
-        .wrap_err_with(|| format!("checking out {key} at {head_sha}"))?;
+        .wrap_err_with(|| format!("checking out {} at {head_sha}", key.url()))?;
         Ok(Worktree {
             mirror,
             path: dest.to_owned(),

@@ -213,7 +213,7 @@ impl Client {
             pull_request: Option<RawPr>,
         }
 
-        let what = format!("PR {key}");
+        let what = format!("PR {}", key.url());
         let resp: Response<Data> = self
             .graphql_raw(
                 PR_QUERY,
@@ -296,7 +296,7 @@ impl Client {
             filename: String,
             previous_filename: Option<String>,
         }
-        let what = format!("files of {key}");
+        let what = format!("files of {}", key.url());
         let mut url = format!(
             "{}?per_page=100",
             self.url(&format!(
@@ -358,10 +358,11 @@ struct BackPage {
 }
 
 impl<T> Connection<T> {
-    /// The nodes, warning if older ones were cut off.
-    fn into_nodes(self, what: &str, key: &PrKey) -> Vec<T> {
+    /// The nodes, warning if older ones were cut off. The caller's span
+    /// says which PR.
+    fn into_nodes(self, what: &str) -> Vec<T> {
         if self.page_info.is_some_and(|p| p.has_previous_page) {
-            tracing::warn!(pr = %key, "{what} truncated to the newest {}", self.nodes.len());
+            tracing::warn!("{what} truncated to the newest {}", self.nodes.len());
         }
         self.nodes
     }
@@ -474,7 +475,7 @@ impl RawPr {
         });
         let reviews = self
             .reviews
-            .into_nodes("reviews", &key)
+            .into_nodes("reviews")
             .into_iter()
             .map(|r| Review {
                 state: review_state(&r.state),
@@ -491,16 +492,16 @@ impl RawPr {
             resolved: false,
             comments: self
                 .comments
-                .into_nodes("conversation comments", &key)
+                .into_nodes("conversation comments")
                 .into_iter()
                 .map(Comment::from)
                 .collect(),
         }];
-        for t in self.review_threads.into_nodes("review threads", &key) {
+        for t in self.review_threads.into_nodes("review threads") {
             threads.push(Thread {
                 comments: t
                     .comments
-                    .into_nodes("thread comments", &key)
+                    .into_nodes("thread comments")
                     .into_iter()
                     .map(Comment::from)
                     .collect(),
