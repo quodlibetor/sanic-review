@@ -6,6 +6,7 @@
 mod common;
 
 use std::{
+    future::pending,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -149,9 +150,15 @@ async fn review_flags_comments_outside_the_diff() {
 
     let result = s
         .runner
-        .review(&s.run, &context(), &s.settings(profile(vec![instructions])))
+        .review(
+            &s.run,
+            &context(),
+            &s.settings(profile(vec![instructions])),
+            pending(),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("not cancelled");
     assert_eq!(result.summary, "One nit.");
     assert_eq!(result.verdict, Verdict::Comment);
     assert_eq!(result.session_id.as_deref(), Some("sess-1"));
@@ -192,7 +199,7 @@ async fn reference_checkouts_are_readable_and_missing_ones_skipped() {
     let mut settings = s.settings(profile(vec![]));
     settings.reference_dirs = vec![other.path().to_owned(), missing.clone()];
     s.runner
-        .review(&s.run, &context(), &settings)
+        .review(&s.run, &context(), &settings, pending())
         .await
         .unwrap();
 
@@ -224,7 +231,7 @@ async fn agent_failures_fail_the_run_and_clean_up() {
     let s = setup("", &output, Duration::from_secs(30));
     let err = s
         .runner
-        .review(&s.run, &context(), &s.settings(profile(vec![])))
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
         .await
         .unwrap_err();
     assert!(
@@ -240,10 +247,38 @@ async fn answers_that_break_the_schema_are_rejected() {
     let s = setup("", &output, Duration::from_secs(30));
     let err = s
         .runner
-        .review(&s.run, &context(), &s.settings(profile(vec![])))
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("review schema"), "{err:?}");
+}
+
+#[tokio::test]
+async fn cancelling_kills_the_agent_and_removes_the_worktree() {
+    // `exec` so the pid that gets killed is the one that would answer.
+    let s = setup(
+        "touch \"$d/started\"\nexec sleep 30",
+        "",
+        Duration::from_secs(60),
+    );
+    let started = s.fake.path().join("started");
+    let cancel = async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let begun = std::time::Instant::now();
+    let result = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), cancel)
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    assert!(
+        begun.elapsed() < Duration::from_secs(20),
+        "waited for the agent"
+    );
+    assert!(!s.data.path().join("worktrees/3").exists());
 }
 
 #[tokio::test]
@@ -251,7 +286,7 @@ async fn slow_agents_are_killed() {
     let s = setup("sleep 30", "", Duration::from_millis(300));
     let err = s
         .runner
-        .review(&s.run, &context(), &s.settings(profile(vec![])))
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("ran longer than"), "{err:?}");
@@ -271,7 +306,11 @@ async fn agents_that_never_read_the_prompt_are_killed() {
         body: "x".repeat(1 << 20),
         ..context()
     };
-    let err = s.runner.review(&s.run, &ctx, &settings).await.unwrap_err();
+    let err = s
+        .runner
+        .review(&s.run, &ctx, &settings, pending())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("ran longer than"), "{err:?}");
 }
 
@@ -284,6 +323,7 @@ async fn missing_instruction_files_are_errors() {
             &s.run,
             &context(),
             &s.settings(profile(vec![s.fake.path().join("nope.md")])),
+            pending(),
         )
         .await
         .unwrap_err();

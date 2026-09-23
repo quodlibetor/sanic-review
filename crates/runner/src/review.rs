@@ -92,12 +92,17 @@ impl ReviewRunner {
 
     /// Runs `run` to completion. The worktree is removed whether or not the
     /// review succeeds.
+    ///
+    /// If `cancel` completes while the agent is working, the agent is killed
+    /// and this returns `None`. Checkout isn't interrupted, since it's short
+    /// and stopping git midway would leave the worktree half made.
     pub async fn review(
         &self,
         run: &QueuedRun,
         ctx: &PrContext,
         settings: &RunSettings,
-    ) -> Result<ReviewResult> {
+        cancel: impl Future<Output = ()>,
+    ) -> Result<Option<ReviewResult>> {
         let req = &run.request;
         let run_dir = self.data_dir.join("runs").join(run.id.to_string());
         tokio::fs::create_dir_all(&run_dir)
@@ -115,9 +120,14 @@ impl ReviewRunner {
             )
             .await?;
         let claude = Claude::new(settings.claude.clone(), settings.timeout);
-        let result = Self::review_in(&claude, &worktree, &run_dir, run, ctx, settings).await;
+        // Dropping the review on cancel drops the agent's process handle,
+        // which kills it.
+        let result = tokio::select! {
+            result = Self::review_in(&claude, &worktree, &run_dir, run, ctx, settings) => Some(result),
+            () = cancel => None,
+        };
         worktree.remove().await;
-        result
+        result.transpose()
     }
 
     async fn review_in(

@@ -189,8 +189,11 @@ Rules:
   trigger replaces a pending one, the review runs at the newer head and
   stays full if either trigger asked for a full review. Once the timer
   fires the run is `queued`; queueing another review of the PR marks a run
-  that hasn't started `superseded`. A run that has started is left to
-  finish. Reviews still waiting out the quiet interval are held in memory
+  that hasn't started `superseded`. A review already running on a different
+  head is stopped: the agent is killed, its worktree removed, and the run
+  marked `superseded` with no drafts, since they'd be about code that has
+  since changed. (A later alternative is to hand the running agent the new
+  diff and let it carry on, keeping the work it has done.) Reviews still waiting out the quiet interval are held in memory
   only. To cover a restart during that window, the first time `serve`
   refreshes each PR after starting (the first reconcile covers every open
   one), a standing review request on someone else's PR that matches a
