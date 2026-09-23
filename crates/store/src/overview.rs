@@ -234,7 +234,7 @@ impl Store {
 }
 
 /// The PR key in a row's first two columns.
-fn key_columns(row: &Row<'_>) -> rusqlite::Result<PrKey> {
+pub(crate) fn key_columns(row: &Row<'_>) -> rusqlite::Result<PrKey> {
     let repo: String = row.get(0)?;
     Ok(PrKey {
         repo: RepoName::parse(&repo)
