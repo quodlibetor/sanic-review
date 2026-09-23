@@ -19,6 +19,7 @@ color-eyre = "0.6"
 globset = "0.4"
 inquire = "0.9"
 notify = "8.2"
+ratatui = "0.30"
 indexmap = { version = "2.14", features = ["serde"] }
 insta = "1.48"
 reqwest = { version = "0.13", features = ["json", "query"] }

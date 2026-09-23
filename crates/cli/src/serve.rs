@@ -15,7 +15,7 @@ use std::{
 
 use color_eyre::{
     Section,
-    eyre::{Result, WrapErr, bail},
+    eyre::{Result, WrapErr},
 };
 use sanic_core::{
     config::{Config, default_config_path, default_data_dir},
@@ -33,31 +33,41 @@ use tokio::{
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
-    ServeArgs, Ui,
+    ServeArgs, Ui, logging,
     poll::{GithubApi, Poller, Refreshed},
     schedule::{Update, schedule, standing_request},
+    tui::Tui,
     watch::ConfigWatcher,
     work::Worker,
 };
 
 pub async fn run(args: ServeArgs) -> Result<()> {
-    if args.ui == Ui::Tui {
-        bail!("`--ui tui` is not implemented yet; use `--ui logs`");
-    }
     // Absolute, because runs hand these paths to `git -C <mirror>` and to
     // `claude` running in a worktree, where relative ones would resolve
     // somewhere else.
+    let data_dir = std::path::absolute(match args.data_dir {
+        Some(dir) => dir,
+        None => default_data_dir()?,
+    })
+    .wrap_err("resolving the data directory")?;
+    // Before anything logs, so the TUI's log pane and file get it all.
+    let logs = match args.ui {
+        Ui::Logs => {
+            logging::init_stdout();
+            None
+        }
+        Ui::Tui => {
+            std::fs::create_dir_all(&data_dir)
+                .wrap_err_with(|| format!("creating data directory {}", data_dir.display()))?;
+            Some(logging::init_tui(&data_dir.join("serve.log"))?)
+        }
+    };
     let config_path = std::path::absolute(match args.config {
         Some(path) => path,
         None => default_config_path()?,
     })
     .wrap_err("resolving the config path")?;
     let config = Config::load(&config_path, &VcsResolver)?;
-    let data_dir = std::path::absolute(match args.data_dir {
-        Some(dir) => dir,
-        None => default_data_dir()?,
-    })
-    .wrap_err("resolving the data directory")?;
     let db_path = data_dir.join("state.db");
     let store = Store::open(&db_path)?;
     // The scheduler and worker share a second connection, so the poller
@@ -89,8 +99,25 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
+    let mut ui = match logs {
+        Some(logs) => Some(Tui::start(&db_path, me.clone(), args.no_reviews, logs)?),
+        None => None,
+    };
+    let quit = async {
+        match &mut ui {
+            Some(ui) => ui.closed().await,
+            None => std::future::pending().await,
+        }
+    };
+
     let mut poller = Poller::new(github, store, config, me);
+    // Dropping `ui` afterwards restores the terminal before any error is
+    // printed.
     tokio::select! {
+        result = quit => {
+            info!("shutting down");
+            result
+        }
         result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
         result = schedule(updates_rx, run_store, runs) => result,
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),

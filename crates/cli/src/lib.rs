@@ -1,9 +1,11 @@
 //! The `sanic-review` command line.
 
+pub mod logging;
 pub mod poll;
 pub mod schedule;
 mod serve;
 mod setup;
+mod tui;
 mod watch;
 mod work;
 
@@ -55,7 +57,8 @@ pub struct ServeArgs {
 enum Ui {
     /// Structured log lines plus a summary line on each state change.
     Logs,
-    /// A terminal summary of items you haven't looked at.
+    /// A terminal summary of tracked PRs, run activity and the log. Logs go
+    /// to `serve.log` in the data directory as well.
     Tui,
 }
 
@@ -63,7 +66,10 @@ impl Cli {
     pub async fn run(self) -> Result<()> {
         match self.command {
             Command::Serve(args) => serve::run(args).await,
-            Command::Setup(args) => setup::run(args).await,
+            Command::Setup(args) => {
+                logging::init_stdout();
+                setup::run(args).await
+            }
         }
     }
 }
