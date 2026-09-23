@@ -166,7 +166,9 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// PRs in watched repos with notifications since the last poll, and
-    /// GitHub's requested poll interval.
+    /// GitHub's requested poll interval. Notifications last updated before
+    /// `poll.updated_within_days` are dropped without fetching their PR:
+    /// on a first poll that can be most of them.
     pub async fn poll_notifications(&mut self) -> Result<(Vec<PrKey>, Option<Duration>), ApiError> {
         let since = self.store.poll_state(LAST_MODIFIED_KEY)?;
         match self.github.notifications(since.as_deref()).await? {
@@ -180,8 +182,10 @@ impl<G: GithubApi> Poller<G> {
                     self.store
                         .set_poll_state(LAST_MODIFIED_KEY, &last_modified)?;
                 }
+                let since = self.window_start();
                 let keys = notifications
                     .into_iter()
+                    .filter(|n| since.as_deref().is_none_or(|s| n.updated_at.as_str() >= s))
                     .filter_map(|n| n.pr)
                     .filter(|k| self.config.watches(&k.repo))
                     .collect();
@@ -250,6 +254,8 @@ mod tests {
         prs: RefCell<HashMap<PrKey, PrSnapshot>>,
         notifications: Vec<Notification>,
         seen_since: RefCell<Vec<Option<String>>>,
+        /// Every PR `pull_request` was asked for, in order.
+        fetched: RefCell<Vec<PrKey>>,
         teams: Vec<TeamRef>,
     }
 
@@ -284,6 +290,7 @@ mod tests {
             _me: &str,
             with_files: bool,
         ) -> Result<Option<PrSnapshot>, ApiError> {
+            self.fetched.borrow_mut().push(key.clone());
             Ok(self.prs.borrow().get(key).cloned().map(|mut s| {
                 if !with_files {
                     s.files = None;
@@ -536,19 +543,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notifications_outside_the_window_fetch_nothing() {
+        let old = |i: u32| Notification {
+            id: i.to_string(),
+            reason: "comment".into(),
+            // The window starts 2026-09-09T16:33:51Z.
+            updated_at: "2026-09-09T16:33:50Z".into(),
+            pr: Some(key("org/repo", i)),
+        };
+        let mut notifications: Vec<Notification> = (1..=1000).map(old).collect();
+        notifications.push(Notification {
+            updated_at: "2026-09-20T00:00:00Z".into(),
+            ..old(1001)
+        });
+        let github = FakeGithub {
+            notifications,
+            ..FakeGithub::default()
+        };
+        let mut poller = poller(github);
+        let (keys, _) = poller.poll_notifications().await.unwrap();
+        assert_eq!(keys, [key("org/repo", 1001)]);
+        for key in &keys {
+            poller.refresh(key).await.unwrap();
+        }
+        assert_eq!(*poller.github.fetched.borrow(), keys);
+        // Last-Modified still moves on, so the old ones aren't seen again.
+        assert_eq!(
+            poller
+                .store()
+                .poll_state(LAST_MODIFIED_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("lm-1")
+        );
+    }
+
+    #[tokio::test]
     async fn notifications_resume_from_last_modified() {
         let github = FakeGithub {
             notifications: vec![
                 Notification {
                     id: "1".into(),
                     reason: "comment".into(),
-                    updated_at: "x".into(),
+                    updated_at: "2026-09-20T00:00:00Z".into(),
                     pr: Some(key("org/repo", 1)),
                 },
                 Notification {
                     id: "2".into(),
                     reason: "comment".into(),
-                    updated_at: "x".into(),
+                    updated_at: "2026-09-20T00:00:00Z".into(),
                     pr: Some(key("elsewhere/x", 1)),
                 },
             ],
