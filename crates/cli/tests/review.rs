@@ -85,7 +85,8 @@ fn fake_claude(dir: &Path) -> std::path::PathBuf {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nd='{}'\nenv > \"$d/env\"\ncat > /dev/null\n\
+            "#!/bin/sh\nd='{}'\nenv > \"$d/env\"\nprintf '%s\\n' \"$@\" > \"$d/args\"\n\
+             pwd > \"$d/cwd\"\ncat > /dev/null\n\
              if [ -e \"$d/hang\" ]; then echo $$ > \"$d/pid\"; exec sleep 60; fi\n\
              cat \"$d/output.jsonl\"\n",
             dir.display()
@@ -458,6 +459,72 @@ async fn ctrl_c_cancels_a_running_review_and_requeues_it() {
     let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().queued, 1);
     assert!(!w.data.join("worktrees/1").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_resumes_the_session_in_the_reviews_worktree() {
+    let w = world().await;
+    w.serve_until("drafted").await;
+    let chat = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sanic-review"))
+            .arg("chat")
+            .args(extra)
+            .arg("--config")
+            .arg(&w.config)
+            .arg("--data-dir")
+            .arg(&w.data)
+            .env("GITHUB_TOKEN", "t0ken")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let worktree = w.data.join("worktrees/1");
+
+    let output = chat(&["https://github.com/org/repo/pull/7"]);
+    assert!(output.status.success(), "{output:?}");
+    let cwd = std::fs::read_to_string(w.fake.join("cwd")).unwrap();
+    assert_eq!(Path::new(cwd.trim()), worktree);
+    let args = std::fs::read_to_string(w.fake.join("args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    for flag in ["--restricted", "--strict-mcp-config"] {
+        assert!(args.contains(&flag), "{args:?}");
+    }
+    assert!(
+        args.windows(2).any(|a| a == ["--resume", "sess-9"]),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2).any(|a| a == ["--tools", "Read,Grep,Glob"]),
+        "{args:?}"
+    );
+    assert!(!args.contains(&"-p"), "{args:?}");
+    let env = std::fs::read_to_string(w.fake.join("env")).unwrap();
+    assert!(!env.contains("GITHUB_TOKEN"), "{env}");
+    assert!(!worktree.exists(), "the chat's worktree outlived it");
+
+    // A worktree already there means a chat may be open: refused.
+    std::fs::create_dir_all(&worktree).unwrap();
+    let output = chat(&["1"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("another chat of run 1 may be open"),
+        "{stderr}"
+    );
+    std::fs::remove_dir(&worktree).unwrap();
+
+    // Printing the command leaves the worktree for it, until --cleanup.
+    let output = chat(&["--print-command", "1"]);
+    assert!(output.status.success(), "{output:?}");
+    let line = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        line.starts_with(&format!("cd {} && env -u GITHUB_TOKEN", worktree.display())),
+        "{line}"
+    );
+    assert!(worktree.join("lib.rs").exists());
+    assert!(chat(&["--cleanup", "1"]).status.success());
+    assert!(!worktree.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,6 +1,7 @@
 //! The `sanic-review` command line.
 
 mod archive;
+mod chat;
 mod config_edit;
 pub mod logging;
 pub mod poll;
@@ -36,6 +37,9 @@ enum Command {
     /// Ask the running `serve` to review a PR now, e.g. one held by
     /// `--manual-reviews`.
     Review(archive::PrArgs),
+    /// Chat with the agent that reviewed a PR, in a copy of its worktree
+    /// that's thrown away when the chat ends.
+    Chat(chat::ChatArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -91,6 +95,10 @@ impl Cli {
             Command::Review(args) => {
                 logging::init_stdout();
                 archive::review(&args)
+            }
+            Command::Chat(args) => {
+                logging::init_stdout();
+                chat::run(args).await
             }
         }
     }

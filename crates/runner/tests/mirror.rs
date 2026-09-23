@@ -90,3 +90,22 @@ async fn a_lost_worktree_can_be_removed_by_path() {
     let mirror = data.path().join("mirrors/org/repo.git");
     assert_eq!(git(&mirror, &["worktree", "list"]).lines().count(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mirror_file_locks_exclude_other_holders() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("org/repo.git.lock");
+    let held = sanic_runner::mirror::lock_file(&path).await.unwrap();
+    // A second open of the file is what another process would do.
+    let waiting = tokio::spawn({
+        let path = path.clone();
+        async move { sanic_runner::mirror::lock_file(&path).await.unwrap() }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished(), "the lock was taken twice");
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("the lock wasn't released")
+        .unwrap();
+}

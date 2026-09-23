@@ -19,6 +19,7 @@ use sanic_core::{
 use serde_json::{Value, json};
 
 use crate::{
+    chat,
     claude::{Claude, Invocation},
     diff::DiffIndex,
     mirror::{Mirrors, Worktree},
@@ -140,7 +141,37 @@ impl ReviewRunner {
     }
 
     fn worktree_path(&self, run: &QueuedRun) -> PathBuf {
-        self.data_dir.join("worktrees").join(run.id.to_string())
+        chat::worktree_path(&self.data_dir, run.id)
+    }
+
+    /// Checks `run`'s head out again where the review ran, for a chat that
+    /// resumes its session; see [`chat::ChatCommand`].
+    pub async fn chat_worktree(&self, run: &QueuedRun, git_url: &str) -> Result<Worktree> {
+        let req = &run.request;
+        self.mirrors
+            .checkout(
+                git_url,
+                &req.key,
+                &req.head_sha,
+                &req.base_sha,
+                &self.worktree_path(run),
+            )
+            .await
+    }
+
+    /// The directories besides the worktree that `run`'s agent could read,
+    /// as a chat should get them again: its run dir, skills and the
+    /// reference checkouts that exist.
+    #[must_use]
+    pub fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
+        std::iter::once(self.data_dir.join("runs").join(run.id.to_string()))
+            .chain(settings.profile.skills.iter().cloned())
+            .chain(
+                existing_dirs(&settings.reference_dirs)
+                    .into_iter()
+                    .map(Path::to_path_buf),
+            )
+            .collect()
     }
 
     async fn review_in(

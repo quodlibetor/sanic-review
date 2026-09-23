@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use self::ignore::{IgnoreEditor, Outcome};
-use crate::{config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
+use crate::{chat, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
 
 mod ignore;
 
@@ -119,6 +119,34 @@ fn init_terminal() -> std::io::Result<DefaultTerminal> {
     started
 }
 
+/// Hands the terminal to a chat with `key`'s latest session, and takes it
+/// back when the chat ends. `serve` keeps running meanwhile. Returns what
+/// to tell you about it.
+fn chat(terminal: &mut DefaultTerminal, shared: &Shared, key: &PrKey) -> Result<String> {
+    let paths = chat::Paths {
+        config: shared.config_path.clone(),
+        data_dir: shared.data_dir.clone(),
+    };
+    shared.chatting.store(true, Ordering::SeqCst);
+    ratatui::restore();
+    let outcome = shared.runtime.block_on(async {
+        let chat = chat::Chat::prepare(&paths, &chat::Target::Pr(key.clone()), false).await?;
+        chat.run().await
+    });
+    shared.chatting.store(false, Ordering::SeqCst);
+    enable_raw_mode()
+        .and_then(|()| execute!(std::io::stdout(), EnterAlternateScreen))
+        .and_then(|()| terminal.clear())
+        .wrap_err("taking the terminal back after the chat")?;
+    Ok(match outcome {
+        Ok(()) => format!("chat about {} ended", key.url()),
+        Err(err) => {
+            warn!(url = %key.url(), "chat failed: {err:?}");
+            format!("chat about {} failed: {err}", key.url())
+        }
+    })
+}
+
 impl Drop for Tui {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -148,6 +176,12 @@ pub struct Shared {
     pub requests: mpsc::UnboundedSender<Request>,
     /// The ignore editor adds `skip_titles` here; `serve` reloads it.
     pub config_path: PathBuf,
+    /// Where `c`'s chats check worktrees out.
+    pub data_dir: PathBuf,
+    /// Runs `c`'s chats from the UI thread.
+    pub runtime: tokio::runtime::Handle,
+    /// Set while a chat has the terminal, so `serve` leaves Ctrl-C to it.
+    pub chatting: Arc<AtomicBool>,
 }
 
 fn run(
@@ -190,6 +224,10 @@ fn run(
                 // Only fails once `serve` is stopping.
                 Flow::Request(request) => {
                     let _ = shared.requests.send(request);
+                }
+                Flow::Chat(key) => {
+                    let notice = chat(terminal, shared, &key)?;
+                    app.set_notice(notice);
                 }
                 Flow::AddSkipTitle { pattern, profile } => {
                     app.set_notice(add_skip_title(
@@ -365,6 +403,8 @@ pub enum Flow {
     Quit,
     /// Something for `serve` to do.
     Request(Request),
+    /// Hand the terminal to a chat with this PR's agent.
+    Chat(PrKey),
     /// Add a `skip_titles` glob to the config file, globally for `None`.
     AddSkipTitle {
         pattern: String,
@@ -505,6 +545,7 @@ impl App {
             KeyCode::Char('r') => self.ask_rerun(),
             KeyCode::Char('a') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
+            KeyCode::Char('c') => return self.open_chat(),
             KeyCode::Char('A') => {
                 self.show_archived = !self.show_archived;
                 self.notice = Some(if self.show_archived {
@@ -565,6 +606,32 @@ impl App {
         }
         self.overlay = Some(Overlay::ConfirmQuit(self.loaded.running.clone()));
         Flow::Continue
+    }
+
+    /// Chats with the agent that last reviewed the selected PR, in either
+    /// PR pane.
+    fn open_chat(&mut self) -> Flow {
+        let selected = self.lists[self.focus.index()].selected();
+        let target = match self.focus {
+            Pane::Owed => selected
+                .and_then(|i| self.overview.owed.get(i))
+                .map(|pr| (pr.key.clone(), pr.chat_run)),
+            Pane::Mine => selected
+                .and_then(|i| self.overview.mine.get(i))
+                .map(|pr| (pr.key.clone(), pr.chat_run)),
+            Pane::Activity | Pane::Log => None,
+        };
+        match target {
+            Some((key, Some(_))) => Flow::Chat(key),
+            Some((key, None)) => {
+                self.notice = Some(format!("no review of {} to chat with yet", key.url()));
+                Flow::Continue
+            }
+            None => {
+                self.notice = Some("c chats with the agent that reviewed the selected PR".into());
+                Flow::Continue
+            }
+        }
     }
 
     /// Opens the ignore editor on the selected review you owe.
@@ -949,6 +1016,7 @@ const HELP: &[(&str, &str)] = &[
     ("a", "archive or unarchive the selected PR"),
     ("A", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
+    ("c", "chat with the agent that reviewed it"),
     ("?, Esc", "close this help"),
 ];
 
@@ -1061,6 +1129,7 @@ mod tests {
             archived: false,
             head_sha: "h1".into(),
             head_reviewers: vec![],
+            chat_run: None,
             latest_run: None,
             pending_drafts: 0,
         }
@@ -1096,6 +1165,7 @@ mod tests {
                     archived: false,
                     review_state: ReviewState::ChangesRequested,
                     pending_drafts: 0,
+                    chat_run: None,
                 },
                 MyPr {
                     key: pr("org/web", 80),
@@ -1104,6 +1174,7 @@ mod tests {
                     archived: false,
                     review_state: ReviewState::Waiting,
                     pending_drafts: 0,
+                    chat_run: None,
                 },
                 MyPr {
                     key: pr("org/web", 60),
@@ -1112,6 +1183,7 @@ mod tests {
                     archived: true,
                     review_state: ReviewState::Waiting,
                     pending_drafts: 0,
+                    chat_run: None,
                 },
             ],
             activity: vec![
@@ -1358,6 +1430,9 @@ mod tests {
             clock: Arc::new(FixedClock),
             requests: mpsc::unbounded_channel().0,
             config_path: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
+            chatting: Arc::default(),
         };
         let owed = |shared: &Shared| -> Vec<u32> {
             let overview = Overview::load(&store, shared).unwrap();
@@ -1635,6 +1710,26 @@ mod tests {
         // With nothing running, it just quits.
         app.set_overview(overview());
         assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Flow::Quit);
+    }
+
+    #[test]
+    fn c_hands_a_pr_with_a_session_to_a_chat() {
+        let mut app = App::new(false);
+        let mut overview = Overview::default();
+        overview.owed.push(OwedReview {
+            chat_run: Some(4),
+            ..owed("org/web", 82, "Tidy the logs", "erin")
+        });
+        overview.owed.push(owed("org/web", 83, "Not yet", "erin"));
+        app.set_overview(overview);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('c'))),
+            Flow::Chat(pr("org/web", 82))
+        );
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.notice.as_deref().unwrap().starts_with("no review of"));
     }
 
     #[test]

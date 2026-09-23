@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
 use color_eyre::{
@@ -20,11 +20,48 @@ use tokio::process::Command;
 
 pub struct Mirrors {
     root: PathBuf,
-    /// Checkouts (the fetch and `worktree add`) into one mirror run one at a
-    /// time. [`Worktree::remove`] doesn't take this lock, so a removal can
-    /// run alongside another run's checkout; `worktree add` locks its new
-    /// entry while creating it, so the removal's `worktree prune` skips it.
-    locks: Mutex<HashMap<RepoName, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Checkouts (the fetch and `worktree add`) into one mirror run one at a
+/// time, by mirror path. Process-wide rather than per [`Mirrors`], since
+/// the TUI's chats check out with their own alongside `serve`'s reviews;
+/// [`lock_file`] does the same across processes, for `sanic-review chat`.
+/// [`Worktree::remove`] doesn't take this lock, so a removal can run
+/// alongside another run's checkout; `worktree add` locks its new entry
+/// while creating it, so the removal's `worktree prune` skips it.
+static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// Where the file lock for `mirror` lives: beside it, as `<name>.git.lock`.
+fn lock_path(mirror: &Path) -> PathBuf {
+    let mut path = mirror.as_os_str().to_owned();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// Takes an exclusive advisory lock (`flock`) on `path`, creating it and its
+/// directory as needed, and waits for any other holder, in this process or
+/// another. The lock is released when the file is dropped.
+pub async fn lock_file(path: &Path) -> Result<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .wrap_err_with(|| format!("creating {}", dir.display()))?;
+    }
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .wrap_err_with(|| format!("opening {}", path.display()))?;
+        file.lock()
+            .wrap_err_with(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    })
+    .await
+    .wrap_err("waiting for a mirror lock")?
 }
 
 /// A PR head checked out for one run.
@@ -40,10 +77,7 @@ pub struct Worktree {
 impl Mirrors {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            locks: Mutex::default(),
-        }
+        Self { root }
     }
 
     fn mirror_path(&self, repo: &RepoName) -> PathBuf {
@@ -59,10 +93,10 @@ impl Mirrors {
     }
 
     fn lock(&self, repo: &RepoName) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks
+        LOCKS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(repo.clone())
+            .entry(self.mirror_path(repo))
             .or_default()
             .clone()
     }
@@ -81,6 +115,7 @@ impl Mirrors {
         let lock = self.lock(&key.repo);
         let _guard = lock.lock().await;
         let mirror = self.mirror_path(&key.repo);
+        let _file_guard = lock_file(&lock_path(&mirror)).await?;
         tokio::fs::create_dir_all(&mirror)
             .await
             .wrap_err_with(|| format!("creating {}", mirror.display()))?;
@@ -190,7 +225,9 @@ async fn remove_worktree(mirror: &Path, path: &Path) {
 }
 
 /// Runs git in `repo`, returning stdout, which is decoded lossily because
-/// diffs can hold any bytes. Never prompts for credentials.
+/// diffs can hold any bytes. Never prompts for credentials. In its own
+/// process group, so a Ctrl-C meant for a TUI chat doesn't reach a
+/// review's checkout.
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -198,6 +235,7 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
+        .process_group(0)
         .output()
         .await
         .wrap_err("running `git`")

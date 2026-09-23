@@ -258,6 +258,7 @@ mod tests {
             archived: false,
             head_sha: "h".into(),
             head_reviewers: vec![],
+            chat_run: None,
             latest_run: None,
             pending_drafts: 0,
         }

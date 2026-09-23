@@ -9,7 +9,10 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -101,6 +104,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
+    let chatting = Arc::new(AtomicBool::new(false));
     let (due_tx, due) = watch::channel(DueTimes::new());
     let live = Live::new(&config);
     let control = DashboardControl {
@@ -122,6 +126,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 clock: Arc::new(SystemClock),
                 requests,
                 config_path: config_path.clone(),
+                data_dir: data_dir.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                chatting: Arc::clone(&chatting),
             },
         )?),
         None => None,
@@ -157,7 +164,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         }) => Ok(()),
         () = &mut reviews => Ok(()),
         result = web.serve(args.port) => result,
-        _ = tokio::signal::ctrl_c() => {
+        () = interrupted(&chatting) => {
             info!("shutting down");
             Ok(())
         }
@@ -167,6 +174,19 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     drop(ui);
     cancel_running(&worker, args.ui == Ui::Tui).await;
     result
+}
+
+/// Resolves on Ctrl-C, except while a TUI chat has the terminal: that
+/// Ctrl-C is the agent's.
+async fn interrupted(chatting: &AtomicBool) {
+    loop {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return std::future::pending().await;
+        }
+        if !chatting.load(Ordering::SeqCst) {
+            return;
+        }
+    }
 }
 
 /// How long running reviews get to stop before `serve` exits anyway.
