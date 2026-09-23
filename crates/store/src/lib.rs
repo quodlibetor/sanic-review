@@ -1,5 +1,6 @@
 //! SQLite schema, migrations and queries.
 
+mod overview;
 mod runs;
 
 use std::{collections::HashSet, path::Path, time::Duration};
@@ -8,7 +9,7 @@ use color_eyre::{
     Section,
     eyre::{Result, WrapErr, eyre},
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
     pr::{PrKey, PrSnapshot},
     trigger::{Known, Trigger},
@@ -27,6 +28,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
+pub use overview::{Activity, ActivityKind, MyPr, OwedReview, ReviewState};
 pub use runs::{Draft, RunCounts, RunRecord};
 
 /// A connection to the database. The poller and the runner each open their
@@ -55,6 +57,26 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         Self::init(conn).wrap_err_with(|| format!("initializing database {}", path.display()))
+    }
+
+    /// Opens an existing database that another connection has migrated,
+    /// for reading only.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .wrap_err_with(|| format!("opening database {} read-only", path.display()))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if usize::try_from(version)? != MIGRATIONS.len() {
+            return Err(eyre!(
+                "database {} is at schema version {version}, this build expects {}",
+                path.display(),
+                MIGRATIONS.len()
+            ));
+        }
+        Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self> {

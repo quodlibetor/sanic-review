@@ -33,3 +33,23 @@ fn newer_schema_is_refused() {
     let err = format!("{:?}", Store::open(&path).err().unwrap());
     assert!(err.contains("newer than this build"), "{err}");
 }
+
+#[test]
+fn read_only_connections_see_writes_and_refuse_their_own() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("state.db");
+    let writer = Store::open(&path).unwrap();
+    let reader = Store::open_read_only(&path).unwrap();
+    writer.set_poll_state("k", "v").unwrap();
+    assert_eq!(reader.poll_state("k").unwrap().as_deref(), Some("v"));
+    assert!(reader.set_poll_state("k", "w").is_err());
+}
+
+#[test]
+fn read_only_needs_a_migrated_database() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("state.db");
+    Connection::open(&path).unwrap();
+    let err = format!("{:?}", Store::open_read_only(&path).err().unwrap());
+    assert!(err.contains("schema version 0"), "{err}");
+}
