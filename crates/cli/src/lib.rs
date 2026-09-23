@@ -1,6 +1,7 @@
 //! The `sanic-review` command line.
 
 pub mod poll;
+pub mod schedule;
 mod serve;
 mod watch;
 

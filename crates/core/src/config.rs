@@ -22,6 +22,7 @@ use crate::{pr::TeamRef, repo::RepoName};
 const DEFAULT_API_URL: &str = "https://api.github.com";
 const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
 const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
+const DEFAULT_QUIET: Duration = Duration::from_mins(2);
 const DEFAULT_GIT_URL: &str = "https://github.com";
 const DEFAULT_CLAUDE: &str = "claude";
 const DEFAULT_MAX_RUNS: usize = 2;
@@ -64,6 +65,8 @@ pub struct PollSettings {
     /// Lower bound on the notifications poll interval; GitHub's
     /// `X-Poll-Interval` can only raise it.
     pub min_notification_interval: Duration,
+    /// How long a PR must go without new triggers before its run starts.
+    pub quiet_period: Duration,
 }
 
 #[derive(Debug)]
@@ -316,6 +319,10 @@ impl Config {
                     .poll
                     .min_notification_secs
                     .map_or(DEFAULT_MIN_NOTIFICATION_POLL, Duration::from_secs),
+                quiet_period: raw
+                    .poll
+                    .quiet_secs
+                    .map_or(DEFAULT_QUIET, Duration::from_secs),
             },
             review_requests: ReviewRequestSettings {
                 teams: TeamFilter::new(
@@ -527,9 +534,11 @@ struct RawRunner {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names, reason = "the names are the TOML keys")]
 struct RawPoll {
     reconcile_secs: Option<u64>,
     min_notification_secs: Option<u64>,
+    quiet_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
