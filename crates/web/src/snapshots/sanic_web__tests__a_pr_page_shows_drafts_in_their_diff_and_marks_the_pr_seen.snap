@@ -1,0 +1,226 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &page.body)"
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
+<title>Add the thing · sanic-review</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer>
+</script>
+<script src="/assets/app.js" defer>
+</script>
+</head>
+<body data-page="pr" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
+<header class="top">
+<a class="home" href="/">sanic-review</a>
+<span class="hint">? keys</span>
+</header>
+<main>
+<h1>Add the thing</h1>
+<p class="meta">
+<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="status ok">drafted</span>
+</p>
+<div class="actions" id="pr-actions">
+<form class="archive" method="post" action="/pr/org/repo/7/archive">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="archived" value="true">
+<input type="hidden" name="next" value="pr">
+<button type="submit">Archive</button>
+</form>
+</div>
+<details class="description">
+<summary>Description</summary>
+<pre>Add the thing, in detail.</pre>
+</details>
+<details class="runs">
+<summary>Reviews (1)</summary>
+<ol>
+<li class="current">
+<a href="/pr/org/repo/7?run=1">run 1 at <code>head7</code>
+</a> <span class="status">succeeded</span>
+</li>
+</ol>
+</details>
+<section id="drafts">
+<article class="draft pending" id="draft-1">
+<header>
+<strong>Summary</strong> <span class="badge">pending</span>
+</header>
+<form class="edit" method="post" action="/drafts/1/edit" hx-post="/drafts/1/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">Mostly fine.</textarea>
+<button class="save" type="submit">Save</button>
+</form>
+<form class="decide" method="post" action="/drafts/1/status" hx-post="/drafts/1/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button name="status" value="accepted">Accept</button>
+<button name="status" value="rejected">Reject</button>
+<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+</form>
+</article>
+<article class="draft pending" id="draft-2">
+<header>
+<code>src/lib.rs:3</code> <span class="severity">major</span> <span class="dim">high confidence</span> <span class="badge">pending</span>
+</header>
+<table class="diff">
+<tr class="ctx">
+<td class="num">1</td>
+<td class="num">1</td>
+<td class="code">
+<span class="sign"> </span>fn main() {</td>
+</tr>
+<tr class="del">
+<td class="num">2</td>
+<td class="num">
+</td>
+<td class="code">
+<span class="sign">-</span>    let n = 1;</td>
+</tr>
+<tr class="add">
+<td class="num">
+</td>
+<td class="num">2</td>
+<td class="code">
+<span class="sign">+</span>    let n = 2;</td>
+</tr>
+<tr class="add anchor">
+<td class="num">
+</td>
+<td class="num">3</td>
+<td class="code">
+<span class="sign">+</span>    let m = n + 1;</td>
+</tr>
+<tr class="ctx">
+<td class="num">3</td>
+<td class="num">4</td>
+<td class="code">
+<span class="sign"> </span>    println!(&quot;{n}&quot;);</td>
+</tr>
+<tr class="ctx">
+<td class="num">4</td>
+<td class="num">5</td>
+<td class="code">
+<span class="sign"> </span>}</td>
+</tr>
+</table>
+<form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">Why `m`?</textarea>
+<button class="save" type="submit">Save</button>
+</form>
+<form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button name="status" value="accepted">Accept</button>
+<button name="status" value="rejected">Reject</button>
+<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+</form>
+</article>
+<article class="draft pending" id="draft-3">
+<header>
+<code>src/gone.rs:40</code> <span class="severity">major</span> <span class="dim">high confidence</span> <span class="badge">pending</span>
+</header>
+<p class="warn">Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body.</p>
+<form class="edit" method="post" action="/drafts/3/edit" hx-post="/drafts/3/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">This file isn't in the diff.</textarea>
+<button class="save" type="submit">Save</button>
+</form>
+<form class="decide" method="post" action="/drafts/3/status" hx-post="/drafts/3/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button name="status" value="accepted">Accept</button>
+<button name="status" value="rejected">Reject</button>
+<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+</form>
+</article>
+</section>
+<form class="submit" method="get" action="/pr/org/repo/7/runs/1/preview">
+<fieldset>
+<legend>Verdict</legend>
+<label>
+<input type="radio" name="event" value="COMMENT"> Comment</label>
+<label>
+<input type="radio" name="event" value="REQUEST_CHANGES" checked> Request changes</label>
+<label>
+<input type="radio" name="event" value="APPROVE"> Approve</label>
+<p class="dim">The agent suggests request changes. It never suggests approving; that's only ever your pick.</p>
+</fieldset>
+<button type="submit">Preview the review</button> <span class="dim">Nothing is posted until you confirm on the next page.</span>
+</form>
+</main>
+<div class="overlay" id="help" hidden>
+<div class="popup">
+<h2>Keys</h2>
+<table>
+<tr>
+<th>
+<kbd>q</kbd>
+</th>
+<td>close this help; otherwise back to the index</td>
+</tr>
+<tr>
+<th>
+<kbd>Tab, Shift-Tab</kbd>
+</th>
+<td>next, previous list</td>
+</tr>
+<tr>
+<th>
+<kbd>j/k, Down/Up</kbd>
+</th>
+<td>move in the list</td>
+</tr>
+<tr>
+<th>
+<kbd>g/G, Home/End</kbd>
+</th>
+<td>first, last row</td>
+</tr>
+<tr>
+<th>
+<kbd>Enter</kbd>
+</th>
+<td>open the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>r</kbd>
+</th>
+<td>review now: failed, held or skipped (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>archive or unarchive the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>A</kbd>
+</th>
+<td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>i</kbd>
+</th>
+<td>skip PRs by title: use i in the TUI for now</td>
+</tr>
+<tr>
+<th>
+<kbd>?, Esc</kbd>
+</th>
+<td>show, close this help</td>
+</tr>
+</table>
+<p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div id="notice" hidden>
+</div>
+</body>
+</html>

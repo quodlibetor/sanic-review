@@ -378,19 +378,48 @@ available when tuning instruction files.
 
 ## Dashboard
 
-- **Index.** PRs with unseen or pending drafts, grouped as "reviews I owe" and
-  "my PRs", each with a count of pending drafts and the latest run status.
-  "My PRs" lists every open PR you authored in a watched repo, with its
-  review state (approved, changes requested, waiting), not only ones with
-  drafts.
-- **PR page.** Agent summary, drafts in diff context, and for each draft:
-  inline edit (htmx save on blur), accept, reject, regenerate with an extra
-  instruction.
-- **Submit.** Shows the exact payload before sending: the review body, each
-  inline comment and the verdict. Accepted comments go out as one GitHub
-  review. Accepted replies go out as thread replies. You confirm, then it
-  posts.
+`serve` serves it on `http://127.0.0.1:<port>/`. Pages are rendered on the
+server with maud, and htmx handles in-place edits. Every script and style is
+embedded in the binary, so nothing is fetched at runtime.
+
+- **Index.** The same two lists as the TUI's PR panes, with the same
+  statuses, counts, archive toggle and `updated_within_days` window: "Reviews
+  you owe" and "Your PRs". It rereads them every few seconds. A PR whose
+  latest review finished since you last opened its page, or that you've
+  never opened, is marked `new`. Every row links to the PR on github.com
+  and to its dashboard page.
+- **PR page.** The PR's description, its review runs, and the drafts of the
+  latest one that succeeded (or of any run you pick). Each comment draft
+  shows the lines around its anchor from the run's `pr.diff`. A draft that
+  isn't on a line of the diff is flagged. For each draft: inline edit
+  (htmx save on change, or a Save button), accept, reject, and undo back to
+  pending. "Regenerate with an extra instruction" is shown disabled until
+  the runner can resume a session. The PR's own actions are the TUI's: a
+  review now, with a confirm page, and archive or unarchive, which writes
+  the store as `sanic-review archive` does. Adding a `skip_titles` pattern
+  is still only in the TUI (`i`).
+- **Submit.** You pick the verdict: comment, request changes or approve.
+  The agent's suggestion is preselected, and approve never is. Confirming
+  an approval also takes ticking "I approve this PR" on the preview page. The preview
+  shows the exact payload: the review body, each inline comment and the
+  verdict, as the JSON request that will be sent. It points out what
+  GitHub's Markdown would make easy to miss: mentions, hidden comments,
+  images, HTML tags and invisible characters. The body is the summary
+  if you accepted it. Accepted comments go out as inline comments in one
+  GitHub review, anchored to the reviewed run's head, and accepted comments
+  that aren't on a line of the diff are added to the body. You confirm, then
+  it posts, only if the payload is still exactly what the preview showed;
+  otherwise nothing is sent and you preview again. It's sent once: a GitHub
+  error is shown and nothing is retried or marked. Once GitHub has it, its
+  drafts are marked `posted` and can't be changed. Replies aren't posted
+  yet: drafts don't record their thread.
 - Opening a PR page updates `views`.
+- **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
+  and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
+  opens the review-now confirm page, `a` archives or unarchives, `A` shows
+  archived PRs. `Enter` opens the selected PR. `q` closes the help, or else
+  goes back to the index. A confirm page takes `y`, and `Esc` or `q`
+  cancels. Keys are ignored while you type in a draft; `Esc` leaves it.
 - **Settings.** The dashboard can edit settings such as
   `review_requests.teams`. Edits are written back to the config file,
   preserving its comments and layout, and take effect through the same
@@ -499,6 +528,21 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   worst it can do is write a bad draft that you then read.
 - The GitHub token lives only in the serve process, and only the web task's
   submit path writes with it.
+- The dashboard only listens on `127.0.0.1`, but any page open in your
+  browser can send it requests. So it answers only when `Host` names the
+  loopback interface, which stops DNS rebinding. Every state-changing
+  request must carry a random token generated at startup, in a form field
+  or an htmx header; a page on another site can't read it. When a request
+  says where it came from, through `Origin` or `Sec-Fetch-Site`, it must be
+  the dashboard itself. A page another site sends you to, by a link or
+  `window.open`, shows only a link to itself, so that site can't open a
+  confirm page and catch a key you're typing. Browsers that send
+  `Sec-Fetch-Site` say where a navigation came from. Without it, any
+  `Referer` counts, since the dashboard's own pages send none, and no
+  `Referer` doesn't, since typed URLs and bookmarks send none either. Keys also do nothing just after a
+  page opens or comes to the front, or while held down. Responses forbid framing, so
+  another page can't trick you into clicking Confirm, and the CSP allows
+  only the dashboard's own scripts.
 - Worktrees come from untrusted code. The agent never builds or runs that code
   unless a profile explicitly allows it (the default is off).
 - The agent can read your configured checkouts and `runner.read_paths`,
