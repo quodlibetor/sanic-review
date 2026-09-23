@@ -6,15 +6,16 @@
 
 use std::time::Duration;
 
+use sanic_core::run::Side;
 use sanic_core::{
     pr::{CONVERSATION_THREAD, PrKey, ReviewState, TeamRef},
     repo::RepoName,
 };
-use sanic_github::{ApiError, Client, NotificationPoll, Token};
+use sanic_github::{ApiError, Client, NewComment, NewReview, NotificationPoll, ReviewEvent, Token};
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_partial_json, header, method, path, query_param},
+    matchers::{body_json, body_partial_json, header, method, path, query_param},
 };
 
 fn fixture(name: &str) -> Value {
@@ -286,4 +287,93 @@ async fn missing_pull_request_is_none() {
         .await
         .unwrap();
     assert_eq!(snap, None);
+}
+
+fn new_review() -> NewReview {
+    NewReview {
+        commit_id: "h1".into(),
+        body: "Looks fine.".into(),
+        event: ReviewEvent::RequestChanges,
+        comments: vec![
+            NewComment {
+                path: "src/lib.rs".into(),
+                body: "off by one?".into(),
+                line: 4,
+                side: Side::Right,
+                start_line: None,
+                start_side: None,
+            },
+            NewComment {
+                path: "src/old.rs".into(),
+                body: "why remove this?".into(),
+                line: 9,
+                side: Side::Left,
+                start_line: Some(7),
+                start_side: Some(Side::Left),
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn reviews_post_exactly_the_payload_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .and(header("authorization", "Bearer t0ken"))
+        .and(body_json(json!({
+            "commit_id": "h1",
+            "body": "Looks fine.",
+            "event": "REQUEST_CHANGES",
+            "comments": [
+                { "path": "src/lib.rs", "body": "off by one?", "line": 4, "side": "RIGHT" },
+                {
+                    "path": "src/old.rs", "body": "why remove this?", "line": 9,
+                    "side": "LEFT", "start_line": 7, "start_side": "LEFT"
+                },
+            ],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 80,
+            "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-80",
+            "state": "CHANGES_REQUESTED",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let posted = client(&server)
+        .post_review(&key("org/repo", 7), &new_review())
+        .await
+        .unwrap();
+    assert_eq!(posted.id, 80);
+    assert_eq!(
+        posted.html_url,
+        "https://github.com/org/repo/pull/7#pullrequestreview-80"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_review_says_why_and_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Unprocessable Entity",
+            "errors": ["Line could not be resolved"],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .post_review(&key("org/repo", 7), &new_review())
+        .await
+        .unwrap_err();
+    let ApiError::Other(report) = err else {
+        panic!("expected a plain failure, got {err}");
+    };
+    let message = format!("{report:?}");
+    assert!(message.contains("422"), "{message}");
+    assert!(message.contains("Line could not be resolved"), "{message}");
 }
