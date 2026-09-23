@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use sanic_core::{
     clock::Clock,
     config::{CheckoutResolver, Config, Vcs},
-    pr::{PrKey, PrSnapshot, Review, ReviewState},
+    pr::{Comment, PrKey, PrSnapshot, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
         Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -156,19 +156,54 @@ struct Fixture {
     data: TempDir,
 }
 
-/// A store with: PR 7 you owe, reviewed; PR 8 you owe, whose review failed;
-/// PR 10 you owe, a draft; and PR 9, yours.
-async fn fixture(manual_reviews: bool) -> Fixture {
-    let mut store = Store::open_in_memory().unwrap();
-    for snap in [
-        snapshot(7, "alice", "Add the thing"),
-        snapshot(8, "bob", "Fix <script> escaping"),
+/// The fixture's PRs: 7 you owe, reviewed, where alice answered you; 8 you
+/// owe, with changes requested and a failed review; 10 you owe, a draft;
+/// and 9, yours, approved and mergeable.
+fn fixture_prs() -> Vec<PrSnapshot> {
+    let said = |id: &str, author: &str, at: &str| Comment {
+        id: id.into(),
+        author: author.into(),
+        body: "hm".into(),
+        created_at: at.into(),
+        by_bot: false,
+        reacted_at: None,
+    };
+    vec![
+        // alice answered you in a thread, and you haven't replied.
+        PrSnapshot {
+            threads: vec![Thread {
+                id: "t1".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(2),
+                resolved: false,
+                comments: vec![
+                    said("c1", "me", "2026-09-20T00:00:00Z"),
+                    said("c2", "alice", "2026-09-21T00:00:00Z"),
+                ],
+            }],
+            ..snapshot(7, "alice", "Add the thing")
+        },
+        PrSnapshot {
+            review_decision: Some("CHANGES_REQUESTED".into()),
+            ..snapshot(8, "bob", "Fix <script> escaping")
+        },
         PrSnapshot {
             is_draft: true,
             ..snapshot(10, "carol", "WIP: try things")
         },
-        snapshot(9, "me", "My change"),
-    ] {
+        PrSnapshot {
+            review_decision: Some("APPROVED".into()),
+            merge_state: Some("CLEAN".into()),
+            ..snapshot(9, "me", "My change")
+        },
+    ]
+}
+
+/// A store with [`fixture_prs`], a finished review of 7 and a failed one
+/// of 8.
+async fn fixture(manual_reviews: bool) -> Fixture {
+    let mut store = Store::open_in_memory().unwrap();
+    for snap in fixture_prs() {
         store.record(&snap, "default", &[]).unwrap();
     }
     let request = |number| ReviewRequest {
@@ -1207,4 +1242,58 @@ async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
     );
     // `sanic-review chat` would refuse too, so there's nothing to copy.
     assert!(!page.contains("data-copy"), "{page}");
+}
+
+#[tokio::test]
+async fn prs_show_where_they_stand_as_in_the_tui() {
+    let f = fixture(false).await;
+    let index = f.get("/").await.body;
+    for cell in [
+        r#"<span class="state act" title="1 unanswered">1 unanswered</span>"#,
+        r#"<span class="state act" title="changes requested">changes requested</span>"#,
+        r#"<span class="state quiet" title="—">—</span>"#,
+        r#"<span class="state good" title="mergeable">mergeable</span>"#,
+    ] {
+        assert!(index.contains(cell), "{cell}: {index}");
+    }
+    // Your PRs show their state instead of a review status.
+    let mine = &index[index.find(r#"id="mine""#).unwrap()..];
+    assert!(!mine.contains(r#"class="status"#), "{mine}");
+    // And the PR page says it too.
+    let page = f.get("/pr/org/repo/9").await.body;
+    assert!(
+        page.contains(r#"<span class="state good" title="mergeable">mergeable</span>"#),
+        "{page}"
+    );
+    // Not in either list any more, a PR's page still says where it stands.
+    let unrequested = PrSnapshot {
+        review_requested: false,
+        ..fixture_prs().swap_remove(1)
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&unrequested, "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/8").await.body;
+    assert!(
+        page.contains(
+            r#"<span class="state act" title="changes requested">changes requested</span>"#
+        ),
+        "{page}"
+    );
+    // With nothing to say, the header says nothing.
+    let page = f.get("/pr/org/repo/10").await.body;
+    assert!(!page.contains(r#"class="state"#), "{page}");
+    // Archived, a PR of yours says so instead.
+    f.post(
+        "/pr/org/repo/9/archive",
+        &[("archived", "true"), ("next", "index")],
+    )
+    .await;
+    let all = f.get("/?archived=true").await.body;
+    assert!(
+        all.contains(r#"<span class="state quiet">archived</span>"#),
+        "{all}"
+    );
 }

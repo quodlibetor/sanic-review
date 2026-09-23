@@ -3,7 +3,10 @@
 
 use axum::http::StatusCode;
 use maud::{DOCTYPE, Markup, html};
-use sanic_core::pr::PrKey;
+use sanic_core::{
+    pr::PrKey,
+    state::{PrState, Urgency},
+};
 use serde_json::json;
 
 use crate::{
@@ -178,4 +181,17 @@ pub fn elsewhere(target: &str) -> Markup {
             }
         }
     }
+}
+
+/// Where a PR stands, in full, styled by how much it asks of you: as the
+/// TUI's state column, which has less room.
+pub fn state_cell(state: PrState) -> Markup {
+    let urgency = match state.urgency() {
+        Urgency::Act => "act",
+        Urgency::Good => "good",
+        Urgency::Quiet => "quiet",
+    };
+    let status = state.status();
+    // The index cuts it to its column; the whole of it is on hover.
+    html! { span.state.(urgency) title=(status) { (status) } }
 }

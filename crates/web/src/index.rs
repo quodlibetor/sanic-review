@@ -13,12 +13,12 @@ use sanic_core::{
     pr::PrKey,
     skip::{PrFacts, Skip},
 };
-use sanic_store::{MyPr, OwedReview, ReviewState, RunCounts};
+use sanic_store::{MyPr, OwedReview, RunCounts};
 use serde::Deserialize;
 
 use crate::{
     App, Error, Shared,
-    page::{self, Kind, countdown, csrf_field, drafts, first_line, github_link},
+    page::{self, Kind, countdown, csrf_field, drafts, first_line, github_link, state_cell},
     pr_href,
 };
 
@@ -239,12 +239,15 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
             data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
             data-ignore={ (href) "/ignore" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
+            (state_cell(pr.state))
             span.status.(class) { (label) }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
             (github_link(&pr.key))
-            a.title href=(href) { (pr.title) }
-            span.author.dim { "(" (pr.author) ")" }
+            span.title-cell {
+                a.title href=(href) { (pr.title) }
+                " " span.author.dim { "(" (pr.author) ")" }
+            }
             span.actions {
                 @if why.is_some() {
                     a.button href={ (href) "/review-now" } { "Review now" }
@@ -261,22 +264,23 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
 }
 
 fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
-    let (label, class) = match pr.review_state {
-        _ if pr.archived => ("archived", "dim"),
-        ReviewState::Approved => ("approved", "ok"),
-        ReviewState::ChangesRequested => ("changes", "bad"),
-        ReviewState::Waiting => ("waiting", "dim"),
-    };
     let href = pr_href(&pr.key);
     html! {
         li.row.archived[pr.archived] data-href=(href)
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
-            span.status.(class) { (label) }
+            // Its state is its status, as in the TUI.
+            @if pr.archived {
+                span.state.quiet { "archived" }
+            } @else {
+                (state_cell(pr.state))
+            }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
             (github_link(&pr.key))
-            @if pr.is_draft { span.dim { "[draft] " } }
-            a.title href=(href) { (pr.title) }
+            span.title-cell {
+                @if pr.is_draft { span.dim { "[draft] " } }
+                a.title href=(href) { (pr.title) }
+            }
             span.actions {
                 @if pr.chat_run.is_some() { a.button href={ (href) "#chat" } { "Chat" } }
                 (archive_form(app, &pr.key, pr.archived, "index"))
@@ -285,10 +289,13 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
     }
 }
 
+/// The `new` mark, in a cell of its own either way so the columns line up.
 fn unseen(overview: &Overview, key: &PrKey) -> Markup {
     html! {
-        @if overview.unseen.contains(key) {
-            span.unseen title="a review you haven't looked at yet" { "new" }
+        span.new-cell {
+            @if overview.unseen.contains(key) {
+                span.unseen title="a review you haven't looked at yet" { "new" }
+            }
         }
     }
 }

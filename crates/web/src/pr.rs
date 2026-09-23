@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
-use sanic_core::{pr::PrKey, skip::Skip};
+use sanic_core::{pr::PrKey, skip::Skip, state::PrState};
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, DraftStatus, PrPage, ReviewRun};
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
     index::{Overview, Why, archive_form, owed_status},
-    page::{self, Kind, csrf_field, first_line, github_link},
+    page::{self, Kind, csrf_field, first_line, github_link, state_cell},
     pr_href,
 };
 
@@ -34,11 +34,19 @@ pub async fn page(
 ) -> Result<Markup, Error> {
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
-    let (pr, runs, shown, drafts) = {
+    let (pr, state, runs, shown, drafts) = {
         let store = app.store();
         let load = || -> color_eyre::Result<_> {
             let Some(pr) = store.pr_page(&key)? else {
                 return Ok(None);
+            };
+            // From the store, not the overview: a PR outside the lists'
+            // recency window still has a state. A closed one has none.
+            let state = if pr.open {
+                let mine = pr.author.eq_ignore_ascii_case(&app.me);
+                Some(store.pr_state(&key, &app.me, mine)?)
+            } else {
+                None
             };
             let runs = store.review_runs(&key)?;
             let shown = match query.run {
@@ -51,7 +59,7 @@ pub async fn page(
                 None => Vec::new(),
             };
             store.record_view(&key)?;
-            Ok(Some((pr, runs, shown, drafts)))
+            Ok(Some((pr, state, runs, shown, drafts)))
         };
         load()
             .map_err(Error::pr(&key))?
@@ -63,7 +71,7 @@ pub async fn page(
     };
     let chat = chat::section(&app, &key);
     let content = html! {
-        (pr_header(&app, &pr, &overview, chat.is_some()))
+        (pr_header(&app, &pr, state, &overview, chat.is_some()))
         @if !pr.body.trim().is_empty() {
             details.description {
                 summary { "Description" }
@@ -91,8 +99,16 @@ fn read_diff(app: &App, run: i64) -> Option<DiffIndex> {
         .map(|text| DiffIndex::parse(&text))
 }
 
-fn pr_header(app: &App, pr: &PrPage, overview: &Overview, chat: bool) -> Markup {
+fn pr_header(
+    app: &App,
+    pr: &PrPage,
+    state: Option<PrState>,
+    overview: &Overview,
+    chat: bool,
+) -> Markup {
     let owed = overview.owed.iter().find(|o| o.key == pr.key);
+    // `—` fills a column; in a sentence it says nothing.
+    let state = state.filter(|state| *state != PrState::default());
     let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));
     let why = owed.and_then(|o| Why::of(o, overview.skipped.get(&o.key), app.manual_reviews));
     let href = pr_href(&pr.key);
@@ -104,6 +120,7 @@ fn pr_header(app: &App, pr: &PrPage, overview: &Overview, chat: bool) -> Markup 
             @if pr.is_draft { " · " span.dim { "draft" } }
             @if !pr.open { " · " span.dim { "closed" } }
             @if pr.archived { " · " span.dim { "archived" } }
+            @if let Some(state) = state { " · " (state_cell(state)) }
             @if let Some((label, class)) = &status { " · " span.status.(class) { (label) } }
         }
         div.actions #pr-actions data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]

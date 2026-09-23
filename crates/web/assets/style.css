@@ -125,13 +125,24 @@ header.top {
   padding: 0 0 0.5rem;
 }
 
+/* Columns, as the TUI keeps its panes' columns: state, run status (for
+   reviews you owe), drafts, the new mark, the GitHub link, the title, and
+   the actions. The title keeps room to be read: the link is cut and the
+   actions wrap first. */
 .row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 0.75rem;
+  display: grid;
+  column-gap: 0.75rem;
   align-items: baseline;
   padding: 0.2rem 0.3rem;
   border-radius: 4px;
+}
+
+#owed .row {
+  grid-template-columns: 12rem 8rem 5rem 2.5rem minmax(0, max-content) minmax(12rem, 1fr) auto;
+}
+
+#mine .row {
+  grid-template-columns: 12rem 5rem 2.5rem minmax(0, max-content) minmax(12rem, 1fr) auto;
 }
 
 .row.selected,
@@ -139,24 +150,55 @@ header.top {
   background: var(--select);
 }
 
-.row .status {
-  min-width: 9rem;
+.state {
+  font-size: 13px;
+}
+
+.state.act {
+  color: var(--held);
+  font-weight: 600;
+}
+
+.state.good {
+  color: var(--ok);
+}
+
+.state.quiet {
+  color: var(--dim);
+}
+
+.row .state,
+.row .gh {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An archived row is muted throughout, its state too, as in the TUI. */
+.row.archived .state {
+  color: var(--dim);
 }
 
 .row .drafts {
-  min-width: 5rem;
   color: #ae3ec9;
 }
 
+.row .title-cell {
+  overflow-wrap: anywhere;
+}
+
+/* Under the title, across the columns after the state and status. */
 .row .error {
-  flex-basis: 100%;
-  padding-left: 9.75rem;
+  grid-column: 3 / -1;
 }
 
 .row .actions {
-  margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.4rem;
+  justify-self: end;
+  white-space: nowrap;
 }
 
 .unseen {
