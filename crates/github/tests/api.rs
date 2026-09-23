@@ -240,6 +240,21 @@ async fn my_teams_follow_pages() {
 }
 
 #[tokio::test]
+async fn my_orgs_are_lowercased_logins() {
+    let server = MockServer::start().await;
+    Mock::given(path("/user/orgs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "login": "Lacework" }, { "login": "lacework-dev" }
+        ])))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client(&server).my_orgs().await.unwrap(),
+        ["lacework", "lacework-dev"]
+    );
+}
+
+#[tokio::test]
 async fn missing_pull_request_is_none() {
     let server = MockServer::start().await;
     Mock::given(path("/graphql"))

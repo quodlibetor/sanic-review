@@ -117,6 +117,20 @@ globs, with no unscoped entry for the repo, matches nothing and is ignored.
 provide the default auto-fix checkout for that repo. The review runner still
 uses its own bare mirror and never touches your checkout.
 
+**`sanic-review setup`** writes or updates the config interactively:
+- **Teams:** pick which of your teams' review requests count. Unpicked teams
+  are written as `!org/slug` after `*`, so teams you join later count until
+  you exclude them.
+- **Checkouts:** scan a directory for jj and git checkouts with a GitHub
+  remote, then pick which to watch.
+- **Orgs:** pick orgs to watch, suggested from your orgs, your teams and the
+  checkouts found, plus any others you type.
+
+Current config values are pre-selected. Entries setup doesn't manage
+(`owner/name`, path-scoped or remote-override entries) are never removed.
+It shows a diff, validates the result, and writes only after you confirm.
+Choices that match the current config leave the file unchanged.
+
 ## GitHub ingestion
 
 Users can't create webhooks for repos they don't administer, so ingestion
