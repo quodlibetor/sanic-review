@@ -20,7 +20,7 @@ use serde::Deserialize;
 use crate::{
     pr::TeamRef,
     repo::RepoName,
-    skip::{SkipRules, TitleFilter},
+    skip::{ProfileSkips, SkipRules, TitleFilter},
 };
 
 const DEFAULT_API_URL: &str = "https://api.github.com";
@@ -88,6 +88,8 @@ pub struct ReviewRequestSettings {
     pub teams: TeamFilter,
     /// PRs with a matching title are never reviewed automatically.
     pub skip_titles: TitleFilter,
+    /// Draft PRs are never reviewed automatically.
+    pub skip_drafts: bool,
 }
 
 /// Ordered team globs; the last pattern that matches a team decides, and a
@@ -154,6 +156,8 @@ pub struct Profile {
     pub auto_fix: bool,
     /// Added to `review_requests.skip_titles` for PRs this profile matches.
     pub skip_titles: TitleFilter,
+    /// Overrides `review_requests.skip_drafts` for PRs this profile matches.
+    pub skip_drafts: Option<bool>,
     pub targets: Vec<Target>,
 }
 
@@ -295,10 +299,17 @@ impl Config {
     pub fn skip_rules(&self) -> SkipRules {
         SkipRules {
             titles: self.review_requests.skip_titles.clone(),
+            drafts: self.review_requests.skip_drafts,
             profiles: self
                 .profiles
                 .iter()
-                .map(|p| (p.name.clone(), p.skip_titles.clone()))
+                .map(|p| {
+                    let own = ProfileSkips {
+                        titles: p.skip_titles.clone(),
+                        drafts: p.skip_drafts,
+                    };
+                    (p.name.clone(), own)
+                })
                 .collect(),
         }
     }
@@ -394,6 +405,7 @@ impl Config {
                 .wrap_err("in `review_requests.teams`")?,
                 skip_titles: TitleFilter::new(raw.review_requests.skip_titles)
                     .wrap_err("in `review_requests.skip_titles`")?,
+                skip_drafts: raw.review_requests.skip_drafts.unwrap_or(true),
             },
             runner: RunnerSettings {
                 claude,
@@ -500,6 +512,7 @@ fn resolve_profile(
         model: resolve_model(raw.model, default_model)?,
         auto_fix: raw.auto_fix,
         skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
+        skip_drafts: raw.skip_drafts,
         targets,
     })
 }
@@ -650,6 +663,7 @@ struct RawReviewRequests {
     teams: Option<Vec<String>>,
     #[serde(default)]
     skip_titles: Vec<String>,
+    skip_drafts: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -664,6 +678,7 @@ struct RawProfile {
     auto_fix: bool,
     #[serde(default)]
     skip_titles: Vec<String>,
+    skip_drafts: Option<bool>,
     // Entries are converted by hand so errors can say which shape was meant.
     repos: Vec<toml::Value>,
 }
@@ -673,6 +688,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::skip::Skip;
 
     /// Maps checkout paths (relative to `/base`) to what they resolve to.
     struct FakeResolver(HashMap<PathBuf, (Vcs, RepoName)>);
@@ -802,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_titles_are_global_plus_per_profile() {
+    fn skip_settings_are_global_plus_per_profile() {
         let config = parse(
             r#"
             [review_requests]
@@ -816,16 +832,29 @@ mod tests {
         )
         .unwrap();
         let rules = config.skip_rules();
-        assert!(rules.check("a", "WIP: x").is_some());
-        assert!(rules.check("b", "WIP: x").is_none());
-        assert!(rules.check("b", "build(deps): x").is_some());
-        assert!(
-            parse(EXAMPLE)
-                .unwrap()
-                .skip_rules()
-                .check("default", "wip")
-                .is_none()
-        );
+        assert!(rules.check("a", "WIP: x", false).is_some());
+        assert!(rules.check("b", "WIP: x", false).is_none());
+        assert!(rules.check("b", "build(deps): x", false).is_some());
+        let example = parse(EXAMPLE).unwrap().skip_rules();
+        assert!(example.check("default", "wip", false).is_none());
+        // Drafts are skipped by default.
+        assert_eq!(example.check("default", "x", true), Some(Skip::Draft));
+
+        let config = parse(
+            r#"
+            [review_requests]
+            skip_drafts = false
+            [profile.a]
+            skip_drafts = true
+            repos = [{ github = "org" }]
+            [profile.b]
+            repos = [{ github = "other" }]
+            "#,
+        )
+        .unwrap();
+        let rules = config.skip_rules();
+        assert_eq!(rules.check("a", "x", true), Some(Skip::Draft));
+        assert_eq!(rules.check("b", "x", true), None);
 
         let err = parse("[profile.a]\nskip_titles = [\"[\"]\nrepos = [{ github = \"org\" }]\n")
             .unwrap_err();

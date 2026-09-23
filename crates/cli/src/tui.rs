@@ -212,7 +212,12 @@ impl Overview {
         let skips = shared.skips.borrow();
         let skipped = owed
             .iter()
-            .filter_map(|pr| Some((pr.key.clone(), skips.check(&pr.profile, &pr.title)?)))
+            .filter_map(|pr| {
+                Some((
+                    pr.key.clone(),
+                    skips.check(&pr.profile, &pr.title, pr.is_draft)?,
+                ))
+            })
             .collect();
         // Not held through the queries below: it blocks a config reload.
         drop(skips);
@@ -744,6 +749,7 @@ mod tests {
             title: title.into(),
             author: author.into(),
             profile: "default".into(),
+            is_draft: false,
             latest_run: None,
             pending_drafts: 0,
         }
@@ -958,6 +964,27 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.confirm_rerun, None);
+    }
+
+    #[test]
+    fn skips_outrank_waiting_and_runs() {
+        let mut app = App::new(false);
+        let mut overview = Overview::default();
+        overview.owed.push(OwedReview {
+            is_draft: true,
+            latest_run: Some(latest("failed", None)),
+            ..owed("org/web", 81, "Try things", "erin")
+        });
+        overview
+            .waiting
+            .insert(pr("org/web", 81), Duration::from_secs(30));
+        overview.skipped.insert(pr("org/web", 81), Skip::Draft);
+        app.set_overview(overview);
+        let terminal = draw(&mut app, 80, 12);
+        let row: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_owned())
+            .collect();
+        assert!(row.starts_with("│skipped: draft "), "{row}");
     }
 
     #[test]

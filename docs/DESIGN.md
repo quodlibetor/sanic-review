@@ -76,6 +76,7 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 [review_requests]
 teams = ["*", "!storage-platform"]     # which of your teams' requests count
 skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
+# skip_drafts = true                   # never auto-review draft PRs
 
 [runner]
 # claude = "claude"                    # executable; a bare name uses PATH
@@ -89,6 +90,7 @@ instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                            # skill dirs made available to the agent
 model = "claude-sonnet-5"
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
+# skip_drafts = false                  # overrides review_requests.skip_drafts
 repos = [{ github = "my-org" }]
 
 [profile.vuln]
@@ -192,6 +194,7 @@ against stored state, never from notification payloads.
 | Situation | Trigger | Run kind |
 |-----------|---------|----------|
 | Someone else's PR, you're a requested reviewer, not yet reviewed | review requested | `review` (full) |
+| Someone else's PR you're requested on or have reviewed goes from draft to ready | ready for review | `review` (full) |
 | Someone else's PR you've reviewed, new head SHA | push | `review` (incremental from last reviewed SHA; full until milestone 4) |
 | Any PR you've commented on (requested or not), new non-self comment in a thread you're in | reply | `reply` |
 | Your PR, new non-self review or comment | feedback | `respond` (draft replies, optionally a fix; see Auto-fix) |
@@ -216,12 +219,13 @@ Rules:
   profile goes to the scheduler like a new one. The idempotency rule then
   skips any head that already has a queued, running or succeeded run. A
   reloaded `quiet_secs` applies from the next trigger on.
-- **Skips.** A PR whose title matches a `skip_titles` glob, from
-  `[review_requests]` or from its profile, is never reviewed
-  automatically. Globs match the whole title, ignoring case, and only glob
+- **Skips.** A draft PR, while `skip_drafts` is on (the default; a
+  profile's own `skip_drafts` overrides `[review_requests]`), and a PR
+  whose title matches a `skip_titles` glob, from `[review_requests]` or
+  from its profile, are never reviewed automatically. Globs match the whole title, ignoring case, and only glob
   syntax is special, so `(` and `)` match themselves. The check runs when a
-  review comes due, against the title and config at that moment, so title
-  edits and config reloads count. A skipped review is logged on the PR,
+  review comes due, against the title, draft state and config at that
+  moment, so edits and config reloads count. A skipped review is logged on the PR,
   e.g. "review skipped: title matches `build(deps)*`". The PR is still
   tracked and shown everywhere.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
@@ -379,7 +383,7 @@ available when tuning instruction files.
     queued; the scheduler shares those due times with the TUI in memory.
     `waiting` without a countdown means no run and no known due time.
     A PR that isn't reviewed automatically shows why instead, e.g.
-    `skipped: title`. A failed or crashed run
+    `skipped: draft` or `skipped: title`. A failed or crashed run
     also shows the first line of its error.
   - **Your PRs:** every open PR you authored, with its review state
     (approved, changes requested, waiting) and pending drafts.
