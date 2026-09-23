@@ -61,6 +61,7 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 [poll]
 # reconcile_secs = ...                 # GraphQL reconcile interval
 # min_notification_secs = ...          # floor under GitHub's X-Poll-Interval
+# quiet_secs = ...                     # debounce: how long a PR must go quiet
 
 [review_requests]
 teams = ["*", "!storage-platform"]     # which of your teams' requests count
@@ -147,7 +148,7 @@ against stored state, never from notification payloads.
 | Situation | Trigger | Run kind |
 |-----------|---------|----------|
 | Someone else's PR, you're a requested reviewer, not yet reviewed | review requested | `review` (full) |
-| Someone else's PR you've reviewed, new head SHA | push | `review` (incremental from last reviewed SHA) |
+| Someone else's PR you've reviewed, new head SHA | push | `review` (incremental from last reviewed SHA; full until milestone 4) |
 | Any PR you've commented on (requested or not), new non-self comment in a thread you're in | reply | `reply` |
 | Your PR, new non-self review or comment | feedback | `respond` (draft replies, optionally a fix; see Auto-fix) |
 
@@ -156,7 +157,17 @@ Rules:
 - **Debounce.** A trigger fires only after the PR has been quiet for a
   configurable interval. A newer event resets the timer and replaces the
   queued run.
-- **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A reply or respond
+  Any trigger except `approved` counts as an event. When a newer review
+  trigger replaces a pending one, the review runs at the newer head and
+  stays full if either trigger asked for a full review. Once the timer
+  fires the run is `queued`; queueing another review of the PR marks a run
+  that hasn't started `superseded`. A run that has started is left to
+  finish. Reviews still waiting out the quiet interval are held in memory
+  only, so a restart during that window drops them. A reloaded
+  `quiet_secs` applies from the next trigger on.
+- **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
+  already has a queued, running or succeeded run is skipped; one whose run
+  failed or was superseded is queued again. A reply or respond
   run is keyed by `(pr, newest comment id covered)`.
 - **Force pushes.** If the last reviewed SHA isn't an ancestor of the new
   head, the incremental review gets a range-diff instead of a plain diff.
