@@ -8,12 +8,12 @@
 //! - A state-changing request (anything but `GET` and `HEAD`) must carry
 //!   the per-process CSRF token, in the `x-csrf-token` header (htmx) or a
 //!   `csrf` form field (plain forms). A cross-site page can't read it.
-//!   Its `Origin`, when sent, must be the dashboard's own, and
-//!   `Sec-Fetch-Site`, when sent, must be `same-origin`.
+//!   `Sec-Fetch-Site`, when sent, must be `same-origin`, and `Origin`, when
+//!   sent, the dashboard's own, or `null` alongside that `same-origin`.
 //! - A page another site navigates you to (`Sec-Fetch-Site` other than
-//!   `same-origin` or `none`, or without it, any `Referer`) is replaced by
-//!   a link to itself, so the other site can't open a confirm page and
-//!   catch a keystroke on it.
+//!   `same-origin` or `none`, or without it, a `Referer` from elsewhere)
+//!   is replaced by a link to itself, so the other site can't open a
+//!   confirm page and catch a keystroke on it.
 //! - Every response forbids framing, so a page can't overlay the Confirm
 //!   button and trick you into clicking it, and its CSP allows only the
 //!   dashboard's own scripts and styles.
@@ -75,7 +75,14 @@ pub async fn guard(State(app): State<Shared>, req: Request, next: Next) -> Respo
         Ok(req) => req,
         Err(why) => return (StatusCode::FORBIDDEN, why).into_response(),
     };
-    let mut resp = if navigated_from_elsewhere(&req) {
+    // `check` has made sure there's a loopback `Host`.
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let mut resp = if navigated_from_elsewhere(&req, &host) {
         let target = req
             .uri()
             .path_and_query()
@@ -97,7 +104,9 @@ pub async fn guard(State(app): State<Shared>, req: Request, next: Next) -> Respo
     );
     headers.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        // Links out carry no referrer; the dashboard's own requests keep
+        // theirs, so Firefox sends a real `Origin` with its form posts.
+        HeaderValue::from_static("same-origin"),
     );
     resp
 }
@@ -117,19 +126,19 @@ async fn check(csrf: &Csrf, req: Request) -> Result<Request, &'static str> {
         return Ok(req);
     }
     let headers = req.headers();
-    if headers
-        .get_all("sec-fetch-site")
-        .iter()
-        .any(|site| site != "same-origin")
-    {
+    let mut sites = headers.get_all("sec-fetch-site").iter().peekable();
+    // Only the browser sets this, so a page can't claim to be the dashboard.
+    let same_origin = sites.peek().is_some();
+    if sites.any(|site| site != "same-origin") {
         return Err("cross-site requests are refused");
     }
+    // Firefox sends `Origin: null` for the dashboard's own form posts in
+    // some cases, so `null` passes when the browser vouches for the origin.
     let own = format!("http://{host}");
-    if headers
-        .get_all(header::ORIGIN)
-        .iter()
-        .any(|origin| origin.to_str().ok() != Some(own.as_str()))
-    {
+    if headers.get_all(header::ORIGIN).iter().any(|origin| {
+        let origin = origin.to_str().ok();
+        origin != Some(own.as_str()) && !(same_origin && origin == Some("null"))
+    }) {
         return Err("requests from other origins are refused");
     }
     if header_token(headers).is_some_and(|t| csrf.matches(t)) {
@@ -158,12 +167,12 @@ async fn check(csrf: &Csrf, req: Request) -> Result<Request, &'static str> {
 /// they have no effect.
 ///
 /// Browsers that send `Sec-Fetch-Site` say where a navigation came from
-/// outright. Without it, any `Referer` counts as elsewhere, since the
-/// dashboard's own pages send none (`Referrer-Policy: no-referrer`). No
-/// `Referer` doesn't: a typed URL or a bookmark sends none, and neither
-/// does a site that hides where it links from, which is what the keyboard
-/// script's delay after a page opens is for.
-fn navigated_from_elsewhere(req: &Request) -> bool {
+/// outright. Without it, a `Referer` from anywhere but the dashboard on
+/// `host` counts as elsewhere. No `Referer` doesn't: a typed URL or a
+/// bookmark sends none, and neither does a site that hides where it links
+/// from, which is what the keyboard script's delay after a page opens is
+/// for.
+fn navigated_from_elsewhere(req: &Request, host: &str) -> bool {
     if !matches!(*req.method(), Method::GET | Method::HEAD)
         || req.uri().path().starts_with("/assets/")
     {
@@ -174,7 +183,11 @@ fn navigated_from_elsewhere(req: &Request) -> bool {
     if sites.peek().is_some() {
         return sites.any(|site| site != "same-origin" && site != "none");
     }
-    headers.contains_key(header::REFERER)
+    let own = format!("http://{host}/");
+    headers
+        .get_all(header::REFERER)
+        .iter()
+        .any(|referer| !referer.to_str().is_ok_and(|r| r.starts_with(&own)))
 }
 
 fn header_token(headers: &HeaderMap) -> Option<&str> {

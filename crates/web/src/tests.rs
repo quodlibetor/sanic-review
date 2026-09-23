@@ -892,11 +892,19 @@ async fn without_sec_fetch_site_a_foreign_referer_counts_as_elsewhere() {
     };
     let reply = f.send(referred("https://evil.example/")).await;
     assert!(!reply.body.contains(r#"id="confirm""#), "{}", reply.body);
-    // The dashboard's own pages send no Referer, so any is from elsewhere.
+    // The dashboard's own pages send their own address.
     let reply = f
         .send(referred("http://127.0.0.1:7117/pr/org/repo/7"))
         .await;
-    assert!(!reply.body.contains(r#"id="confirm""#), "{}", reply.body);
+    assert!(reply.body.contains(r#"id="confirm""#), "{}", reply.body);
+    // A lookalike host isn't this one, nor is another port.
+    for referer in [
+        "http://127.0.0.1:7117.evil.example/",
+        "http://127.0.0.1:8080/",
+    ] {
+        let reply = f.send(referred(referer)).await;
+        assert!(!reply.body.contains(r#"id="confirm""#), "{referer}");
+    }
 }
 
 #[tokio::test]
@@ -993,4 +1001,49 @@ async fn ignore_preview(f: &Fixture, pattern: &str, profile: &str) -> String {
     f.get(&format!("/pr/org/repo/8/ignore/preview?{query}"))
         .await
         .body
+}
+
+/// Exactly what Firefox sent for the dashboard's own "Review now" form,
+/// which set `Referrer-Policy: no-referrer` back then.
+#[tokio::test]
+async fn firefoxs_same_origin_form_post_with_a_null_origin_is_accepted() {
+    let f = fixture(false).await;
+    let token = f.token();
+    let body = || encode(&[("csrf", token.as_str())]);
+    let firefox = Request::post("/pr/org/repo/8/review-now")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, "null")
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-mode", "navigate")
+        .header("sec-fetch-dest", "document")
+        .header("sec-fetch-user", "?1")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    let reply = f.send(firefox.body(body()).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(8)]);
+
+    // `null` alone isn't vouched for, nor alongside another site.
+    let bare_null = Request::post("/pr/org/repo/8/review-now")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, "null")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    let reply = f.send(bare_null.body(body()).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    for site in ["cross-site", "same-site", "none"] {
+        let req = Request::post("/pr/org/repo/8/review-now")
+            .header(header::HOST, HOST)
+            .header(header::ORIGIN, "null")
+            .header("sec-fetch-site", site)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        let reply = f.send(req.body(body()).unwrap()).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{site}");
+    }
+    assert_eq!(f.serve.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn links_out_carry_no_referrer_but_the_dashboards_own_requests_do() {
+    let f = fixture(false).await;
+    let reply = f.get("/").await;
+    assert_eq!(reply.headers[header::REFERRER_POLICY], "same-origin");
 }
