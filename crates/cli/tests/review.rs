@@ -242,6 +242,8 @@ impl World {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
             .arg("serve")
             .args(extra)
+            // Any free port for the dashboard, so tests can run side by side.
+            .args(["--port", "0"])
             .arg("--config")
             .arg(&self.config)
             .arg("--data-dir")
