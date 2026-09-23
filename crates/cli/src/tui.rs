@@ -431,23 +431,38 @@ impl PaneFrame<'_> {
 }
 
 fn owed_row(pr: &OwedReview, no_reviews: bool) -> ListItem<'_> {
-    let (label, color) = match pr.latest_run.as_deref() {
+    let latest = pr.latest_run.as_ref();
+    let (label, color) = match latest.map(|run| run.status.as_str()) {
         None => ("no run", Color::DarkGray),
         Some("queued") if no_reviews => ("held", Color::Yellow),
         Some("queued") => ("queued", Color::Yellow),
         Some("running") => ("running", Color::Cyan),
         Some("succeeded") => ("drafted", Color::Green),
         Some("failed") => ("failed", Color::Red),
+        Some("crashed") => ("crashed", Color::Red),
         Some(other) => (other, Color::DarkGray),
     };
-    ListItem::new(Line::from(vec![
+    let mut lines = vec![Line::from(vec![
         Span::styled(format!("{label:<10}"), Style::new().fg(color)),
         drafts(pr.pending_drafts),
         Span::raw(pr.key.url()),
         Span::raw("  "),
         Span::raw(pr.title.as_str()),
         Span::raw(format!(" ({})", pr.author)).dim(),
-    ]))
+    ])];
+    // Only the latest run's error: an older failure a later run replaced
+    // doesn't need attention.
+    if let Some(error) = latest.and_then(|run| run.error.as_deref()) {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(10)),
+            Span::styled(first_line(error), Style::new().fg(Color::Red)),
+        ]));
+    }
+    ListItem::new(lines)
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
 }
 
 fn my_row(pr: &MyPr) -> ListItem<'_> {
@@ -484,16 +499,28 @@ fn activity_row(activity: &Activity) -> ListItem<'_> {
         ActivityKind::Trigger(kind) => kind.replace('_', " "),
         ActivityKind::RunQueued => "review queued".into(),
         ActivityKind::RunStarted => "review started".into(),
-        ActivityKind::RunFinished(status) if status == "succeeded" => "review drafted".into(),
-        ActivityKind::RunFinished(status) => format!("review {status}"),
+        ActivityKind::RunFinished { status, .. } if status == "succeeded" => {
+            "review drafted".into()
+        }
+        ActivityKind::RunFinished { status, .. } => format!("review {status}"),
     };
     // `at` is RFC 3339 UTC; the log pane's clock is UTC too.
     let time = activity.at.get(11..19).unwrap_or(&activity.at);
-    ListItem::new(Line::from(vec![
+    let mut spans = vec![
         Span::raw(format!("{time}  ")).dim(),
         Span::raw(format!("{what:<18}")),
         Span::raw(activity.key.url()),
-    ]))
+    ];
+    if let ActivityKind::RunFinished {
+        error: Some(error), ..
+    } = &activity.kind
+    {
+        spans.push(Span::styled(
+            format!("  {}", first_line(error)),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, counts: &RunCounts, no_reviews: bool) {
@@ -548,6 +575,7 @@ fn render_help(frame: &mut Frame<'_>) {
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use sanic_core::{pr::PrKey, repo::RepoName};
+    use sanic_store::LatestRun;
 
     use super::*;
 
@@ -558,6 +586,13 @@ mod tests {
         }
     }
 
+    fn latest(status: &str, error: Option<&str>) -> LatestRun {
+        LatestRun {
+            status: status.into(),
+            error: error.map(Into::into),
+        }
+    }
+
     fn overview() -> Overview {
         Overview {
             owed: vec![
@@ -565,14 +600,24 @@ mod tests {
                     key: pr("org/api", 481),
                     title: "Retry webhook deliveries".into(),
                     author: "alice".into(),
-                    latest_run: Some("succeeded".into()),
+                    latest_run: Some(latest("succeeded", None)),
                     pending_drafts: 3,
                 },
                 OwedReview {
                     key: pr("org/web", 77),
                     title: "Fix login flake".into(),
                     author: "bob".into(),
-                    latest_run: Some("queued".into()),
+                    latest_run: Some(latest("queued", None)),
+                    pending_drafts: 0,
+                },
+                OwedReview {
+                    key: pr("org/web", 79),
+                    title: "Cache avatars".into(),
+                    author: "carol".into(),
+                    latest_run: Some(latest(
+                        "crashed",
+                        Some("index out of bounds\nat src/lib.rs"),
+                    )),
                     pending_drafts: 0,
                 },
             ],
@@ -594,9 +639,20 @@ mod tests {
             ],
             activity: vec![
                 Activity {
+                    at: "2026-09-23T16:36:00.000Z".into(),
+                    key: pr("org/web", 79),
+                    kind: ActivityKind::RunFinished {
+                        status: "crashed".into(),
+                        error: Some("index out of bounds\nat src/lib.rs".into()),
+                    },
+                },
+                Activity {
                     at: "2026-09-23T16:35:10.120Z".into(),
                     key: pr("org/api", 481),
-                    kind: ActivityKind::RunFinished("succeeded".into()),
+                    kind: ActivityKind::RunFinished {
+                        status: "succeeded".into(),
+                        error: None,
+                    },
                 },
                 Activity {
                     at: "2026-09-23T16:33:02.004Z".into(),
@@ -670,10 +726,11 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
         // Stops at the last row.
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(1));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(2));
         press(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(0));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(1));
 
         press(&mut app, KeyCode::BackTab);
         assert_eq!(app.focus, Pane::Log);

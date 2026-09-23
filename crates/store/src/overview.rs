@@ -15,9 +15,16 @@ pub struct OwedReview {
     pub key: PrKey,
     pub title: String,
     pub author: String,
-    /// Status of the most recently queued review run, if any.
-    pub latest_run: Option<String>,
+    /// The most recently queued review run, if any.
+    pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestRun {
+    pub status: String,
+    /// Why a failed or crashed run ended.
+    pub error: Option<String>,
 }
 
 /// An open PR you authored.
@@ -56,21 +63,26 @@ pub enum ActivityKind {
     Trigger(String),
     RunQueued,
     RunStarted,
-    /// A run ended with this status: succeeded, failed or superseded.
-    RunFinished(String),
+    /// A run ended: succeeded, failed, crashed or superseded. `error` says
+    /// why a failed or crashed one did.
+    RunFinished {
+        status: String,
+        error: Option<String>,
+    },
 }
 
 impl Store {
     /// Open PRs by others that request your review, by repo and number.
     pub fn owed_reviews(&self, me: &str) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.repo, p.number, p.title, p.author,
-                    (SELECT status FROM runs r
-                     WHERE r.repo = p.repo AND r.number = p.number
-                     ORDER BY r.queued_at DESC, r.id DESC LIMIT 1),
+            "SELECT p.repo, p.number, p.title, p.author, latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
+             LEFT JOIN runs latest ON latest.id = (
+                 SELECT id FROM runs r
+                 WHERE r.repo = p.repo AND r.number = p.number
+                 ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
              WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
              ORDER BY p.repo, p.number",
         )?;
@@ -81,19 +93,20 @@ impl Store {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(
-                |(repo, number, title, author, latest_run, pending_drafts)| {
+                |(repo, number, title, author, status, error, pending_drafts)| {
                     Ok(OwedReview {
                         key: key(&repo, number)?,
                         title,
                         author,
-                        latest_run,
+                        latest_run: status.map(|status| LatestRun { status, error }),
                         pending_drafts,
                     })
                 },
@@ -163,14 +176,14 @@ impl Store {
     /// A requeued run keeps only its latest queue, start and finish times.
     pub fn recent_activity(&self, limit: u32) -> Result<Vec<Activity>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT at, repo, number, 'trigger', kind FROM events
+            "SELECT at, repo, number, 'trigger', kind, NULL FROM events
              UNION ALL
-             SELECT queued_at, repo, number, 'queued', NULL FROM runs
+             SELECT queued_at, repo, number, 'queued', NULL, NULL FROM runs
              UNION ALL
-             SELECT started_at, repo, number, 'started', NULL FROM runs
+             SELECT started_at, repo, number, 'started', NULL, NULL FROM runs
              WHERE started_at IS NOT NULL
              UNION ALL
-             SELECT finished_at, repo, number, 'finished', status FROM runs
+             SELECT finished_at, repo, number, 'finished', status, error FROM runs
              WHERE finished_at IS NOT NULL
              ORDER BY 1 DESC
              LIMIT ?1",
@@ -183,17 +196,21 @@ impl Store {
                     row.get(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(at, repo, number, what, detail)| {
+            .map(|(at, repo, number, what, detail, error)| {
                 let detail = detail.unwrap_or_default();
                 let kind = match what.as_str() {
                     "trigger" => ActivityKind::Trigger(detail),
                     "queued" => ActivityKind::RunQueued,
                     "started" => ActivityKind::RunStarted,
-                    _ => ActivityKind::RunFinished(detail),
+                    _ => ActivityKind::RunFinished {
+                        status: detail,
+                        error,
+                    },
                 };
                 Ok(Activity {
                     at,
@@ -301,15 +318,26 @@ mod tests {
         );
 
         let run = store.queue_review(&request(&requested)).unwrap().unwrap();
-        assert_eq!(
-            store.owed_reviews("me").unwrap()[0].latest_run.as_deref(),
-            Some("queued")
-        );
+        let latest = |store: &Store| store.owed_reviews("me").unwrap()[0].latest_run.clone();
+        assert_eq!(latest(&store).unwrap().status, "queued");
         store.claim_run(run.id).unwrap();
         store.finish_review(run.id, &result()).unwrap();
         let owed = &store.owed_reviews("me").unwrap()[0];
-        assert_eq!(owed.latest_run.as_deref(), Some("succeeded"));
+        assert_eq!(owed.latest_run.as_ref().unwrap().status, "succeeded");
         assert_eq!(owed.pending_drafts, 1);
+
+        let mut pushed = request(&requested);
+        pushed.head_sha = "h2".into();
+        let run = store.queue_review(&pushed).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.crash_run(run.id, "index out of bounds").unwrap();
+        assert_eq!(
+            latest(&store),
+            Some(LatestRun {
+                status: "crashed".into(),
+                error: Some("index out of bounds".into()),
+            })
+        );
     }
 
     #[test]
@@ -420,7 +448,10 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                ActivityKind::RunFinished("failed".into()),
+                ActivityKind::RunFinished {
+                    status: "failed".into(),
+                    error: Some("boom".into()),
+                },
                 ActivityKind::RunStarted,
                 ActivityKind::RunQueued,
                 ActivityKind::Trigger("review_requested".into()),
