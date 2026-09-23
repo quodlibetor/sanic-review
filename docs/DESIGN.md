@@ -215,9 +215,13 @@ pick it yourself.
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status, session id, transcript path, timings |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
+
+A run's summary is stored as a `summary` draft, so it can be edited like any
+other draft. Runs left `running` by a previous process are requeued at
+startup.
 
 Keeping both the original and the edited body means the edit history is
 available when tuning instruction files.
