@@ -56,6 +56,7 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 [github]
 # Token comes from `gh auth token` unless GITHUB_TOKEN is set.
 # api_url = "https://api.github.com"   # override for tests or a proxy
+# git_url = "https://github.com"       # where repo mirrors fetch from
 
 [poll]
 # reconcile_secs = ...                 # GraphQL reconcile interval
@@ -63,6 +64,11 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 
 [review_requests]
 teams = ["*", "!storage-platform"]     # which of your teams' requests count
+
+[runner]
+# claude = "claude"                    # executable; a bare name uses PATH
+# max_concurrent = ...                 # agent runs at once, across all PRs
+# timeout_secs = ...                   # kill a run that takes longer
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
@@ -182,12 +188,24 @@ Rules:
    Only read-only tools are allowed (Read, Grep, Glob, and read-only Bash if
    required). There's no network access and no `gh`, and the environment has
    no GitHub token.
+   Concretely: the brief goes on stdin, the schema via `--json-schema`, and
+   output is `stream-json` so the whole session is kept as the transcript.
+   `--tools Read,Grep,Glob` removes every other tool, `--restricted`
+   confines file access to the worktree and `--add-dir`s (so the agent can't
+   read `gh`'s stored token), and `--strict-mcp-config` loads no MCP servers.
+   Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
+   the agent reads their `SKILL.md` files directly. A run that outlives
+   `runner.timeout_secs` is killed and fails.
 4. **Parse.** Validate the result against the schema. Check each inline
    comment's `(path, line, side)` against the PR diff hunks. A draft that
    fails the check is still stored, flagged `unanchored`, so you can re-anchor
    it or post it as a top-level comment.
 5. **Record.** Store the transcript path and Claude session id, so
    "regenerate with instruction" can resume the session.
+   Each run keeps `system.md`, `prompt.md`, `pr.diff`, `transcript.jsonl`
+   and `stderr.log` under `runs/<id>/` in the data dir. Its worktree is
+   always `worktrees/<id>/`, since resuming a session needs the same working
+   directory.
 
 A global semaphore bounds concurrency. The per-profile model setting controls
 cost.
@@ -208,6 +226,10 @@ cost.
 
 The dashboard never offers `approve` as an agent suggestion. You can still
 pick it yourself.
+
+Each run kind gets its own schema with only the fields it uses: a `review`
+run's has `summary`, `suggested_verdict` and `comments`, so the agent isn't
+invited to draft replies or fixes on someone else's PR.
 
 ## Storage (SQLite)
 

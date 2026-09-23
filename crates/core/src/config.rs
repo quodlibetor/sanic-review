@@ -22,6 +22,10 @@ use crate::{pr::TeamRef, repo::RepoName};
 const DEFAULT_API_URL: &str = "https://api.github.com";
 const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
 const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
+const DEFAULT_GIT_URL: &str = "https://github.com";
+const DEFAULT_CLAUDE: &str = "claude";
+const DEFAULT_MAX_RUNS: usize = 2;
+const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// The version control system backing a local checkout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +46,7 @@ pub struct Config {
     pub github: GithubSettings,
     pub poll: PollSettings,
     pub review_requests: ReviewRequestSettings,
+    pub runner: RunnerSettings,
     /// In file order; earlier profiles win ties when matching.
     pub profiles: Vec<Profile>,
 }
@@ -49,6 +54,8 @@ pub struct Config {
 #[derive(Debug)]
 pub struct GithubSettings {
     pub api_url: String,
+    /// Base URL that repo mirrors fetch from, as `<git_url>/<owner>/<name>.git`.
+    pub git_url: String,
 }
 
 #[derive(Debug)]
@@ -103,6 +110,16 @@ impl TeamFilter {
             .find(|(_, glob, qualified)| glob.is_match(if *qualified { &full } else { &team.slug }))
             .is_some_and(|(allow, _, _)| *allow)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerSettings {
+    /// The `claude` executable; a bare name is looked up on `PATH`.
+    pub claude: PathBuf,
+    /// Agent runs allowed at once, across all PRs.
+    pub max_concurrent: usize,
+    /// A run still going after this long is killed and marked failed.
+    pub timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -258,11 +275,25 @@ impl Config {
                 bail!("`poll.{key}` must be at least 1");
             }
         }
+        if raw.runner.max_concurrent == Some(0) {
+            bail!("`runner.max_concurrent` must be at least 1");
+        }
+        if raw.runner.timeout_secs == Some(0) {
+            bail!("`runner.timeout_secs` must be at least 1");
+        }
         if raw.profile.is_empty() {
             return Err(eyre!("no profiles configured"))
                 .suggestion("add a `[profile.<name>]` table with a `repos` list");
         }
         let paths = PathContext { base };
+        let claude = match raw.runner.claude {
+            // A bare name means PATH lookup, not a file next to the config.
+            Some(claude) if claude.contains('/') || claude.starts_with('~') => {
+                paths.expand(&claude)?
+            }
+            Some(claude) => PathBuf::from(claude),
+            None => PathBuf::from(DEFAULT_CLAUDE),
+        };
         let profiles = raw
             .profile
             .into_iter()
@@ -274,6 +305,7 @@ impl Config {
         Ok(Self {
             github: GithubSettings {
                 api_url: raw.github.api_url.unwrap_or_else(|| DEFAULT_API_URL.into()),
+                git_url: raw.github.git_url.unwrap_or_else(|| DEFAULT_GIT_URL.into()),
             },
             poll: PollSettings {
                 reconcile_interval: raw
@@ -292,6 +324,14 @@ impl Config {
                         .unwrap_or_else(|| vec!["*".into()]),
                 )
                 .wrap_err("in `review_requests.teams`")?,
+            },
+            runner: RunnerSettings {
+                claude,
+                max_concurrent: raw.runner.max_concurrent.unwrap_or(DEFAULT_MAX_RUNS),
+                timeout: raw
+                    .runner
+                    .timeout_secs
+                    .map_or(DEFAULT_RUN_TIMEOUT, Duration::from_secs),
             },
             profiles,
         })
@@ -465,6 +505,8 @@ struct RawConfig {
     #[serde(default)]
     review_requests: RawReviewRequests,
     #[serde(default)]
+    runner: RawRunner,
+    #[serde(default)]
     profile: IndexMap<String, RawProfile>,
 }
 
@@ -472,6 +514,15 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawGithub {
     api_url: Option<String>,
+    git_url: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRunner {
+    claude: Option<String>,
+    max_concurrent: Option<usize>,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -572,6 +623,7 @@ mod tests {
     fn parses_the_documented_shapes() {
         let config = parse(EXAMPLE).unwrap();
         assert_eq!(config.github.api_url, DEFAULT_API_URL);
+        assert_eq!(config.runner.claude, Path::new("claude"));
         assert_eq!(config.profiles.len(), 2);
 
         let vuln = &config.profiles[1];
@@ -733,6 +785,7 @@ mod tests {
             ),
             ("[profile.p]\nrepos = [\"services\"]\nbogus = 1", "bogus"),
             ("[poll]\nreconcile_secs = 0", "poll.reconcile_secs"),
+            ("[runner]\nmax_concurrent = 0", "runner.max_concurrent"),
         ] {
             let err = format!("{:?}", parse(text).unwrap_err());
             assert!(err.contains(needle), "{text:?}: {err}");
