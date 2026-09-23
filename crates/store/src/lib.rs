@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_pr_github_updated_at.sql"),
     include_str!("migrations/0007_start_requests.sql"),
     include_str!("migrations/0008_views.sql"),
+    include_str!("migrations/0009_closed_prs.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -200,6 +201,38 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Remembers that a refresh at `checked_at` (as GitHub writes times)
+    /// found `key` closed or not visible, tracked or not.
+    pub fn remember_closed(&self, key: &PrKey, checked_at: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO closed_prs (repo, number, checked_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (repo, number) DO UPDATE SET checked_at = excluded.checked_at",
+            params![key.repo.to_string(), key.number, checked_at],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets that `key` was found closed: a refresh found it open.
+    pub fn forget_closed(&self, key: &PrKey) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM closed_prs WHERE repo = ?1 AND number = ?2",
+            params![key.repo.to_string(), key.number],
+        )?;
+        Ok(())
+    }
+
+    /// When `key` was last found closed, unless it's been seen open since.
+    pub fn closed_at(&self, key: &PrKey) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT checked_at FROM closed_prs WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Marks `key` as no longer open, if it's tracked. A later
@@ -585,6 +618,25 @@ mod tests {
         assert!(store.pr_summary(&snap.key).unwrap().unwrap().archived);
         assert!(store.set_archived(&snap.key, false).unwrap());
         assert!(!store.pr_summary(&snap.key).unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn closed_prs_are_remembered_until_forgotten() {
+        let store = Store::open_in_memory().unwrap();
+        let snap = snapshot();
+        assert_eq!(store.closed_at(&snap.key).unwrap(), None);
+        store
+            .remember_closed(&snap.key, "2026-09-01T00:00:00Z")
+            .unwrap();
+        store
+            .remember_closed(&snap.key, "2026-09-02T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            store.closed_at(&snap.key).unwrap().as_deref(),
+            Some("2026-09-02T00:00:00Z")
+        );
+        store.forget_closed(&snap.key).unwrap();
+        assert_eq!(store.closed_at(&snap.key).unwrap(), None);
     }
 
     #[test]
