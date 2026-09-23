@@ -71,7 +71,7 @@ expression: "readable(&f, &page.body)"
 and more detail">claude exited with 1</span>
 </span>
 <span class="a">
-<a class="linkbtn" href="/pr/org/repo/8/review-now">review now <span class="k">r</span>
+<a class="linkbtn" href="/pr/org/repo/8/review-now" data-dialog>review now <span class="k">r</span>
 </a>
 <a class="linkbtn" href="/pr/org/repo/8/ignore">ignore by title <span class="k">i</span>
 </a>
@@ -101,7 +101,7 @@ and more detail">claude exited with 1</span>
 <span class="m">
 <a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol</span>
 <span class="a">
-<a class="linkbtn" href="/pr/org/repo/10/review-now">review now <span class="k">r</span>
+<a class="linkbtn" href="/pr/org/repo/10/review-now" data-dialog>review now <span class="k">r</span>
 </a>
 <a class="linkbtn" href="/pr/org/repo/10/ignore">ignore by title <span class="k">i</span>
 </a>
@@ -225,6 +225,10 @@ and more detail">claude exited with 1</span>
 </tr>
 </table>
 <p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div class="overlay" id="dialog" hidden>
+<div class="popup dialog" role="dialog" aria-modal="true">
 </div>
 </div>
 <div id="notice" hidden>

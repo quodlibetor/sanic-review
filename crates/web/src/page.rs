@@ -90,6 +90,8 @@ pub fn layout_in(
                 }
                 main { (content) }
                 (help())
+                // Where a confirm card opens over the page; see `card`.
+                div #dialog .overlay hidden { div.popup.dialog role="dialog" aria-modal="true" {} }
                 div #notice hidden {}
             }
         }
@@ -242,5 +244,49 @@ fn urgency_class(state: PrState) -> &'static str {
         Urgency::Act => "act",
         Urgency::Good => "good",
         Urgency::Quiet => "quiet",
+    }
+}
+
+/// How a [`card`] looks: asking, or saying how something went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Ask,
+    Done,
+    Failed,
+}
+
+/// A confirm or result card: what kind of thing it is, the question (or
+/// outcome), the PR it's about, anything more, what it costs, then its
+/// buttons: `go` and a way back. The keyboard script also opens a confirm
+/// page's card as a dialog over the page you asked from.
+pub struct Card<'a> {
+    pub kind: &'a str,
+    pub heading: Markup,
+    pub title: &'a str,
+    pub meta: Markup,
+    pub extra: Markup,
+    pub cost: Option<Markup>,
+    pub go: Markup,
+    pub back: (&'a str, &'a str),
+    pub tone: Tone,
+}
+
+pub fn card(card: &Card<'_>) -> Markup {
+    let (back, back_label) = card.back;
+    html! {
+        div.cf.ok[card.tone == Tone::Done].bad[card.tone == Tone::Failed] {
+            p.kind { (card.kind) }
+            h1 { (card.heading) }
+            div.who {
+                div.t { (card.title) }
+                div.m { (card.meta) }
+                (card.extra)
+            }
+            @if let Some(cost) = &card.cost { p.cost { (cost) } }
+            div.btns {
+                (card.go)
+                a.btn #cancel href=(back) { (back_label) (keycap("Esc")) }
+            }
+        }
     }
 }

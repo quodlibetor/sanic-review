@@ -1,0 +1,18 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, card_of(&posted.body))"
+---
+<div class="cf ok">
+<p class="kind">Submit review</p>
+<h1>Posted</h1>
+<div class="who">
+<div class="t">Add the thing</div>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a> · request changes · 1 inline comment</div>
+</div>
+<div class="btns">
+<a class="btn primary" href="https://github.com/org/repo/pull/7#pullrequestreview-5">Open it on GitHub ↗</a>
+<a class="btn" id="cancel" href="/pr/org/repo/7?run=1">Back to the PR<span class="k">Esc</span>
+</a>
+</div>
+</div>

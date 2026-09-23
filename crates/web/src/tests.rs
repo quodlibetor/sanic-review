@@ -657,6 +657,7 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
         .await;
     assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
     assert!(posted.body.contains("pullrequestreview-5"));
+    insta::assert_snapshot!("posted_card", readable(&f, card_of(&posted.body)));
     for i in 0..3 {
         assert_eq!(f.status(i), "posted");
     }
@@ -798,7 +799,18 @@ async fn review_now_asks_first_and_then_asks_serve() {
     let f = fixture(false).await;
     // PR 8's review failed, PR 10 is a skipped draft; PR 7 is drafted.
     let ask = f.get("/pr/org/repo/8/review-now").await;
-    assert!(ask.body.contains("Rerun the review of"), "{}", ask.body);
+    assert!(
+        ask.body.contains("<h1>Rerun this review?</h1>"),
+        "{}",
+        ask.body
+    );
+    insta::assert_snapshot!("review_now_card", readable(&f, card_of(&ask.body)));
+    // It says why it failed, and what it costs.
+    assert!(
+        ask.body
+            .contains("failed: claude exited with 1\nand more detail")
+    );
+    assert!(ask.body.contains("Spends tokens"));
     assert!(
         f.get("/pr/org/repo/10/review-now")
             .await
@@ -809,7 +821,7 @@ async fn review_now_asks_first_and_then_asks_serve() {
         f.get("/pr/org/repo/7/review-now")
             .await
             .body
-            .contains("nothing to start")
+            .contains("<h1>Nothing to start</h1>")
     );
     assert!(f.serve.started.lock().unwrap().is_empty());
 
@@ -821,7 +833,12 @@ async fn review_now_asks_first_and_then_asks_serve() {
     let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(reply.headers[header::LOCATION], "/pr/org/repo/8");
-    assert_eq!(*f.serve.started.lock().unwrap(), [key(8)]);
+    // Confirmed in a dialog over the index, it goes back there.
+    let reply = f
+        .post("/pr/org/repo/10/review-now", &[("next", "index")])
+        .await;
+    assert_eq!(reply.headers[header::LOCATION], "/");
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(8), key(10)]);
 }
 
 #[tokio::test]
@@ -1187,25 +1204,15 @@ async fn reviewing_an_already_reviewed_head_again_says_by_whom() {
         "{index}"
     );
     let ask = f.get("/pr/org/repo/11/review-now").await.body;
-    let text = ask
-        .split("<p>")
-        .nth(1)
-        .and_then(|p| p.split("</p>").next())
-        .unwrap();
-    assert_eq!(
-        text,
-        "Already reviewed by you, alice. Review <a class=\"gh\" \
-         href=\"https://github.com/org/repo/pull/11\">https://github.com/org/repo/pull/11</a> \
-         anyway, at its current head? This spends tokens."
+    assert!(
+        ask.contains("<h1>Already reviewed by you, alice. Review anyway?</h1>"),
+        "{ask}"
     );
+    assert!(ask.contains("It stays skipped for automatic reviews."));
     // The skipped-for-a-reason wording stays for the rest.
     let draft = f.get("/pr/org/repo/10/review-now").await.body;
     assert!(
-        draft.contains(
-            "Review this draft-skipped PR anyway, <a class=\"gh\" \
-             href=\"https://github.com/org/repo/pull/10\">https://github.com/org/repo/pull/10</a> \
-             at its current head? This spends tokens."
-        ),
+        draft.contains("<h1>Review this draft-skipped PR anyway?</h1>"),
         "{draft}"
     );
 }
@@ -1363,4 +1370,11 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
         "IN FLIGHT",
         "{index}"
     );
+}
+
+/// A confirm or result page's card, as the dashboard's dialog lifts it.
+fn card_of(html: &str) -> &str {
+    let start = html.find(r#"<div class="cf"#).unwrap();
+    let end = html[start..].find("</main>").unwrap();
+    &html[start..start + end]
 }

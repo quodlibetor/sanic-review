@@ -120,6 +120,72 @@
     shown = Date.now();
   });
 
+  // A confirm page's card, opened over the page you asked from: only by
+  // your own click or key here, since it's this page's script that fetches
+  // it. Keys settle again when it opens, and its form posts as the page's
+  // would. Without the script, links go to the confirm page itself.
+  const dialog = document.getElementById("dialog");
+  // Only the latest ask opens: a slow answer to an earlier r or click
+  // mustn't open over, or instead of, the one you asked for last.
+  let asked = 0;
+  // Where focus was before, to go back to.
+  let opener = null;
+
+  function dialogOpen() {
+    return dialog && !dialog.hidden;
+  }
+
+  // While it's open the page behind takes no focus, so Tab can't reach its
+  // buttons and Enter can't press them.
+  function behind(inert) {
+    Array.from(document.body.children).forEach(function (el) {
+      if (el !== dialog && el !== notice) el.inert = inert;
+    });
+  }
+
+  function openDialog(href) {
+    const ask = ++asked;
+    const from = document.activeElement;
+    fetch(href, { credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error(String(resp.status));
+        return resp.text();
+      })
+      .then(function (text) {
+        if (ask !== asked || dialogOpen()) return;
+        const card = new DOMParser().parseFromString(text, "text/html").querySelector(".cf");
+        if (!card) {
+          go(href);
+          return;
+        }
+        // Confirmed from the index, it comes back to the index.
+        const next = card.querySelector('input[name="next"]');
+        if (next && page === "index") next.value = "index";
+        const popup = dialog.firstElementChild;
+        popup.replaceChildren(document.importNode(card, true));
+        dialog.hidden = false;
+        behind(true);
+        opener = from;
+        shown = Date.now();
+        sendOnce(dialog.querySelector("#confirm"));
+        // Focus is on the card, not a button, so a stray Enter or Space
+        // presses nothing: y confirms, or Tab to a button.
+        popup.tabIndex = -1;
+        popup.focus();
+      })
+      .catch(function (err) {
+        if (ask === asked) say("That failed (" + err.message + "); reload the page to see why.");
+      });
+  }
+
+  function closeDialog() {
+    dialog.hidden = true;
+    dialog.firstElementChild.replaceChildren();
+    behind(false);
+    if (opener && opener.isConnected) opener.focus();
+    opener = null;
+  }
+
   function onKey(e) {
     // Not even the browser's own handling, like Space ticking a box.
     if (e.repeat || Date.now() - shown < SETTLE_MS) {
@@ -139,6 +205,20 @@
       }
       return;
     }
+    // An open dialog takes every key but the ones that move between and
+    // press its buttons.
+    if (dialogOpen()) {
+      const confirm = dialog.querySelector("#confirm");
+      if (e.key === "y" && confirm) confirm.requestSubmit();
+      else if (e.key === "Escape" || e.key === "q" || e.key === "n") closeDialog();
+      else if (e.key === "Tab") return;
+      else if (e.key === "Enter" || e.key === " ") {
+        // They press only the button you've moved to.
+        if (e.target.closest("#dialog a, #dialog button")) return;
+      }
+      e.preventDefault();
+      return;
+    }
     if (page === "confirm") {
       const confirm = document.getElementById("confirm");
       const cancel = document.getElementById("cancel");
@@ -153,6 +233,13 @@
       case "?":
         help.hidden = false;
         break;
+      case "Escape": {
+        // A result card's way back.
+        const back = document.querySelector("main .cf #cancel");
+        if (!back) return;
+        go(back.href);
+        break;
+      }
       case "q":
         if (page === "index") say("q goes back from other pages; close the tab to leave");
         else go("/");
@@ -193,7 +280,7 @@
       case "r": {
         const target = subject();
         const href = target && target.dataset.reviewNow;
-        if (href) go(href);
+        if (href) openDialog(href);
         else say(RERUN_HINT);
         break;
       }
@@ -231,6 +318,29 @@
   }
 
   document.addEventListener("keydown", onKey);
+  // A link to a confirm page opens its card over this page instead; a
+  // click with a modifier, or a middle click, still opens the page.
+  document.addEventListener("click", function (e) {
+    const link = e.target.closest("a[data-dialog]");
+    if (!link || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    openDialog(link.href);
+  });
+  if (dialog) {
+    dialog.addEventListener("click", function (e) {
+      // Clicks settle as keys do: the second click of a double click on a
+      // link that opened it mustn't land on its Confirm.
+      if (Date.now() - shown < SETTLE_MS) {
+        e.preventDefault();
+        return;
+      }
+      // Cancel, or a click outside the card, closes it.
+      if (e.target === dialog || e.target.closest("#cancel")) {
+        e.preventDefault();
+        closeDialog();
+      }
+    });
+  }
   // Clicking a row, not one of its links, selects it.
   document.addEventListener("click", function (e) {
     const row = e.target.closest("[data-row], .draft");
@@ -263,14 +373,31 @@
   });
   // Back and forward can bring a page back with its approval box ticked;
   // it's ticked afresh each time.
-  window.addEventListener("pageshow", function () {
+  window.addEventListener("pageshow", function (e) {
+    // Coming back to a page after confirming in its dialog finds it closed,
+    // not showing a spent card.
+    if (e.persisted && dialogOpen()) closeDialog();
     document.querySelectorAll('input[name="approve"]').forEach(function (box) {
       box.checked = false;
     });
   });
   // A confirm is sent once: a second click or `y` would replace the result
   // page with "Not posted", or post a second empty approval.
+  function sendOnce(form) {
+    if (!form) return;
+    form.addEventListener("submit", function (e) {
+      if (form.dataset.sent) {
+        e.preventDefault();
+        return;
+      }
+      form.dataset.sent = "true";
+      form.querySelectorAll("button").forEach(function (b) {
+        b.disabled = true;
+      });
+    });
+  }
   const confirmForm = page === "confirm" && document.getElementById("confirm");
+  sendOnce(confirmForm);
   // A form marked data-resend is safe to send again, so coming back to it
   // (say, to fix what was refused) takes it afresh.
   if (confirmForm && "resend" in confirmForm.dataset) {
@@ -278,18 +405,6 @@
       delete confirmForm.dataset.sent;
       confirmForm.querySelectorAll("button").forEach(function (b) {
         b.disabled = false;
-      });
-    });
-  }
-  if (confirmForm) {
-    confirmForm.addEventListener("submit", function (e) {
-      if (confirmForm.dataset.sent) {
-        e.preventDefault();
-        return;
-      }
-      confirmForm.dataset.sent = "true";
-      confirmForm.querySelectorAll("button").forEach(function (b) {
-        b.disabled = true;
       });
     });
   }

@@ -632,3 +632,104 @@ fieldset label {
 #notice[hidden] {
   display: none;
 }
+
+/* Confirm and result cards: a question or outcome, the PR it's about, why,
+   what it costs, and the buttons. */
+main:has(> .cf) {
+  max-width: 38rem;
+}
+
+.cf {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem 1.2rem 1.1rem;
+  margin: 2rem 0 0;
+  background: var(--bg);
+}
+
+.cf .kind {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+  margin: 0;
+}
+
+.cf h1 {
+  font-size: 1.3rem;
+  margin: 0.15rem 0 0.6rem;
+  line-height: 1.3;
+}
+
+.cf .who {
+  border-left: 3px solid var(--line);
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  margin: 0 0 0.8rem;
+}
+
+.cf .who .t {
+  font-weight: 600;
+}
+
+.cf .who .m {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.cf .who .error {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  margin-top: 0.2rem;
+  white-space: pre-wrap;
+}
+
+.cf .note {
+  margin: 0.5rem 0 0;
+  font-size: 14px;
+}
+
+.cf .cost {
+  color: var(--dim);
+  font-size: 13px;
+  margin: 0.4rem 0 1rem;
+}
+
+.cf .btns {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cf .btns .btn {
+  font-size: 14px;
+  padding: 0.25rem 0.9rem;
+}
+
+.cf.ok {
+  border-color: var(--ok);
+}
+
+.cf.bad {
+  border-color: var(--bad);
+}
+
+.cf pre.error {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-size: 12px;
+}
+
+/* A confirm card opened over the page it was asked from. */
+.popup.dialog {
+  max-width: 34rem;
+  width: calc(100vw - 3rem);
+  box-sizing: border-box;
+  padding: 0 0.4rem 0.4rem;
+}
+
+.popup.dialog .cf {
+  margin: 0.4rem 0 0;
+  border: 0;
+}
