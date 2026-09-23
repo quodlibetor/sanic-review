@@ -4,6 +4,7 @@ pub mod poll;
 pub mod schedule;
 mod serve;
 mod watch;
+mod work;
 
 use std::path::PathBuf;
 

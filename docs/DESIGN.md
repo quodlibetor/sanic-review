@@ -34,6 +34,12 @@ no separate daemon mode.
 `serve` watches its config file. A valid edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
+Profiles, `[runner]` and `github.git_url` apply to runs that start after
+the reload. Lowering `runner.max_concurrent` takes effect as running runs
+finish.
+
+The poller has its own SQLite connection; the scheduler and runner share a
+second one, so polling never waits on them.
 
 The web server binds to `127.0.0.1` only. Remote access goes through SSH or
 port forwarding.
@@ -287,6 +293,8 @@ available when tuning instruction files.
 
 - `--ui logs`: structured tracing lines. On each state change it also prints a
   one-line summary: unseen PRs, pending drafts, running and queued runs.
+  Each finished review logs its PR, suggested verdict, comment and
+  unanchored counts, and the first line of its summary.
 - `--ui tui`: ratatui list of the same unseen items, with dashboard URLs, plus
   a run-activity pane. No editing happens in the TUI.
 
