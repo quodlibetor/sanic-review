@@ -108,7 +108,7 @@ fn pr_header(
 ) -> Markup {
     let owed = overview.owed.iter().find(|o| o.key == pr.key);
     // `—` fills a column; in a sentence it says nothing.
-    let state = state.filter(|state| *state != PrState::default());
+    let state = state.filter(|state| !state.is_blank());
     let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));
     let why = owed.and_then(|o| why(o, overview, app.manual_reviews));
     let href = pr_href(&pr.key);

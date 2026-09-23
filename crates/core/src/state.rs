@@ -61,6 +61,8 @@ pub struct PrState {
     pub approval: Approval,
     /// Threads with a comment newer than your latest answer in them.
     pub unanswered: u32,
+    /// Your own PR, where changes requested are yours to make.
+    pub mine: bool,
 }
 
 /// How much a state asks of you, for colour.
@@ -69,7 +71,8 @@ pub enum Urgency {
     Quiet,
     /// Good news: approved or mergeable.
     Good,
-    /// You need to act: unanswered comments or changes requested.
+    /// You need to act: unanswered comments, or changes requested on your
+    /// own PR.
     Act,
 }
 
@@ -79,6 +82,7 @@ impl PrState {
         Self {
             approval: approval(facts),
             unanswered: unanswered(facts),
+            mine: facts.mine,
         }
     }
 
@@ -86,10 +90,18 @@ impl PrState {
     pub fn urgency(&self) -> Urgency {
         match self.approval {
             _ if self.unanswered > 0 => Urgency::Act,
-            Approval::ChangesRequested => Urgency::Act,
+            // On a review you owe, the author has the changes to make,
+            // whoever asked for them.
+            Approval::ChangesRequested if self.mine => Urgency::Act,
             Approval::Mergeable | Approval::Approved(_) => Urgency::Good,
-            Approval::None => Urgency::Quiet,
+            Approval::ChangesRequested | Approval::None => Urgency::Quiet,
         }
+    }
+
+    /// Nothing to say, on anyone's PR: shown as `—`.
+    #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.approval == Approval::None && self.unanswered == 0
     }
 
     /// In full, e.g. `approved · ci failing · 2 unanswered`, or `—` when
@@ -440,6 +452,7 @@ mod tests {
         let both = PrState {
             approval: Approval::Approved(Checks::Failing),
             unanswered: 2,
+            mine: false,
         };
         assert_eq!(both.status(), "approved · ci failing · 2 unanswered");
         assert_eq!(both.urgency(), Urgency::Act);
@@ -449,21 +462,64 @@ mod tests {
         let changes = PrState {
             approval: Approval::ChangesRequested,
             unanswered: 1,
+            mine: false,
         };
         assert_eq!(changes.status(), "changes requested · 1 unanswered");
         assert_eq!(changes.fitted(15), "changes · 1 new");
         let quiet = PrState {
             approval: Approval::None,
             unanswered: 0,
+            mine: false,
         };
         assert_eq!(quiet.fitted(10), "—");
+        assert!(quiet.is_blank());
+        assert!(
+            PrState {
+                mine: true,
+                ..quiet
+            }
+            .is_blank()
+        );
+        assert!(!changes.is_blank());
         assert_eq!(
             PrState {
                 approval: Approval::Mergeable,
-                unanswered: 0
+                unanswered: 0,
+                mine: false,
             }
             .urgency(),
             Urgency::Good
         );
+    }
+
+    #[test]
+    fn changes_requested_ask_you_to_act_only_on_your_own_prs() {
+        let changes = |mine, unanswered| PrState {
+            approval: Approval::ChangesRequested,
+            unanswered,
+            mine,
+        };
+        assert_eq!(changes(true, 0).urgency(), Urgency::Act);
+        assert_eq!(changes(false, 0).urgency(), Urgency::Quiet);
+        // Unanswered comments ask you to act on anyone's.
+        assert_eq!(changes(false, 1).urgency(), Urgency::Act);
+        // As GitHub says it, or as the reviews do.
+        for decision in [Some("CHANGES_REQUESTED"), None] {
+            let reviews = [ReviewFact {
+                author: "me",
+                state: "CHANGES_REQUESTED",
+            }];
+            let owed = PrState::new(&StateFacts {
+                review_decision: decision,
+                merge_state: None,
+                checks: None,
+                threads: &[],
+                reviews: &reviews,
+                me: "me",
+                mine: false,
+            });
+            assert_eq!(owed.status(), "changes requested");
+            assert_eq!(owed.urgency(), Urgency::Quiet, "{decision:?}");
+        }
     }
 }

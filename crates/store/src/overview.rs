@@ -475,7 +475,7 @@ mod tests {
     fn prs_carry_their_state() {
         use sanic_core::{
             pr::{CONVERSATION_THREAD, Comment, Thread},
-            state::{Approval, PrState},
+            state::{Approval, PrState, Urgency},
         };
         let comment = |author: &str, at: &str| Comment {
             id: format!("{author}{at}"),
@@ -508,12 +508,29 @@ mod tests {
             PrState {
                 approval: Approval::Mergeable,
                 unanswered: 1,
+                mine: true,
             }
         );
         assert_eq!(
             store.owed_reviews("me", None).unwrap()[0].state,
             PrState::default()
         );
+
+        // Your own change request on a review you owe: it says so, but the
+        // changes are the author's to make.
+        let mut asked = snapshot(3, "alice");
+        asked.review_requested = true;
+        asked.reviews = vec![review(
+            "r9",
+            "me",
+            GithubState::ChangesRequested,
+            "2026-01-03T00:00:00Z",
+        )];
+        store.record(&asked, "default", &[]).unwrap();
+        let owed = store.owed_reviews("me", None).unwrap();
+        let state = owed.iter().find(|pr| pr.key.number == 3).unwrap().state;
+        assert_eq!(state.status(), "changes requested");
+        assert_eq!(state.urgency(), Urgency::Quiet);
     }
 
     #[test]

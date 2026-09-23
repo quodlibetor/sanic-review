@@ -555,8 +555,10 @@ embedded in the binary, so nothing is fetched at runtime.
     reviews you owe, only threads you've commented in.
 
   e.g. `approved · 2 unanswered`, or `—` when there's nothing to say.
-  Unanswered comments and changes requested are highlighted: you need to
-  act. Narrow columns shorten it (`approved · 2 new`, `2 new`).
+  Unanswered comments are highlighted: you need to act. So are changes
+  requested on your own PRs; on a review you owe, the author has the
+  changes to make, even ones you asked for, so it isn't. Narrow columns
+  shorten it (`approved · 2 new`, `2 new`).
   `sanic_core::state::PrState` works it out and words it (`status()` in
   full, `fitted(width)` to fit), for the TUI and the dashboard; the store's
   `pr_state` fills it in for each listed PR.
