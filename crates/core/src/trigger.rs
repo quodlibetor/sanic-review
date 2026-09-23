@@ -7,6 +7,8 @@
 
 use std::collections::HashSet;
 
+use serde::Serialize;
+
 use crate::pr::{PrSnapshot, ReviewState};
 
 /// What the store remembers about a PR from the previous poll.
@@ -18,7 +20,8 @@ pub struct Known {
     pub review_ids: HashSet<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Trigger {
     /// Someone else's PR newly requests your review.
     ReviewRequested { head_sha: String },
@@ -34,6 +37,19 @@ pub enum Trigger {
         comment_ids: Vec<String>,
         review_ids: Vec<String>,
     },
+}
+
+impl Trigger {
+    /// Stable name used in the event log.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ReviewRequested { .. } => "review_requested",
+            Self::Push { .. } => "push",
+            Self::Reply { .. } => "reply",
+            Self::Feedback { .. } => "feedback",
+        }
+    }
 }
 
 /// Returns the triggers `snapshot` raises for the user `me`.

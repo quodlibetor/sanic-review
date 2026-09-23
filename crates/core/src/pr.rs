@@ -7,7 +7,8 @@ use crate::repo::RepoName;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PrKey {
     pub repo: RepoName,
-    pub number: u64,
+    /// GitHub PR numbers are GraphQL `Int`s, which are 32-bit.
+    pub number: u32,
 }
 
 impl fmt::Display for PrKey {
@@ -54,6 +55,20 @@ pub enum ReviewState {
     Commented,
     Dismissed,
     Pending,
+}
+
+impl ReviewState {
+    /// GitHub's name for the state.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "APPROVED",
+            Self::ChangesRequested => "CHANGES_REQUESTED",
+            Self::Commented => "COMMENTED",
+            Self::Dismissed => "DISMISSED",
+            Self::Pending => "PENDING",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
