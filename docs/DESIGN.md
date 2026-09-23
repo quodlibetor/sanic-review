@@ -364,7 +364,10 @@ available when tuning instruction files.
   TUI. Its only action is rerunning a failed or crashed review.
   - **Reviews you owe:** open PRs by others that request your review, with the
     latest run's status (queued, held by `--no-reviews`, running, drafted,
-    failed, crashed) and the pending draft count. A failed or crashed run
+    failed, crashed) and the pending draft count. A review still waiting
+    out the quiet period shows `waiting` with a countdown to when it's
+    queued; the scheduler shares those due times with the TUI in memory.
+    `waiting` without a countdown means no run and no known due time. A failed or crashed run
     also shows the first line of its error.
   - **Your PRs:** every open PR you authored, with its review state
     (approved, changes requested, waiting) and pending drafts.

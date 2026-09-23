@@ -12,6 +12,10 @@ use std::{
     time::Duration,
 };
 
+/// When each PR's debounced review is due to be queued. Published by the
+/// scheduler for the TUI; it's only in memory, like the debounce itself.
+pub type DueTimes = HashMap<PrKey, std::time::Instant>;
+
 use color_eyre::eyre::Result;
 use sanic_core::{
     pr::PrKey,
@@ -20,7 +24,7 @@ use sanic_core::{
 };
 use sanic_store::Store;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{Instant, sleep_until},
 };
 use tracing::{debug, info, warn};
@@ -132,6 +136,14 @@ impl Debouncer {
     }
 
     #[must_use]
+    pub fn due_times(&self) -> DueTimes {
+        self.pending
+            .iter()
+            .map(|(key, (due, _))| (key.clone(), due.into_std()))
+            .collect()
+    }
+
+    #[must_use]
     pub fn next_due(&self) -> Option<Instant> {
         self.pending.values().map(|(due, _)| *due).min()
     }
@@ -151,15 +163,18 @@ impl Debouncer {
     }
 }
 
-/// Debounces `updates` and sends each run the store accepts to `runs`.
-/// Returns when `updates` closes.
+/// Debounces `updates` and sends each run the store accepts to `runs`,
+/// publishing pending reviews' due times to `due`. Returns when `updates`
+/// closes.
 pub async fn schedule(
     mut updates: mpsc::UnboundedReceiver<Update>,
     store: Arc<Mutex<Store>>,
     runs: mpsc::UnboundedSender<QueuedRun>,
+    due: watch::Sender<DueTimes>,
 ) -> Result<()> {
     let mut debouncer = Debouncer::default();
     loop {
+        due.send_replace(debouncer.due_times());
         let next = debouncer.next_due();
         tokio::select! {
             update = updates.recv() => match update {
@@ -367,13 +382,22 @@ mod tests {
     async fn runs_are_queued_once_the_pr_goes_quiet() {
         let (tx, rx) = mpsc::unbounded_channel();
         let (runs_tx, mut runs) = mpsc::unbounded_channel();
-        let task = tokio::spawn(schedule(rx, store(), runs_tx));
+        let (due_tx, due) = watch::channel(DueTimes::new());
+        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx));
         let start = Instant::now();
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(Duration::from_secs(90)).await;
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        tokio::task::yield_now().await;
+        // The push restarted the quiet period.
+        assert_eq!(
+            *due.borrow(),
+            DueTimes::from([(key(1), (Instant::now() + QUIET).into_std())])
+        );
         let run = runs.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(due.borrow().is_empty());
         assert_eq!(start.elapsed(), Duration::from_secs(90) + QUIET);
         assert_eq!(run.request.head_sha, "h2");
 

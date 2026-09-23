@@ -27,7 +27,7 @@ use sanic_github::{ApiError, Client, Token};
 use sanic_runner::vcs::VcsResolver;
 use sanic_store::Store;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{Instant, sleep_until},
 };
 use tracing::{Instrument, info, info_span, warn};
@@ -35,8 +35,8 @@ use tracing::{Instrument, info, info_span, warn};
 use crate::{
     ServeArgs, Ui, logging,
     poll::{GithubApi, Poller, Refreshed},
-    schedule::{Update, schedule, standing_request},
-    tui::Tui,
+    schedule::{DueTimes, Update, schedule, standing_request},
+    tui::{Shared, Tui},
     watch::ConfigWatcher,
     work::Worker,
 };
@@ -100,13 +100,17 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
     let (reruns, reruns_rx) = mpsc::unbounded_channel();
+    let (due_tx, due) = watch::channel(DueTimes::new());
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
-            me.clone(),
-            args.no_reviews,
-            logs,
-            reruns,
+            Shared {
+                me: me.clone(),
+                no_reviews: args.no_reviews,
+                logs,
+                due,
+                reruns,
+            },
         )?),
         None => None,
     };
@@ -126,7 +130,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             result
         }
         result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
-        result = schedule(updates_rx, Arc::clone(&run_store), runs.clone()) => result,
+        result = schedule(updates_rx, Arc::clone(&run_store), runs.clone(), due_tx) => result,
         () = rerun(reruns_rx, run_store, runs) => Ok(()),
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
