@@ -44,6 +44,11 @@ pub struct ServeArgs {
     /// Where the database lives; defaults to ~/.local/share/sanic-review.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// Watch and queue reviews, but don't run any. Queued reviews stay in
+    /// the database and run on the next start without this flag.
+    #[arg(long)]
+    no_reviews: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -15,7 +15,7 @@ not a v1 limitation. The agent never has write credentials.
 One binary, `sanic-review`, running on a tokio runtime:
 
 ```
-sanic-review serve [--ui logs|tui] [--port N] [--config PATH] [--data-dir PATH]
+sanic-review serve [--ui logs|tui] [--port N] [--config PATH] [--data-dir PATH] [--no-reviews]
 ```
 
 It runs these tasks in one process:
@@ -30,6 +30,10 @@ It runs these tasks in one process:
 
 Running it as a daemon means wrapping `serve` in a systemd user unit. There is
 no separate daemon mode.
+
+`serve --no-reviews` watches, detects triggers and queues reviews without
+running any, so you can look before spending anything. Held reviews stay
+queued and run on the next start without the flag.
 
 `serve` watches its config file. A valid edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous

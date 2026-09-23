@@ -20,6 +20,7 @@ use color_eyre::{
 use sanic_core::{
     config::{Config, default_config_path, default_data_dir},
     pr::PrKey,
+    run::QueuedRun,
     trigger::Trigger,
 };
 use sanic_github::{ApiError, Client, Token};
@@ -77,7 +78,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         .unwrap_or_else(PoisonError::into_inner)
         .recover_runs()?;
     if !recovered.is_empty() {
-        info!(runs = recovered.len(), "resuming queued runs");
+        if args.no_reviews {
+            info!(runs = recovered.len(), "queued runs held by --no-reviews");
+        } else {
+            info!(runs = recovered.len(), "resuming queued runs");
+        }
     }
     for run in recovered {
         let _ = runs.send(run);
@@ -88,11 +93,31 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     tokio::select! {
         result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
         result = schedule(updates_rx, run_store, runs) => result,
-        () = Arc::clone(&worker).work(runs_rx) => Ok(()),
+        () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
         }
+    }
+}
+
+/// Runs queued reviews, or with `--no-reviews` only logs them; they stay
+/// queued in the store either way until a worker runs them.
+async fn run_or_hold(
+    hold: bool,
+    worker: Arc<Worker>,
+    mut runs: mpsc::UnboundedReceiver<QueuedRun>,
+) {
+    if !hold {
+        return worker.work(runs).await;
+    }
+    info!("--no-reviews: reviews are queued but not run");
+    while let Some(run) = runs.recv().await {
+        info!(
+            pr = %run.request.key,
+            head = %run.request.head_sha,
+            "review queued, not run (--no-reviews)"
+        );
     }
 }
 
