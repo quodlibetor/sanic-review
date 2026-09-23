@@ -64,7 +64,7 @@ impl Csrf {
 
     /// Compares in constant time, so response timing can't reveal how much
     /// of a guess was right.
-    fn matches(&self, candidate: &str) -> bool {
+    pub fn matches(&self, candidate: &str) -> bool {
         let (a, b) = (self.0.as_bytes(), candidate.as_bytes());
         a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
     }

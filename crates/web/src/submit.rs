@@ -13,12 +13,12 @@ use maud::{Markup, html};
 use sanic_core::{pr::PrKey, run::Side};
 use sanic_github::{ApiError, NewComment, NewReview, ReviewEvent};
 use sanic_store::{DraftRow, PrPage, ReviewRun};
-use serde::Deserialize;
+use serde::{Deserialize, de::IntoDeserializer as _};
 use tracing::{info, warn};
 
 use crate::{
     App, Error, Shared,
-    page::{self, Card, Kind, Tone, csrf_field, github_link, pr_ref},
+    page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
     pr, pr_href,
 };
 
@@ -50,6 +50,8 @@ pub struct Built {
     pub in_body: usize,
     /// Accepted replies, which can't be posted yet.
     pub replies: usize,
+    /// Drafts still pending, which the review leaves out.
+    pub pending: Vec<i64>,
 }
 
 /// The review of `run` with the verdict you picked: the summary as its
@@ -108,6 +110,11 @@ pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result
         included,
         in_body,
         replies: accepted().filter(|d| d.kind == "reply").count(),
+        pending: drafts
+            .iter()
+            .filter(|d| d.status == "pending")
+            .map(|d| d.id)
+            .collect(),
     })
 }
 
@@ -237,7 +244,43 @@ fn wire(review: &NewReview) -> Result<String, Error> {
 
 #[derive(Debug, Deserialize)]
 pub struct PreviewQuery {
+    event: Verdict,
+}
+
+/// A verdict as the PR page's verdict form sends it. Approve's radio adds
+/// [`App::approve_pick`] after the verdict, so the pick comes only with
+/// Approve: a preview URL for another verdict, edited to say Approve,
+/// doesn't have it.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+struct Verdict {
     event: ReviewEvent,
+    picked: String,
+}
+
+impl TryFrom<String> for Verdict {
+    type Error = serde::de::value::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let (event, picked) = value.split_once(':').unwrap_or((&value, ""));
+        Ok(Self {
+            event: ReviewEvent::deserialize(event.into_deserializer())?,
+            picked: picked.to_owned(),
+        })
+    }
+}
+
+/// The value of the verdict form's Approve radio; see [`Verdict`].
+pub fn approve_value(app: &App) -> String {
+    verdict_value(ReviewEvent::Approve, app.approve_pick.token())
+}
+
+fn verdict_value(event: ReviewEvent, picked: &str) -> String {
+    if event == ReviewEvent::Approve {
+        format!("{}:{picked}", event.as_str())
+    } else {
+        event.as_str().to_owned()
+    }
 }
 
 pub async fn preview(
@@ -245,8 +288,15 @@ pub async fn preview(
     Path(path): Path<RunPath>,
     Query(query): Query<PreviewQuery>,
 ) -> Result<Response, Error> {
-    let (pr, built) = load(&app, &path, query.event)?;
+    let Verdict { event, picked } = query.event;
+    let (pr, built) = load(&app, &path, event)?;
     let back = format!("{}?run={}", pr_href(&pr.key), path.run);
+    // Approve is never taken from a URL alone: it's picked on the PR page.
+    let built = if event == ReviewEvent::Approve && !app.approve_pick.matches(&picked) {
+        Err("Approve is picked on the PR page, with the verdict: go back and pick it there.".into())
+    } else {
+        built
+    };
     let built = match built {
         Ok(built) => built,
         Err(why) => {
@@ -269,70 +319,144 @@ pub async fn preview(
     let pretty = serde_json::to_string_pretty(&built.review).map_err(color_eyre::Report::from)?;
     let action = format!("{}/runs/{}/submit", pr_href(&pr.key), path.run);
     let review = &built.review;
+    let approve = review.event == ReviewEvent::Approve;
+    let (chip, verdict_class) = match review.event {
+        ReviewEvent::Comment => ("COMMENT", "cm"),
+        ReviewEvent::RequestChanges => ("REQUEST CHANGES", "rc"),
+        ReviewEvent::Approve => ("APPROVE", "ap"),
+    };
+    let comments = review.comments.len();
     let content = html! {
-        h1 { "Submit review" }
-        p.meta { (github_link(&pr.key)) " · " (pr.title) }
-        p.verdict { "Verdict: " strong { (review.event.as_str()) } }
-        @if review.event == ReviewEvent::Approve {
-            p.warn { "You picked Approve. The agent never suggests it." }
+        h1 { "Post this review?" }
+        div.sumline {
+            span.verdict-chip.(verdict_class) { (chip) }
+            span { (pr.title) " " (pr_ref(&pr.key)) }
+            span {
+                @if review.body.is_empty() { "no body" } @else { "body" }
+                " + " (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
+            }
+            span { "at " code { (pr::short(&review.commit_id)) } }
         }
-        @if built.in_body > 0 {
-            p.warn {
-                "Accepted comments that aren't on a line of the diff are in the body "
-                "instead of inline, each headed by a link to its lines at the reviewed "
-                "commit: " (built.in_body) "."
+        div.cols {
+            div {
+                (checklist(&built, &pr, &back))
+                (readable_review(review))
+            }
+            div.wirecol {
+                h2 { "Exactly what's sent · " code { (endpoint) } }
+                pre #payload { (pretty) }
             }
         }
-        @if built.replies > 0 {
-            p.warn {
-                "Accepted replies aren't included, since posting replies isn't supported "
-                "yet: " (built.replies) "."
-            }
-        }
-        @let texts = std::iter::once(&review.body).chain(review.comments.iter().map(|c| &c.body));
-        @let missable = easy_to_miss(texts);
-        @if !missable.is_empty() {
-            p.warn {
-                "GitHub renders this as Markdown, and it has things that are easy to miss "
-                "in the raw text: " (missable.join("; ")) "."
-            }
-        }
-        h2 { "Body" }
-        @if review.body.is_empty() { p.dim { "(empty)" } } @else { pre.body { (review.body) } }
-        h2 { "Inline comments (" (review.comments.len()) ")" }
-        @for c in &review.comments {
-            div.comment {
-                code {
-                    (c.path) ":"
-                    @if let Some(start) = c.start_line { (start) "-" }
-                    (c.line) " " (c.side.as_str())
-                }
-                pre { (c.body) }
-            }
-        }
-        h2 { "Exactly what's sent" }
-        p { code { (endpoint) } " at commit " code { (review.commit_id) } }
-        pre #payload { (pretty) }
-        form #confirm method="post" action=(action) {
+        form.foot #confirm method="post" action=(action) {
             (csrf_field(&app))
             input type="hidden" name="event" value=(review.event.as_str());
             input type="hidden" name="payload" value=(wire(review)?);
-            // Approving is never just a verdict carried in the URL: it
-            // takes its own tick here, which a stray `y` can't give.
-            @if review.event == ReviewEvent::Approve {
-                p {
-                    label {
-                        input type="checkbox" name="approve" value="yes" required autocomplete="off";
-                        " I approve this PR"
-                    }
-                }
+            @if approve {
+                input type="hidden" name="picked" value=(picked);
             }
-            button type="submit" { kbd { "y" } " Confirm and post to GitHub" }
-            " "
-            a #cancel href=(back) { kbd { "Esc" } " Back to the drafts" }
+            button.btn.go type="submit" {
+                @if approve { "Approve this PR with the above comments" }
+                @else { "Confirm and post to GitHub" }
+                (keycap("y"))
+            }
+            a.btn #cancel href=(back) { "Back to the drafts" (keycap("Esc")) }
+            span.dim { "Sent once, only if the drafts still match this preview." }
         }
     };
-    Ok(page::layout(&app, Kind::Confirm, "Submit review", &content).into_response())
+    Ok(page::layout_in(
+        &app,
+        Kind::Confirm,
+        "Submit review",
+        &[pr::crumb(&pr.key), html! { "submit" }],
+        &content,
+    )
+    .into_response())
+}
+
+/// What to check before posting: an approval, a stale head, comments moved
+/// into the body, Markdown that hides things, and drafts left out.
+fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
+    let review = &built.review;
+    let texts = std::iter::once(&review.body).chain(review.comments.iter().map(|c| &c.body));
+    let missable = easy_to_miss(texts);
+    let mut checks = Vec::new();
+    if review.event == ReviewEvent::Approve {
+        checks.push(html! {
+            b { "You picked Approve." }
+            " The agent never suggests approving."
+        });
+    }
+    if review.commit_id != pr.head_sha {
+        checks.push(html! {
+            "The review is of " code { (pr::short(&review.commit_id)) }
+            "; the PR is now at " code { (pr::short(&pr.head_sha)) }
+            ". Comments land on the older commit."
+        });
+    }
+    if built.in_body > 0 {
+        checks.push(html! {
+            b { (built.in_body) }
+            " accepted comment(s) aren't on a line of the diff, so "
+            "they're in the body, each headed by a link to its lines."
+        });
+    }
+    if !missable.is_empty() {
+        checks.push(html! {
+            "GitHub renders this as Markdown, which makes some of it "
+            "easy to miss: " (missable.join("; ")) "."
+        });
+    }
+    if !built.pending.is_empty() {
+        checks.push(html! {
+            b { (built.pending.len()) }
+            " draft(s) still pending aren't included: "
+            @for (i, id) in built.pending.iter().enumerate() {
+                @if i > 0 { ", " }
+                a href={ (back) "#draft-" (id) } { "draft " (id) }
+            }
+            "."
+        });
+    }
+    if built.replies > 0 {
+        checks.push(html! {
+            b { (built.replies) }
+            " accepted repl(ies) aren't included: posting replies "
+            "isn't supported yet."
+        });
+    }
+    html! {
+        @if !checks.is_empty() {
+            div.check {
+                h2 { "Check before posting" }
+                ul { @for check in checks { li { (check) } } }
+            }
+        }
+    }
+}
+
+/// The review as GitHub will show it: its body, then each inline comment.
+fn readable_review(review: &NewReview) -> Markup {
+    let comments = review.comments.len();
+    html! {
+    h2.sec { "Review body" }
+    div.rv {
+        @if review.body.is_empty() { pre.dim { "(empty)" } } @else { pre.body { (review.body) } }
+    }
+    h2.sec { "Inline comments " span.dim { (comments) } }
+    @for c in &review.comments {
+        div.rv {
+            div.h {
+                span.mono {
+                    (c.path) ":"
+                    @if let Some(start) = c.start_line { (start) "-" }
+                    (c.line)
+                }
+                span.sp { (c.side.as_str()) }
+            }
+            pre { (c.body) }
+        }
+    }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,8 +464,9 @@ pub struct SubmitForm {
     event: ReviewEvent,
     /// The payload the preview showed, as [`wire`] wrote it.
     payload: String,
-    /// `yes` when you ticked the approval box, which an approval needs.
-    approve: Option<String>,
+    /// As the preview had it; see [`Verdict`].
+    #[serde(default)]
+    picked: String,
 }
 
 /// Posts the review, if it's still exactly what the preview showed. One
@@ -351,9 +476,9 @@ pub async fn submit(
     Path(path): Path<RunPath>,
     Form(form): Form<SubmitForm>,
 ) -> Result<Response, Error> {
-    if form.event == ReviewEvent::Approve && form.approve.as_deref() != Some("yes") {
+    if form.event == ReviewEvent::Approve && !app.approve_pick.matches(&form.picked) {
         return Err(Error::Refused(
-            "an approval needs the \"I approve this PR\" box ticked; nothing was sent".into(),
+            "Approve is picked on the PR page; nothing was sent".into(),
         ));
     }
     let mut posted_before = app.posting.lock().await;
@@ -366,11 +491,13 @@ pub async fn submit(
             built
         }
         _ => {
+            // The pick is already checked, so it can go along: without it,
+            // an approval's preview would be refused.
             let preview = format!(
                 "{}/runs/{}/preview?event={}",
                 pr_href(key),
                 path.run,
-                form.event.as_str()
+                verdict_value(form.event, &form.picked)
             );
             let content = result_card(
                 &pr,

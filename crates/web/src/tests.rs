@@ -373,8 +373,26 @@ impl Fixture {
         store.draft_row(self.drafts[i]).unwrap().unwrap().status
     }
 
+    /// The preview, as the PR page's verdict form asks for it: Approve's
+    /// radio carries the pick.
     fn preview_uri(&self, event: &str) -> String {
+        if event == "APPROVE" {
+            format!("{}:{}", self.unpicked_preview_uri(event), self.pick())
+        } else {
+            self.unpicked_preview_uri(event)
+        }
+    }
+
+    /// The preview with the verdict in the URL alone, not picked on the PR
+    /// page.
+    fn unpicked_preview_uri(&self, event: &str) -> String {
         format!("/pr/org/repo/7/runs/{}/preview?event={event}", self.run)
+    }
+
+    /// What the PR page's verdict form says, to show the verdict was
+    /// picked there.
+    fn pick(&self) -> String {
+        self.dashboard.app.approve_pick.token().to_owned()
     }
 
     fn submit_uri(&self) -> String {
@@ -419,6 +437,7 @@ fn hidden_value(html: &str, name: &str) -> String {
 /// snapshots.
 fn readable(fixture: &Fixture, html: &str) -> String {
     html.replace(&fixture.token(), "<token>")
+        .replace(&fixture.pick(), "<pick>")
         // Not `<data>`: the tag split below would put a newline in the
         // command it ends.
         .replace(&fixture.data.path().display().to_string(), "$DATA")
@@ -703,7 +722,7 @@ async fn a_payload_that_changed_since_the_preview_is_not_posted() {
             &[
                 ("event", "APPROVE"),
                 ("payload", &payload),
-                ("approve", "yes"),
+                ("picked", &f.pick()),
             ],
         )
         .await;
@@ -766,32 +785,49 @@ async fn nothing_accepted_means_nothing_to_submit_except_an_approval() {
         .expect(1)
         .mount(&f.github)
         .await;
-    // The verdict alone doesn't approve: the page's own box must be ticked.
+    // Approve in a URL alone isn't picked: the PR page's verdict form
+    // says it was.
+    let unpicked = f.get(&f.unpicked_preview_uri("APPROVE")).await;
+    assert_eq!(unpicked.status, StatusCode::CONFLICT);
+    assert!(unpicked.body.contains("Approve is picked on the PR page"));
+    // Only Approve's radio carries the pick, so another verdict's preview
+    // URL, edited to say Approve, doesn't have it.
+    let pr_page = f.get("/pr/org/repo/7").await.body;
+    assert_eq!(pr_page.matches(&f.pick()).count(), 1, "{pr_page}");
+    assert!(pr_page.contains(&format!(r#"value="APPROVE:{}""#, f.pick())));
+    let edited = format!("{}&picked={}", f.unpicked_preview_uri("APPROVE"), f.pick());
+    assert_eq!(f.get(&edited).await.status, StatusCode::CONFLICT);
     let preview = f.get(&f.preview_uri("APPROVE")).await.body;
     assert!(
-        preview.contains(
-            r#"<input type="checkbox" name="approve" value="yes" required autocomplete="off">"#
-        ),
+        preview.contains("Approve this PR with the above comments"),
         "{preview}"
     );
-    let unticked = [("event", "APPROVE"), ("payload", payload.as_str())];
+    assert!(!preview.contains(r#"type="checkbox""#));
+    let without_pick = [("event", "APPROVE"), ("payload", payload.as_str())];
     assert_eq!(
-        f.post(&f.submit_uri(), &unticked).await.status,
+        f.post(&f.submit_uri(), &without_pick).await.status,
         StatusCode::CONFLICT
     );
+    let pick = f.pick();
     let confirm = [
         ("event", "APPROVE"),
         ("payload", payload.as_str()),
-        ("approve", "yes"),
+        ("picked", pick.as_str()),
     ];
     assert_eq!(
         f.post(&f.submit_uri(), &confirm).await.status,
         StatusCode::OK
     );
-    assert_eq!(
-        f.post(&f.submit_uri(), &confirm).await.status,
-        StatusCode::CONFLICT
+    let again = f.post(&f.submit_uri(), &confirm).await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    // Its "Preview again" keeps the pick, so it isn't refused.
+    let preview_again = f.preview_uri("APPROVE");
+    assert!(
+        again.body.contains(&format!(r#"href="{preview_again}""#)),
+        "{}",
+        again.body
     );
+    assert_eq!(f.get(&preview_again).await.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1377,4 +1413,35 @@ fn card_of(html: &str) -> &str {
     let start = html.find(r#"<div class="cf"#).unwrap();
     let end = html[start..].find("</main>").unwrap();
     &html[start..start + end]
+}
+
+#[tokio::test]
+async fn the_preview_says_what_the_review_leaves_out_and_where_it_lands() {
+    let f = fixture(false).await;
+    // Only the summary is accepted; the two comments stay pending.
+    f.post(
+        &format!("/drafts/{}/status", f.drafts[0]),
+        &[("status", "accepted")],
+    )
+    .await;
+    // The PR has moved on since the review.
+    let moved = PrSnapshot {
+        head_sha: "newer".into(),
+        ..fixture_prs().swap_remove(0)
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&moved, "default", &[])
+        .unwrap();
+    let page = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(
+        page.contains("the PR is now at <code>newer</code>"),
+        "{page}"
+    );
+    assert!(page.contains("<b>2</b> draft(s) still pending aren't included"));
+    assert!(page.contains(&format!(
+        r#"href="/pr/org/repo/7?run={}#draft-{}""#,
+        f.run, f.drafts[1]
+    )));
 }

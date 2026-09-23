@@ -107,6 +107,9 @@ struct App {
     window: watch::Receiver<Option<u32>>,
     clock: Arc<dyn Clock>,
     csrf: Csrf,
+    /// Carried by the PR page's Approve radio, so a preview or submit of an
+    /// approval proves you picked Approve there, not just in a URL.
+    approve_pick: Csrf,
     /// Held while a review is being posted, so two confirms can't both
     /// post before either marks its drafts posted. It holds each run's
     /// posted payloads, as `<run>:<payload>`, so a second confirm of an
@@ -156,6 +159,7 @@ impl Dashboard {
                 window,
                 clock,
                 csrf: Csrf::generate()?,
+                approve_pick: Csrf::generate()?,
                 posting: tokio::sync::Mutex::new(HashSet::new()),
             }),
         })
