@@ -16,7 +16,7 @@ const PR_QUERY: &str = r"
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      number title body url isDraft headRefOid baseRefOid
+      number title body url isDraft state headRefOid baseRefOid
       author { login }
       reviewRequests(first: 100) {
         nodes {
@@ -193,8 +193,10 @@ impl Client {
     }
 
     /// A full snapshot of the PR from `me`'s point of view, or `None` if it
-    /// doesn't exist or isn't visible. Changed files are fetched only when
-    /// `with_files` is set.
+    /// doesn't exist, isn't visible or isn't open. Closed and merged PRs
+    /// keep their pending review requests, and notifications about them stay
+    /// unread, so they'd otherwise look like fresh requests. Changed files
+    /// are fetched only when `with_files` is set.
     pub async fn pull_request(
         &self,
         key: &PrKey,
@@ -233,6 +235,9 @@ impl Client {
         else {
             return Ok(None);
         };
+        if raw.state.as_deref().is_some_and(|state| state != "OPEN") {
+            return Ok(None);
+        }
         let files = if with_files {
             Some(self.pull_files(key).await?)
         } else {
@@ -371,6 +376,9 @@ struct RawPr {
     body: String,
     url: String,
     is_draft: bool,
+    /// `OPEN`, `CLOSED` or `MERGED`; hand-written mocks may omit it.
+    #[serde(default)]
+    state: Option<String>,
     head_ref_oid: String,
     base_ref_oid: String,
     author: Option<Login>,

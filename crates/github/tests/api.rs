@@ -255,6 +255,22 @@ async fn my_orgs_are_lowercased_logins() {
 }
 
 #[tokio::test]
+async fn closed_pull_requests_are_none() {
+    let server = MockServer::start().await;
+    let mut pr = fixture("pr.json");
+    pr["data"]["repository"]["pullRequest"]["state"] = json!("MERGED");
+    Mock::given(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+    let snap = client(&server)
+        .pull_request(&key("org/repo", 7), "me", false)
+        .await
+        .unwrap();
+    assert_eq!(snap, None);
+}
+
+#[tokio::test]
 async fn missing_pull_request_is_none() {
     let server = MockServer::start().await;
     Mock::given(path("/graphql"))
