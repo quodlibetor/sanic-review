@@ -193,6 +193,11 @@ against stored state, never from notification payloads.
   again. The same happens to a PR that stops involving you or whose repo
   stops being watched. The next refresh that finds it marks it open
   again.
+  Every PR a refresh finds closed or not visible, tracked or not, is
+  remembered with the time it was checked, in `closed_prs`. A later
+  notification about it is dropped without fetching unless the
+  notification was updated after that check, e.g. because the PR was
+  reopened. Finding it open again forgets it.
 - **Team review requests.** A review requested from a team counts as a
   request to you if you're a member of that team (from `GET /user/teams`,
   refreshed on each reconcile; needs `read:org`) and `review_requests.teams`
@@ -376,6 +381,7 @@ invited to draft replies or fixes on someone else's PR.
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |
+| `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
 

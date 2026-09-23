@@ -10,7 +10,7 @@ use std::{
 use sanic_core::pr::TeamRef;
 
 use sanic_core::{
-    clock::{Clock, SystemClock, window_start},
+    clock::{Clock, SystemClock, rfc3339, window_start},
     config::Config,
     pr::{PrKey, PrSnapshot},
     trigger::{Trigger, detect},
@@ -247,8 +247,9 @@ impl<G: GithubApi> Poller<G> {
 
     /// PRs in watched repos with notifications since the last poll, and
     /// GitHub's requested poll interval. Notifications last updated before
-    /// `poll.updated_within_days` are dropped without fetching their PR:
-    /// on a first poll that can be most of them.
+    /// `poll.updated_within_days`, or before their PR was found closed, are
+    /// dropped without fetching it: on a first poll that can be most of
+    /// them.
     pub async fn poll_notifications(&mut self) -> Result<(Vec<PrKey>, Option<Duration>), ApiError> {
         let since = self.store.poll_state(LAST_MODIFIED_KEY)?;
         match self.github.notifications(since.as_deref()).await? {
@@ -263,12 +264,25 @@ impl<G: GithubApi> Poller<G> {
                         .set_poll_state(LAST_MODIFIED_KEY, &last_modified)?;
                 }
                 let since = self.window_start();
-                let keys = notifications
-                    .into_iter()
-                    .filter(|n| since.as_deref().is_none_or(|s| n.updated_at.as_str() >= s))
-                    .filter_map(|n| n.pr)
-                    .filter(|k| self.config.watches(&k.repo))
-                    .collect();
+                let mut keys = Vec::new();
+                for n in notifications {
+                    let Some(key) = n.pr else { continue };
+                    if since.as_deref().is_some_and(|s| n.updated_at.as_str() < s)
+                        || !self.config.watches(&key.repo)
+                    {
+                        continue;
+                    }
+                    // Found closed after this notification's last update:
+                    // it can't say anything new.
+                    if self
+                        .store
+                        .closed_at(&key)?
+                        .is_some_and(|checked| n.updated_at <= checked)
+                    {
+                        continue;
+                    }
+                    keys.push(key);
+                }
                 Ok((keys, poll_interval))
             }
         }
@@ -283,8 +297,12 @@ impl<G: GithubApi> Poller<G> {
         let Some(mut snapshot) = self.github.pull_request(key, &self.me, with_files).await? else {
             tracing::debug!("not open or not visible; skipping");
             self.store.mark_closed(key)?;
+            self.store
+                .remember_closed(key, &rfc3339(self.clock.now()))?;
             return Ok(None);
         };
+        // Open, whether or not the checks below skip it.
+        self.store.forget_closed(key)?;
         if let (Some(start), Some(updated)) = (self.window_start(), &snapshot.updated_at)
             && updated.as_str() < start.as_str()
         {
@@ -685,6 +703,42 @@ mod tests {
                 .as_deref(),
             Some("lm-1")
         );
+    }
+
+    #[tokio::test]
+    async fn a_pr_found_closed_is_only_refetched_for_newer_notifications() {
+        let closed = key("org/repo", 5);
+        let notified = |updated_at: &str| Notification {
+            id: "n".into(),
+            reason: "comment".into(),
+            updated_at: updated_at.into(),
+            pr: Some(closed.clone()),
+        };
+        // The fake has no such PR, so a refresh finds it closed at the
+        // clock's 2026-09-23T16:33:51Z.
+        let mut poller = poller(FakeGithub {
+            notifications: vec![notified("2026-09-23T16:00:00Z")],
+            ..FakeGithub::default()
+        });
+        let (keys, _) = poller.poll_notifications().await.unwrap();
+        assert_eq!(keys, std::slice::from_ref(&closed));
+        assert!(poller.refresh(&closed).await.unwrap().is_none());
+        assert_eq!(poller.github.fetched.borrow().len(), 1);
+
+        // The same notification again: nothing to fetch.
+        let (keys, _) = poller.poll_notifications().await.unwrap();
+        assert!(keys.is_empty());
+        // Newer activity (it may have been reopened) is looked at.
+        poller.github.notifications = vec![notified("2026-09-23T17:00:00Z")];
+        let (keys, _) = poller.poll_notifications().await.unwrap();
+        assert_eq!(keys, std::slice::from_ref(&closed));
+
+        // Found open, even too quiet to record, it's forgotten.
+        let mut snap = snapshot(&closed, "alice", &[]);
+        snap.updated_at = Some("2026-09-01T00:00:00Z".into());
+        poller.github.prs.borrow_mut().insert(closed.clone(), snap);
+        assert!(poller.refresh(&closed).await.unwrap().is_none());
+        assert_eq!(poller.store().closed_at(&closed).unwrap(), None);
     }
 
     #[tokio::test]
