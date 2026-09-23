@@ -2,6 +2,8 @@
 
 use std::{collections::HashSet, future::Future, time::Duration};
 
+use sanic_core::pr::TeamRef;
+
 use sanic_core::{
     config::Config,
     pr::{PrKey, PrSnapshot},
@@ -21,6 +23,7 @@ pub trait GithubApi {
         if_modified_since: Option<&str>,
     ) -> impl Future<Output = Result<NotificationPoll, ApiError>>;
     fn search_prs(&self, qualifiers: &str) -> impl Future<Output = Result<Vec<PrKey>, ApiError>>;
+    fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>>;
     fn pull_request(
         &self,
         key: &PrKey,
@@ -39,6 +42,10 @@ impl GithubApi for Client {
 
     fn search_prs(&self, qualifiers: &str) -> impl Future<Output = Result<Vec<PrKey>, ApiError>> {
         Client::search_prs(self, qualifiers)
+    }
+
+    fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>> {
+        Client::my_teams(self)
     }
 
     fn pull_request(
@@ -64,9 +71,9 @@ pub struct Poller<G> {
     store: Store,
     config: Config,
     me: String,
-    /// PRs from the last `review-requested:@me` search. The PR query only
-    /// sees direct user requests, so team requests come from here.
-    requested: HashSet<PrKey>,
+    /// Your teams, refreshed on each reconcile. A team review request counts
+    /// as yours only if you're in the team and the config's filter allows it.
+    teams: HashSet<TeamRef>,
 }
 
 impl<G: GithubApi> Poller<G> {
@@ -76,7 +83,7 @@ impl<G: GithubApi> Poller<G> {
             store,
             config,
             me,
-            requested: HashSet::new(),
+            teams: HashSet::new(),
         }
     }
 
@@ -89,10 +96,20 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// Open PRs that request your review or involve you, in watched repos.
+    /// Also refreshes your team memberships.
     pub async fn reconcile(&mut self) -> Result<Vec<PrKey>, ApiError> {
+        // Without teams, team requests just stop counting; discovery still
+        // works, so a lookup failure shouldn't stop the reconcile.
+        match self.github.my_teams().await {
+            Ok(teams) => self.teams = teams.into_iter().collect(),
+            Err(ApiError::Other(report)) => tracing::warn!(
+                "listing your teams failed; team review requests use the last known teams \
+                 (the token needs `read:org`): {report:?}"
+            ),
+            Err(err) => return Err(err),
+        }
         let requested = self.github.search_prs(REVIEW_REQUESTED).await?;
         let involved = self.github.search_prs(INVOLVES).await?;
-        self.requested = requested.iter().cloned().collect();
         let mut keys: Vec<PrKey> = requested
             .into_iter()
             .chain(involved)
@@ -137,7 +154,11 @@ impl<G: GithubApi> Poller<G> {
             tracing::debug!(pr = %key, "not visible; skipping");
             return Ok(None);
         };
-        snapshot.review_requested |= self.requested.contains(key);
+        let filter = &self.config.review_requests.teams;
+        snapshot.review_requested |= snapshot
+            .requested_teams
+            .iter()
+            .any(|t| self.teams.contains(t) && filter.allows(t));
         let files = snapshot.files.as_deref().unwrap_or_default();
         let Some(matched) = self.config.match_pr(&key.repo, files) else {
             tracing::debug!(pr = %key, "matches no profile; skipping");
@@ -175,6 +196,7 @@ mod tests {
         prs: RefCell<HashMap<PrKey, PrSnapshot>>,
         notifications: Vec<Notification>,
         seen_since: RefCell<Vec<Option<String>>>,
+        teams: Vec<TeamRef>,
     }
 
     // The fake answers immediately; `async fn` keeps it readable.
@@ -196,6 +218,10 @@ mod tests {
 
         async fn search_prs(&self, qualifiers: &str) -> Result<Vec<PrKey>, ApiError> {
             Ok(self.searches.get(qualifiers).cloned().unwrap_or_default())
+        }
+
+        async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
+            Ok(self.teams.clone())
         }
 
         async fn pull_request(
@@ -222,13 +248,20 @@ mod tests {
     }
 
     fn config() -> Config {
+        config_with("")
+    }
+
+    fn config_with(extra: &str) -> Config {
         Config::parse(
-            r#"
+            &format!(
+                r#"
+            {extra}
             [profile.vuln]
-            repos = [{ github = "org/repo", paths = ["vuln/**"] }]
+            repos = [{{ github = "org/repo", paths = ["vuln/**"] }}]
             [profile.default]
-            repos = [{ github = "org" }]
-            "#,
+            repos = [{{ github = "org" }}]
+            "#
+            ),
             Path::new("/"),
             &NoCheckouts,
         )
@@ -252,6 +285,7 @@ mod tests {
             base_sha: "b".into(),
             is_draft: false,
             review_requested: false,
+            requested_teams: vec![],
             reviews: vec![],
             threads: vec![Thread {
                 id: CONVERSATION_THREAD.into(),
@@ -287,22 +321,41 @@ mod tests {
         assert_eq!(keys, [key("org/other", 2), key("org/repo", 1)]);
     }
 
-    #[tokio::test]
-    async fn team_review_requests_come_from_search() {
+    /// Refreshes a PR that requests review from `requested`, as a member of
+    /// `mine`, and reports whether that counted as a request to you.
+    async fn team_request_counts(requested: &str, mine: &[&str], filter: &str) -> bool {
+        let team = |t: &str| {
+            let (org, slug) = t.split_once('/').unwrap();
+            TeamRef::new(org, slug)
+        };
         let pr = key("org/other", 2);
-        let mut github = FakeGithub::default();
-        github.searches.insert(REVIEW_REQUESTED, vec![pr.clone()]);
-        github
-            .prs
-            .borrow_mut()
-            .insert(pr.clone(), snapshot(&pr, "alice", &[]));
-        let mut poller = poller(github);
+        let mut snap = snapshot(&pr, "alice", &[]);
+        snap.requested_teams = vec![team(requested)];
+        let github = FakeGithub {
+            teams: mine.iter().map(|t| team(t)).collect(),
+            ..FakeGithub::default()
+        };
+        github.prs.borrow_mut().insert(pr.clone(), snap);
+        let mut poller = Poller::new(
+            github,
+            Store::open_in_memory().unwrap(),
+            config_with(filter),
+            "me".into(),
+        );
         poller.reconcile().await.unwrap();
         let refreshed = poller.refresh(&pr).await.unwrap().unwrap();
-        assert!(matches!(
+        matches!(
             refreshed.triggers.as_slice(),
             [Trigger::ReviewRequested { .. }]
-        ));
+        )
+    }
+
+    #[tokio::test]
+    async fn team_requests_count_for_member_teams_the_filter_allows() {
+        assert!(team_request_counts("org/core", &["org/core"], "").await);
+        assert!(!team_request_counts("org/core", &["org/other"], "").await);
+        let exclude = "[review_requests]\nteams = [\"*\", \"!core\"]";
+        assert!(!team_request_counts("org/core", &["org/core"], exclude).await);
     }
 
     #[tokio::test]

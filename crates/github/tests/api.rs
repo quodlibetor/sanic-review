@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, PrKey, ReviewState},
+    pr::{CONVERSATION_THREAD, PrKey, ReviewState, TeamRef},
     repo::RepoName,
 };
 use sanic_github::{ApiError, Client, NotificationPoll, Token};
@@ -192,6 +192,10 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
         snap.review_requested,
         "direct request for `Me` matches `me`"
     );
+    assert_eq!(
+        snap.requested_teams,
+        [TeamRef::new("lacework-dev", "storage-platform")]
+    );
     assert_eq!(snap.reviews[0].state, ReviewState::ChangesRequested);
     assert_eq!(snap.reviews[1].author, "ghost");
     assert_eq!(snap.threads[0].id, CONVERSATION_THREAD);
@@ -206,6 +210,31 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
                 "src/old.rs".into()
             ][..]
         )
+    );
+}
+
+#[tokio::test]
+async fn my_teams_follow_pages() {
+    let server = MockServer::start().await;
+    let page2 = format!("{}/user/teams?page=2", server.uri());
+    Mock::given(path("/user/teams"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "slug": "b", "organization": { "login": "Org" } }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(path("/user/teams"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([{ "slug": "a", "organization": { "login": "org" } }]))
+                .insert_header("link", format!(r#"<{page2}>; rel="next""#).as_str()),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client(&server).my_teams().await.unwrap(),
+        [TeamRef::new("org", "a"), TeamRef::new("org", "b")]
     );
 }
 

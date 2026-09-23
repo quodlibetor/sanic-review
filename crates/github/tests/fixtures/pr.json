@@ -12,7 +12,13 @@
         "reviewRequests": {
           "nodes": [
             { "requestedReviewer": { "__typename": "User", "login": "Me" } },
-            { "requestedReviewer": { "__typename": "Team" } }
+            {
+              "requestedReviewer": {
+                "__typename": "Team",
+                "slug": "Storage-Platform",
+                "organization": { "login": "lacework-dev" }
+              }
+            }
           ]
         },
         "reviews": {

@@ -17,7 +17,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::repo::RepoName;
+use crate::{pr::TeamRef, repo::RepoName};
 
 const DEFAULT_API_URL: &str = "https://api.github.com";
 const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
@@ -41,6 +41,7 @@ pub trait CheckoutResolver {
 pub struct Config {
     pub github: GithubSettings,
     pub poll: PollSettings,
+    pub review_requests: ReviewRequestSettings,
     /// In file order; earlier profiles win ties when matching.
     pub profiles: Vec<Profile>,
 }
@@ -56,6 +57,52 @@ pub struct PollSettings {
     /// Lower bound on the notifications poll interval; GitHub's
     /// `X-Poll-Interval` can only raise it.
     pub min_notification_interval: Duration,
+}
+
+#[derive(Debug)]
+pub struct ReviewRequestSettings {
+    /// Which of your teams' review requests count as requests to you.
+    pub teams: TeamFilter,
+}
+
+/// Ordered team globs; the last pattern that matches a team decides, and a
+/// leading `!` excludes. A pattern with a `/` matches `org/slug`, otherwise
+/// just the slug. Teams no pattern matches are excluded.
+#[derive(Debug)]
+pub struct TeamFilter {
+    pub patterns: Vec<String>,
+    rules: Vec<(bool, globset::GlobMatcher, bool)>,
+}
+
+impl TeamFilter {
+    pub fn new(patterns: Vec<String>) -> Result<Self> {
+        let rules = patterns
+            .iter()
+            .map(|pattern| {
+                let (allow, glob) = match pattern.strip_prefix('!') {
+                    Some(rest) => (false, rest),
+                    None => (true, pattern.as_str()),
+                };
+                let matcher = GlobBuilder::new(&glob.to_ascii_lowercase())
+                    .literal_separator(true)
+                    .build()
+                    .wrap_err_with(|| format!("invalid team glob `{pattern}`"))?
+                    .compile_matcher();
+                Ok((allow, matcher, glob.contains('/')))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { patterns, rules })
+    }
+
+    #[must_use]
+    pub fn allows(&self, team: &TeamRef) -> bool {
+        let full = team.to_string();
+        self.rules
+            .iter()
+            .rev()
+            .find(|(_, glob, qualified)| glob.is_match(if *qualified { &full } else { &team.slug }))
+            .is_some_and(|(allow, _, _)| *allow)
+    }
 }
 
 #[derive(Debug)]
@@ -238,6 +285,14 @@ impl Config {
                     .min_notification_secs
                     .map_or(DEFAULT_MIN_NOTIFICATION_POLL, Duration::from_secs),
             },
+            review_requests: ReviewRequestSettings {
+                teams: TeamFilter::new(
+                    raw.review_requests
+                        .teams
+                        .unwrap_or_else(|| vec!["*".into()]),
+                )
+                .wrap_err("in `review_requests.teams`")?,
+            },
             profiles,
         })
     }
@@ -408,6 +463,8 @@ struct RawConfig {
     #[serde(default)]
     poll: RawPoll,
     #[serde(default)]
+    review_requests: RawReviewRequests,
+    #[serde(default)]
     profile: IndexMap<String, RawProfile>,
 }
 
@@ -422,6 +479,12 @@ struct RawGithub {
 struct RawPoll {
     reconcile_secs: Option<u64>,
     min_notification_secs: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawReviewRequests {
+    teams: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -567,6 +630,32 @@ mod tests {
         assert_eq!(
             matched(&config, "org/repo", &["b/x"]).as_deref(),
             Some("whole")
+        );
+    }
+
+    #[test]
+    fn team_filter_defaults_to_all_teams() {
+        let config = parse(EXAMPLE).unwrap();
+        let teams = &config.review_requests.teams;
+        assert!(teams.allows(&TeamRef::new("lacework-dev", "storage-platform")));
+    }
+
+    #[test]
+    fn team_filter_last_match_wins_and_qualified_globs_match_org() {
+        let filter = TeamFilter::new(vec![
+            "*".into(),
+            "!storage-*".into(),
+            "lacework/storage-core".into(),
+        ])
+        .unwrap();
+        assert!(filter.allows(&TeamRef::new("Lacework", "vuln-backend-dev")));
+        assert!(!filter.allows(&TeamRef::new("lacework-dev", "storage-platform")));
+        assert!(filter.allows(&TeamRef::new("lacework", "storage-core")));
+        assert!(!filter.allows(&TeamRef::new("lacework-dev", "storage-core")));
+        assert!(
+            !TeamFilter::new(vec![])
+                .unwrap()
+                .allows(&TeamRef::new("o", "t"))
         );
     }
 

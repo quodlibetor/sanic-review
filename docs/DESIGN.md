@@ -57,6 +57,9 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 # reconcile_secs = ...                 # GraphQL reconcile interval
 # min_notification_secs = ...          # floor under GitHub's X-Poll-Interval
 
+[review_requests]
+teams = ["*", "!storage-platform"]     # which of your teams' requests count
+
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                            # skill dirs made available to the agent
@@ -113,9 +116,13 @@ polls:
 Both loops write normalized rows. Triggers are computed by diffing GitHub state
 against stored state, never from notification payloads.
 
-- **Team review requests.** The PR query only shows review requests made to
-  you directly. A PR in the latest `review-requested:@me` search result
-  counts as requested too, which covers requests made to your teams.
+- **Team review requests.** A review requested from a team counts as a
+  request to you if you're a member of that team (from `GET /user/teams`,
+  refreshed on each reconcile; needs `read:org`) and `review_requests.teams`
+  allows it. The filter is an ordered list of globs where the last match
+  wins and `!` excludes. A glob with a `/` matches `org/slug`, otherwise it
+  matches the slug. The default is `["*"]`. If the team lookup fails, the
+  last known teams are kept and discovery carries on.
 - **Newest items only.** PR snapshots fetch the newest reviews, threads and
   comments per connection, and log a warning when older ones were cut off.
   A new reply in an old thread that falls outside the newest threads is
@@ -226,6 +233,10 @@ available when tuning instruction files.
   review. Accepted replies go out as thread replies. You confirm, then it
   posts.
 - Opening a PR page updates `views`.
+- **Settings.** The dashboard can edit settings such as
+  `review_requests.teams`. Edits are written back to the config file,
+  preserving its comments and layout, and take effect through the same
+  reload path as a hand edit.
 
 ## Terminal UI
 

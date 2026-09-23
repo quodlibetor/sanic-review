@@ -2,7 +2,7 @@
 
 use color_eyre::eyre::{WrapErr, eyre};
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, Comment, PrKey, PrSnapshot, Review, ReviewState, Thread},
+    pr::{CONVERSATION_THREAD, Comment, PrKey, PrSnapshot, Review, ReviewState, TeamRef, Thread},
     repo::RepoName,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -19,7 +19,13 @@ query($owner: String!, $name: String!, $number: Int!) {
       number title url isDraft headRefOid baseRefOid
       author { login }
       reviewRequests(first: 100) {
-        nodes { requestedReviewer { __typename ... on User { login } } }
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User { login }
+            ... on Team { slug organization { login } }
+          }
+        }
       }
       reviews(last: 100) {
         pageInfo { hasPreviousPage }
@@ -235,6 +241,31 @@ impl Client {
         Ok(Some(raw.into_snapshot(key.clone(), me, files)))
     }
 
+    /// Teams the authenticated user belongs to. Needs the `read:org` scope.
+    pub async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
+        #[derive(Deserialize)]
+        struct Team {
+            slug: String,
+            organization: Login,
+        }
+        let mut url = format!("{}?per_page=100", self.url("/user/teams"));
+        let mut teams = Vec::new();
+        loop {
+            let resp = self.send(self.get(&url), "your teams").await?;
+            let next = next_link(resp.headers());
+            let page: Vec<Team> = resp.json().await.wrap_err("decoding your teams")?;
+            teams.extend(
+                page.iter()
+                    .map(|t| TeamRef::new(&t.organization.login, &t.slug)),
+            );
+            match next {
+                Some(next) => url = next,
+                None => break,
+            }
+        }
+        Ok(teams)
+    }
+
     /// Changed paths, including the old path of renamed files.
     async fn pull_files(&self, key: &PrKey) -> Result<Vec<String>, ApiError> {
         #[derive(Deserialize)]
@@ -334,9 +365,12 @@ struct RawReviewRequest {
     requested_reviewer: Option<RawReviewer>,
 }
 
+/// A user (`login`) or a team (`slug` and `organization`).
 #[derive(Deserialize)]
 struct RawReviewer {
     login: Option<String>,
+    slug: Option<String>,
+    organization: Option<Login>,
 }
 
 #[derive(Deserialize)]
@@ -391,8 +425,18 @@ fn review_state(raw: &str) -> ReviewState {
 
 impl RawPr {
     fn into_snapshot(self, key: PrKey, me: &str, files: Option<Vec<String>>) -> PrSnapshot {
-        // Team requests aren't visible here; the poller adds them from the
-        // `review-requested:@me` search.
+        let requested_teams = self
+            .review_requests
+            .nodes
+            .iter()
+            .filter_map(|r| {
+                let r = r.requested_reviewer.as_ref()?;
+                Some(TeamRef::new(
+                    &r.organization.as_ref()?.login,
+                    r.slug.as_deref()?,
+                ))
+            })
+            .collect();
         let review_requested = self.review_requests.nodes.iter().any(|r| {
             r.requested_reviewer
                 .as_ref()
@@ -445,6 +489,7 @@ impl RawPr {
             base_sha: self.base_ref_oid,
             is_draft: self.is_draft,
             review_requested,
+            requested_teams,
             reviews,
             threads,
             files,

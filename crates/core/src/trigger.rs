@@ -187,6 +187,7 @@ mod tests {
             base_sha: "b".into(),
             is_draft: false,
             review_requested: false,
+            requested_teams: vec![],
             reviews: vec![],
             threads: vec![],
             files: None,
