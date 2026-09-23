@@ -81,6 +81,7 @@ teams = ["*", "!storage-platform"]     # which of your teams' requests count
 # max_concurrent = ...                 # agent runs at once, across all PRs
 # timeout_secs = ...                   # kill a run that takes longer
 # read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
+# model = "auto"                       # default model; see Model below
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
@@ -129,6 +130,9 @@ uses its own bare mirror and never touches your checkout.
   remote, then pick which to watch.
 - **Orgs:** pick orgs to watch, suggested from your orgs, your teams and the
   checkouts found, plus any others you type.
+- **Model:** the default review model (`runner.model`), defaulting to its
+  current value or `auto`. Answering `auto` when it's unset leaves the file
+  unchanged.
 
 Current config values are pre-selected. Entries setup doesn't manage
 (`owner/name`, path-scoped or remote-override entries) are never removed.
@@ -265,6 +269,12 @@ Rules:
 
 A global semaphore bounds concurrency. The per-profile model setting controls
 cost.
+
+**Model.** A profile's `model` overrides `runner.model`, which applies to
+profiles without one. `"auto"` passes no `--model`, so `claude` uses your own
+default model at run time; an unset `runner.model` means the same. A
+profile's `"auto"` overrides a named `runner.model`. `auto` ignores case. An
+empty `model` is an error.
 
 ### Output schema (sketch)
 

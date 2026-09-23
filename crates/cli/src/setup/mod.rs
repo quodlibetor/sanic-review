@@ -15,7 +15,10 @@ use color_eyre::{
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use sanic_core::{
-    config::{Config, TeamFilter, contract_path, default_config_path, expand_path},
+    config::{
+        AUTO_MODEL, Config, TeamFilter, contract_path, default_config_path, expand_path,
+        is_auto_model,
+    },
     pr::TeamRef,
 };
 use sanic_github::{Client, Token};
@@ -117,6 +120,8 @@ pub async fn run(args: SetupArgs) -> Result<()> {
         )?;
     }
 
+    sel.model = choose_model(current.model.as_deref())?;
+
     apply(&mut doc, &sel, &base)?;
     // Prepended rather than parsed in: a document holding only a comment
     // would keep it after any tables setup adds.
@@ -146,6 +151,7 @@ pub async fn run(args: SetupArgs) -> Result<()> {
 /// What the existing config already says, for pre-selecting options.
 struct Current {
     teams: Option<TeamFilter>,
+    model: Option<String>,
     checkouts: Vec<PathBuf>,
     orgs: Vec<String>,
     profiles: Vec<String>,
@@ -165,8 +171,15 @@ impl Current {
                     .collect()
             })
             .and_then(|patterns| TeamFilter::new(patterns).ok());
+        // A value that isn't a string reads as blank, so the prompt offers
+        // to replace it.
+        let model = doc
+            .get("runner")
+            .and_then(|r| r.get("model"))
+            .map(|m| m.as_str().unwrap_or_default().to_owned());
         let mut current = Self {
             teams,
+            model,
             checkouts: Vec::new(),
             orgs: Vec::new(),
             profiles: Vec::new(),
@@ -315,6 +328,40 @@ fn choose_orgs(candidates: BTreeSet<String>, current: &Current) -> Result<Vec<(S
     Ok(orgs)
 }
 
+fn choose_model(current: Option<&str>) -> Result<Option<String>> {
+    let answer = Text::new("Default model for reviews:")
+        .with_default(model_default(current))
+        .with_help_message(&format!(
+            "\"{AUTO_MODEL}\" uses your Claude default; or e.g. claude-sonnet-5. \
+             A profile's `model` overrides it"
+        ))
+        .prompt()?;
+    Ok(model_change(current, &answer))
+}
+
+/// The current value, or [`AUTO_MODEL`] when it's unset or blank.
+fn model_default(current: Option<&str>) -> &str {
+    current
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(AUTO_MODEL)
+}
+
+/// The `runner.model` to write, or `None` when the answer matches what the
+/// config already says; unset already means [`AUTO_MODEL`], in any case. A
+/// blank answer takes the default, which replaces a blank value that doesn't
+/// load.
+fn model_change(current: Option<&str>, answer: &str) -> Option<String> {
+    let answer = Some(answer.trim())
+        .filter(|a| !a.is_empty())
+        .unwrap_or(model_default(current));
+    let current = current.unwrap_or(AUTO_MODEL).trim();
+    if is_auto_model(answer) {
+        return (!is_auto_model(current)).then(|| AUTO_MODEL.to_owned());
+    }
+    (answer != current).then(|| answer.to_owned())
+}
+
 fn choose_profile(message: &str, existing: &[String]) -> Result<String> {
     if existing.is_empty() {
         return Ok(Text::new(&format!("{message}:"))
@@ -353,10 +400,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_answers_matching_the_config_change_nothing() {
+        assert_eq!(model_change(None, "auto"), None, "unset is already auto");
+        assert_eq!(model_change(None, " "), None);
+        assert_eq!(model_change(Some("m"), "m"), None);
+        assert_eq!(model_change(Some("m"), ""), None);
+        assert_eq!(model_change(None, " m "), Some("m".into()));
+        assert_eq!(model_change(Some("m"), "auto"), Some("auto".into()));
+        assert_eq!(model_change(Some("auto"), "n"), Some("n".into()));
+        assert_eq!(model_change(Some(" m "), ""), None, "loads as `m`");
+    }
+
+    #[test]
+    fn auto_answers_ignore_case_and_are_written_lowercase() {
+        assert_eq!(model_change(None, "AUTO"), None);
+        assert_eq!(model_change(Some("Auto"), "auto"), None);
+        assert_eq!(model_change(Some("Auto"), ""), None);
+        assert_eq!(model_change(Some("m"), "Auto"), Some("auto".into()));
+    }
+
+    #[test]
+    fn a_blank_model_is_replaced_by_accepting_the_default() {
+        assert_eq!(model_change(Some(""), ""), Some("auto".into()));
+        assert_eq!(model_change(Some(" "), "m"), Some("m".into()));
+    }
+
+    #[test]
     fn current_reads_what_setup_manages_even_from_a_broken_config() {
         let doc: DocumentMut = r#"
             [review_requests]
             teams = ["*", "!org/x"]
+            [runner]
+            model = 5
             [profile.p]
             repos = ["/base/a", { repo = "/base/b", paths = ["z"] }, { github = "Org" }, { github = "o/r" }]
             [profile.q]
@@ -366,6 +441,7 @@ mod tests {
         .unwrap();
         let current = Current::read(&doc, Path::new("/base"));
         assert!(!current.teams.unwrap().allows(&TeamRef::new("org", "x")));
+        assert_eq!(current.model.as_deref(), Some(""), "not a string");
         assert_eq!(
             current.checkouts,
             [PathBuf::from("/base/a"), PathBuf::from("/base/b")]

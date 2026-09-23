@@ -240,6 +240,18 @@ mod tests {
     }
 
     #[test]
+    fn no_model_passes_no_model_flag() {
+        let schema = json!({});
+        let inv = Invocation {
+            model: None,
+            ..invocation(&schema, &[])
+        };
+        let claude = Claude::new("claude".into(), Duration::from_secs(1));
+        let cmd = claude.command(&inv).unwrap();
+        assert!(!cmd.as_std().get_args().any(|a| a == "--model"));
+    }
+
+    #[test]
     fn prefers_structured_output() {
         let outcome = parse_result(&json!({
             "type": "result", "subtype": "success", "is_error": false,
