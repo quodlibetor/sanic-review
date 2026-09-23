@@ -23,7 +23,7 @@ use crate::{
     App, Error, PrPath, Shared, chat, diff,
     index::{Overview, archive_form, owed_status, why},
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
-    pr_href, submit,
+    pr_href,
 };
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +286,14 @@ pub fn short(sha: &str) -> &str {
     sha.get(..8).unwrap_or(sha)
 }
 
+/// What a review of `reviewed` comes with once the PR is at `head`.
+pub fn moved_on(reviewed: &str, head: &str) -> Markup {
+    html! {
+        "Reviewed at " code { (short(reviewed)) } "; the PR has moved on to "
+        code { (short(head)) } ". These comments post against the older commit."
+    }
+}
+
 fn drafts_section(
     app: &App,
     pr: &PrPage,
@@ -303,7 +311,10 @@ fn drafts_section(
     let count = |status: &str| drafts.iter().filter(|d| d.status == status).count();
     html! {
         // The verdict and Preview stay in view over the drafts.
-        form.rbar #review-bar method="get" action=(preview) {
+        // A post, so picking Approve here is something only this page
+        // can do: see `submit::pick`.
+        form.rbar #review-bar method="post" action=(preview) {
+            (csrf_field(app))
             span.tally {
                 b data-count="pending" { (count("pending")) } " pending · "
                 b.ok data-count="accepted" { (count("accepted")) } " accepted · "
@@ -311,12 +322,10 @@ fn drafts_section(
             }
             span.sp {
                 span.seg {
-                    // Approve's value says it was picked here, which an
-                    // approval needs.
                     @for (value, label) in [
-                        ("COMMENT".to_owned(), "Comment"),
-                        ("REQUEST_CHANGES".to_owned(), "Request changes"),
-                        (submit::approve_value(app), "Approve"),
+                        ("COMMENT", "Comment"),
+                        ("REQUEST_CHANGES", "Request changes"),
+                        ("APPROVE", "Approve"),
                     ] {
                         label {
                             input type="radio" name="event" value=(value)
@@ -334,10 +343,7 @@ fn drafts_section(
             }
         }
         @if run.head_sha != pr.head_sha {
-            div.banner {
-                "Reviewed at " code { (short(&run.head_sha)) } "; the PR has moved on to "
-                code { (short(&pr.head_sha)) } ". These comments post against the older commit."
-            }
+            div.banner { (moved_on(&run.head_sha, &pr.head_sha)) }
         }
         // Where Revise lands: the new run, before it has drafts or a diff.
         @if matches!(run.status.as_str(), "queued" | "running") {

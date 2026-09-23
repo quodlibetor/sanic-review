@@ -564,11 +564,10 @@ embedded in the binary, so nothing is fetched at runtime.
   the TUI does, unless it's already there; the config reload picks it up.
 - **Submit.** You pick the verdict: comment, request changes or approve.
   The agent's suggestion is preselected, and approve never is. An
-  approval has to be picked on the PR page's verdict form, whose Approve
-  radio alone carries a per-process token the preview and submit check, so
-  Approve in a URL alone, or in another verdict's preview URL edited to
-  say it, is refused; the preview's button then reads "Approve this PR with
-  the above comments". The preview shows the review as it'll read (body,
+  approval has to be picked on the PR page's verdict form (see Security),
+  so Approve in a URL alone is refused; the preview's button then reads
+  "Approve this PR", or "Approve this PR with the above comments" when
+  there are any. The preview shows the review as it'll read (body,
   then each inline comment) beside the exact payload, the JSON request
   that will be sent, with the confirm in a footer that stays in view; on a
   narrow window they stack. Above them, "Check before posting" lists what
@@ -777,6 +776,15 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   keys typed there neither settle nor are ignored while held. The
   page behind is inert while it's open, and only the latest ask opens.
   Without the script, the link goes to the confirm page itself.
+- An approval is picked, never taken from a URL. The PR page's verdict
+  form is a post, behind the token and origin checks, and sent with
+  Approve it gets a random pick id, kept in memory with the run and a
+  short expiry, which the preview URL and its confirm form carry. The
+  preview records the payload it shows under the pick, and the confirm
+  uses the pick up, posting only that payload from that run. So a preview
+  URL from history, or a second `y`, can't post an approval again: an
+  unknown, used or expired pick is refused, before anything is loaded,
+  with a note to pick Approve again on the PR page.
 - Responses forbid framing, so another page can't trick you into clicking
   Confirm, and the CSP allows only the dashboard's own scripts. The
   referrer policy is `same-origin`: links out to GitHub carry no
