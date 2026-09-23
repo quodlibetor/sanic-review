@@ -1,0 +1,79 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "number": 7,
+        "title": "Add retries",
+        "url": "https://github.com/org/repo/pull/7",
+        "isDraft": false,
+        "headRefOid": "aaa111",
+        "baseRefOid": "bbb222",
+        "author": { "login": "alice" },
+        "reviewRequests": {
+          "nodes": [
+            { "requestedReviewer": { "__typename": "User", "login": "Me" } },
+            { "requestedReviewer": { "__typename": "Team" } }
+          ]
+        },
+        "reviews": {
+          "pageInfo": { "hasPreviousPage": false },
+          "nodes": [
+            {
+              "id": "R_1",
+              "author": { "login": "bob" },
+              "state": "CHANGES_REQUESTED",
+              "body": "needs tests",
+              "submittedAt": "2026-09-20T08:00:00Z"
+            },
+            {
+              "id": "R_2",
+              "author": null,
+              "state": "PENDING",
+              "body": "",
+              "submittedAt": null
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": { "hasPreviousPage": false },
+          "nodes": [
+            {
+              "id": "IC_1",
+              "author": { "login": "carol" },
+              "body": "ship it",
+              "createdAt": "2026-09-20T07:00:00Z"
+            }
+          ]
+        },
+        "reviewThreads": {
+          "pageInfo": { "hasPreviousPage": true },
+          "nodes": [
+            {
+              "id": "RT_1",
+              "path": "src/retry.rs",
+              "line": 42,
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasPreviousPage": false },
+                "nodes": [
+                  {
+                    "id": "RC_1",
+                    "author": { "login": "me" },
+                    "body": "why 3?",
+                    "createdAt": "2026-09-20T08:30:00Z"
+                  },
+                  {
+                    "id": "RC_2",
+                    "author": { "login": "alice" },
+                    "body": "matches the SLA",
+                    "createdAt": "2026-09-20T09:30:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

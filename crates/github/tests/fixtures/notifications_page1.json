@@ -1,0 +1,24 @@
+[
+  {
+    "id": "101",
+    "reason": "review_requested",
+    "updated_at": "2026-09-20T10:00:00Z",
+    "subject": {
+      "title": "Add retries",
+      "type": "PullRequest",
+      "url": "https://api.github.com/repos/Org/Repo/pulls/7"
+    },
+    "repository": { "full_name": "Org/Repo" }
+  },
+  {
+    "id": "102",
+    "reason": "mention",
+    "updated_at": "2026-09-20T09:00:00Z",
+    "subject": {
+      "title": "Flaky test",
+      "type": "Issue",
+      "url": "https://api.github.com/repos/org/repo/issues/8"
+    },
+    "repository": { "full_name": "org/repo" }
+  }
+]
