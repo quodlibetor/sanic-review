@@ -39,6 +39,23 @@ stay queued and run on the next start without the flag. Under the flag the
 log and the TUI's Activity pane say "review held" where they'd otherwise
 say "review queued", since nothing will run until you start it.
 
+`sanic-review chat <PR url | run id> [--allow-edits] [--print-command]`
+resumes the agent session of a PR's latest run that has one (or of that
+run), so you can ask the reviewer about its review. Claude Code keys
+sessions by directory, so the run's worktree is checked out again at its
+original path, `worktrees/<run id>` in the data dir, at the run's head, and
+`claude --resume` runs there in the foreground. It keeps the review's
+limits: `--restricted` and `--strict-mcp-config` (the PR's own
+`.claude/settings.json` and `.mcp.json` don't load), the read-only tools,
+the run's `--add-dir`s, and no GitHub token. `--allow-edits` adds Edit and
+Write and drops the `--add-dir`s, so only the worktree can change. The
+worktree is removed when the chat ends, however it ends; it's refused while
+that path exists (a running review or another chat). `--print-command`
+prints the `cd <worktree> && …` line instead and leaves the worktree for it
+until `sanic-review chat --cleanup <run id>`.
+`sanic_runner::chat::ChatCommand` builds the command, and its
+`shell_line()` the line to copy, for the CLI, the TUI and the dashboard.
+
 `sanic-review review <PR url>` asks the running `serve` to review a PR now:
 its held review, or else a full review of its current head, subject to the
 usual idempotency. It writes a row to a `start_requests` table in the
@@ -303,7 +320,11 @@ Rules:
 
 ## Runner
 
-1. **Checkout.** There's one bare mirror per repo. Fetch `refs/pull/N/head`
+1. **Checkout.** There's one bare mirror per repo. Checkouts into a mirror
+   (its fetch and `worktree add`) take turns: a lock per mirror within the
+   process, and an advisory file lock (`<name>.git.lock` beside it) across
+   processes, so `sanic-review chat` and `serve` don't fetch into one mirror
+   at once. Fetch `refs/pull/N/head`
    and the base, then `git worktree add` at the head SHA under the data dir.
    Remove the worktree when the run finishes. Your own PRs with auto-fix are
    handled differently; see Auto-fix.
@@ -516,6 +537,10 @@ embedded in the binary, so nothing is fetched at runtime.
   `a` archives or unarchives the selected PR in either PR pane. Archived
   PRs are hidden, and each pane's title counts them; `A` shows them,
   dimmed and marked `archived`.
+  `c` on a PR in either pane chats with the agent that last reviewed it,
+  as `sanic-review chat` does: the TUI gives up the terminal for the chat
+  and takes it back when the chat ends, and `serve` keeps running
+  meanwhile, leaving Ctrl-C to the chat.
   `i` on a review you owe opens an ignore editor: the PR's title and
   description, read-only, over a pattern prefilled with the title (glob
   syntax escaped) to edit down, e.g. to `build(deps)*`. Under it, a live

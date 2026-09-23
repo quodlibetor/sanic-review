@@ -21,7 +21,7 @@ use tokio::{io::AsyncWriteExt, process::Command};
 pub const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
 
 /// Environment variables that can carry a GitHub token.
-const TOKEN_VARS: &[&str] = &[
+pub const TOKEN_VARS: &[&str] = &[
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",

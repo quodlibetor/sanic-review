@@ -22,6 +22,14 @@ pub struct RunRecord {
     pub transcript_path: Option<String>,
 }
 
+/// A run whose agent session can be resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRun {
+    pub run: QueuedRun,
+    pub session_id: String,
+    pub status: String,
+}
+
 /// A stored draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
@@ -242,6 +250,53 @@ impl Store {
             [id],
         )?;
         Ok(())
+    }
+
+    /// Run `id`, if it has a session to resume.
+    pub fn session_run(&self, id: i64) -> Result<Option<SessionRun>> {
+        self.session_run_where("id = ?1", params![id])
+    }
+
+    /// `key`'s most recent run that has a session to resume.
+    pub fn latest_session_run(&self, key: &PrKey) -> Result<Option<SessionRun>> {
+        self.session_run_where(
+            "repo = ?1 AND number = ?2",
+            params![key.repo.to_string(), key.number],
+        )
+    }
+
+    fn session_run_where(
+        &self,
+        filter: &str,
+        values: impl rusqlite::Params,
+    ) -> Result<Option<SessionRun>> {
+        let row = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
+                            status
+                     FROM runs WHERE {filter} AND session_id IS NOT NULL
+                     ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1"
+                ),
+                values,
+                |row| {
+                    Ok((
+                        queued_row(row)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(queued, session_id, status)| {
+            Ok(SessionRun {
+                run: queued_run(queued)?,
+                session_id,
+                status,
+            })
+        })
+        .transpose()
     }
 
     /// PRs with a review running, by repo and number.
@@ -764,6 +819,24 @@ mod tests {
         store.request_start(&key).unwrap();
         assert_eq!(store.take_start_requests().unwrap(), [key.clone(), key]);
         assert!(store.take_start_requests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sessions_are_found_by_run_or_by_prs_latest() {
+        let mut store = store();
+        let key = snapshot().key;
+        assert_eq!(store.latest_session_run(&key).unwrap(), None);
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        // A newer run with no session yet doesn't hide the older one.
+        let second = store.queue_review(&request("h2")).unwrap().unwrap();
+        let found = store.latest_session_run(&key).unwrap().unwrap();
+        assert_eq!(found.run, first);
+        assert_eq!(found.session_id, "sess");
+        assert_eq!(found.status, "succeeded");
+        assert_eq!(store.session_run(first.id).unwrap().unwrap().run, first);
+        assert_eq!(store.session_run(second.id).unwrap(), None);
     }
 
     #[test]

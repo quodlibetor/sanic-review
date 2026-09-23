@@ -38,7 +38,7 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 pub use dashboard::{DraftRow, DraftStatus, PrPage, ReviewRun};
 pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview, ReviewState};
-pub use runs::{Draft, RunCounts, RunRecord};
+pub use runs::{Draft, RunCounts, RunRecord, SessionRun};
 
 /// A connection to the database. The poller and the runner each open their
 /// own, so file databases use WAL and a busy timeout.

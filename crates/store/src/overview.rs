@@ -25,6 +25,8 @@ pub struct OwedReview {
     pub head_sha: String,
     /// See [`Store::head_reviewers`].
     pub head_reviewers: Vec<String>,
+    /// The latest run with an agent session to chat with.
+    pub chat_run: Option<i64>,
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
@@ -46,6 +48,8 @@ pub struct MyPr {
     pub archived: bool,
     pub review_state: ReviewState,
     pub pending_drafts: u32,
+    /// The latest run with an agent session to chat with.
+    pub chat_run: Option<i64>,
 }
 
 /// Where reviewers stand on one of your PRs, from each reviewer's latest
@@ -92,7 +96,10 @@ impl Store {
                     latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending'),
-                    p.body, p.head_sha
+                    p.body, p.head_sha, (
+                        SELECT id FROM runs s
+                        WHERE s.repo = p.repo AND s.number = p.number AND s.session_id IS NOT NULL
+                        ORDER BY coalesce(s.finished_at, s.queued_at) DESC, s.id DESC LIMIT 1)
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -118,6 +125,7 @@ impl Store {
                     body: row.get(10)?,
                     head_sha: row.get(11)?,
                     head_reviewers: Vec::new(),
+                    chat_run: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -154,9 +162,11 @@ impl Store {
         rows.into_iter()
             .map(
                 |(repo, number, title, is_draft, archived, pending_drafts)| {
+                    let key = key(&repo, number)?;
                     Ok(MyPr {
                         review_state: self.review_state(&repo, number, me)?,
-                        key: key(&repo, number)?,
+                        chat_run: self.latest_session_run(&key)?.map(|s| s.run.id),
+                        key,
                         title,
                         is_draft,
                         archived,
@@ -350,6 +360,7 @@ mod tests {
                 archived: false,
                 head_sha: "h1".into(),
                 head_reviewers: vec![],
+                chat_run: None,
                 latest_run: None,
                 pending_drafts: 0,
             }]
