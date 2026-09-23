@@ -1,6 +1,8 @@
 //! SQLite schema, migrations and queries.
 
-use std::{collections::HashSet, path::Path};
+mod runs;
+
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use color_eyre::{
     Section,
@@ -14,10 +16,20 @@ use sanic_core::{
 
 /// Applied in order; a database's `user_version` is how many have run.
 /// Never edit a released migration, only append.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_runs_drafts.sql"),
+];
+
+/// How long a write waits for another connection's write to finish.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
+pub use runs::{Draft, RunCounts, RunRecord};
+
+/// A connection to the database. The poller and the runner each open their
+/// own, so file databases use WAL and a busy timeout.
 pub struct Store {
     conn: Connection,
 }
@@ -40,6 +52,7 @@ impl Store {
         let conn = Connection::open(path)
             .wrap_err_with(|| format!("opening database {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Self::init(conn).wrap_err_with(|| format!("initializing database {}", path.display()))
     }
 

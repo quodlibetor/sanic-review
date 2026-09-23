@@ -1606,6 +1606,7 @@ dependencies = [
  "globset",
  "indexmap",
  "serde",
+ "serde_json",
  "toml",
 ]
 
