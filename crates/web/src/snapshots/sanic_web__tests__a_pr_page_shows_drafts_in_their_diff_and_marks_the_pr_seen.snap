@@ -16,9 +16,10 @@ expression: "readable(&f, &page.body)"
 </script>
 </head>
 <body data-page="pr" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
-<header class="top">
+<header class="topbar">
 <a class="home" href="/">sanic-review</a>
-<span class="hint">? keys</span>
+<span class="counts" id="counts">
+<b>0</b> queued · <b>0</b> running · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <span class="k">?</span> keys</span>
 </header>
 <main>
 <h1>Add the thing</h1>
@@ -31,7 +32,8 @@ expression: "readable(&f, &page.body)"
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="pr">
-<button type="submit">Archive</button>
+<button class="btn" type="submit">Archive<span class="k">a</span>
+</button>
 </form>
 </div>
 <details class="description">

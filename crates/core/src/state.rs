@@ -115,13 +115,7 @@ impl PrState {
     /// same in short words, else the most pressing word alone.
     #[must_use]
     pub fn fitted(&self, width: usize) -> String {
-        self.fit(self.status(), width)
-    }
-
-    /// [`PrState::fitted`], given the [`PrState::status`] already built:
-    /// the dashboard shows both.
-    #[must_use]
-    pub fn fit(&self, full: String, width: usize) -> String {
+        let full = self.status();
         if full.chars().count() <= width {
             return full;
         }

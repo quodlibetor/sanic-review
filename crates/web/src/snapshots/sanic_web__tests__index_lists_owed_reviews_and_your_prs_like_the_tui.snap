@@ -16,112 +16,141 @@ expression: "readable(&f, &page.body)"
 </script>
 </head>
 <body data-page="index" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
-<header class="top">
+<header class="topbar">
 <a class="home" href="/">sanic-review</a>
-<span class="hint">? keys</span>
+<span class="counts" id="counts">
+<b>0</b> queued · <b>0</b> running · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <span class="k">?</span> keys</span>
 </header>
 <main>
-<p class="status-line">0 queued · 0 running · 3 pending drafts</p>
-<div id="panes" hx-get="/?archived=false" hx-trigger="every 5s" hx-select="#panes" hx-swap="outerHTML" data-show-archived="false">
-<section class="pane" id="owed">
-<h2>Reviews you owe (3)</h2>
-<ol class="rows">
-<li class="row" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
-<span class="state act" title="1 unanswered">1 unanswered</span>
-<span class="status ok">drafted</span>
-<span class="drafts">3 drafts</span>
-<span class="new-cell">
-<span class="unseen" title="a review you haven't looked at yet">new</span>
+<div id="panes" hx-get="/?archived=false" hx-trigger="every 5s" hx-select="#panes" hx-select-oob="#counts" hx-swap="outerHTML" data-show-archived="false">
+<section class="list" id="owed">
+<h2>Reviews you owe <span class="dim">3</span>
+<span class="sp">
 </span>
-<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a>
-<span class="title-cell">
-<a class="title" href="/pr/org/repo/7">Add the thing</a> <span class="author dim">(alice)</span>
+</h2>
+<div class="group-h act">NEEDS YOU · 2</div>
+<div class="ib" data-row data-key="org/repo#7" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
+<span class="n">
+<span class="newdot" title="a review you haven't looked at yet">
 </span>
-<span class="actions">
-<a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
-<a class="button" href="/pr/org/repo/7#chat">Chat</a>
+</span>
+<span class="x">
+<span class="cnt">3 drafts</span>
+</span>
+<span class="t">
+<a href="/pr/org/repo/7" title="Add the thing">Add the thing</a>
+</span>
+<span class="m">
+<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a> · alice · drafted · <span class="u-act">1 unanswered</span>
+</span>
+<span class="a">
+<a class="linkbtn" href="/pr/org/repo/7/ignore">ignore by title <span class="k">i</span>
+</a>
+<a class="linkbtn" href="/pr/org/repo/7#chat">chat <span class="k">c</span>
+</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button type="submit">Archive</button>
+<button class="linkbtn" type="submit">archive <span class="k">a</span>
+</button>
 </form>
 </span>
-</li>
-<li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now" data-ignore="/pr/org/repo/8/ignore">
-<span class="state quiet" title="changes requested">changes requested</span>
-<span class="status bad">failed</span>
-<span class="drafts">
+</div>
+<div class="ib" data-row data-key="org/repo#8" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now" data-ignore="/pr/org/repo/8/ignore">
+<span class="n">
 </span>
-<span class="new-cell">
+<span class="x">
+<span class="chip bad">failed</span>
 </span>
-<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a>
-<span class="title-cell">
-<a class="title" href="/pr/org/repo/8">Fix &lt;script&gt; escaping</a> <span class="author dim">(bob)</span>
+<span class="t">
+<a href="/pr/org/repo/8" title="Fix &lt;script&gt; escaping">Fix &lt;script&gt; escaping</a>
 </span>
-<span class="actions">
-<a class="button" href="/pr/org/repo/8/review-now">Review now</a>
-<a class="button" href="/pr/org/repo/8/ignore">Ignore by title</a>
+<span class="m">
+<a class="ref" href="https://github.com/org/repo/pull/8" title="https://github.com/org/repo/pull/8">org/repo#8 ↗</a> · bob · <span class="u-quiet">changes requested</span> · <span class="error" title="claude exited with 1
+and more detail">claude exited with 1</span>
+</span>
+<span class="a">
+<a class="linkbtn" href="/pr/org/repo/8/review-now">review now <span class="k">r</span>
+</a>
+<a class="linkbtn" href="/pr/org/repo/8/ignore">ignore by title <span class="k">i</span>
+</a>
 <form class="archive" method="post" action="/pr/org/repo/8/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button type="submit">Archive</button>
+<button class="linkbtn" type="submit">archive <span class="k">a</span>
+</button>
 </form>
 </span>
-<div class="error">claude exited with 1</div>
-</li>
-<li class="row" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now" data-ignore="/pr/org/repo/10/ignore">
-<span class="state quiet" title="—">—</span>
-<span class="status dim">skipped: draft</span>
-<span class="drafts">
+</div>
+<details class="grp quiet" id="owed-quiet">
+<summary>
+<div class="group-h">NOTHING TO DO NOW · 1<span class="dim"> — skipped, archived, or done; r reviews one anyway</span>
+</div>
+</summary>
+<div class="ib" data-row data-key="org/repo#10" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now" data-ignore="/pr/org/repo/10/ignore">
+<span class="n">
 </span>
-<span class="new-cell">
+<span class="x">
+<span class="chip dim">skipped: draft</span>
 </span>
-<a class="gh" href="https://github.com/org/repo/pull/10">https://github.com/org/repo/pull/10</a>
-<span class="title-cell">
-<a class="title" href="/pr/org/repo/10">WIP: try things</a> <span class="author dim">(carol)</span>
+<span class="t">
+<a href="/pr/org/repo/10" title="WIP: try things">WIP: try things</a>
 </span>
-<span class="actions">
-<a class="button" href="/pr/org/repo/10/review-now">Review now</a>
-<a class="button" href="/pr/org/repo/10/ignore">Ignore by title</a>
+<span class="m">
+<a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol</span>
+<span class="a">
+<a class="linkbtn" href="/pr/org/repo/10/review-now">review now <span class="k">r</span>
+</a>
+<a class="linkbtn" href="/pr/org/repo/10/ignore">ignore by title <span class="k">i</span>
+</a>
 <form class="archive" method="post" action="/pr/org/repo/10/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button type="submit">Archive</button>
+<button class="linkbtn" type="submit">archive <span class="k">a</span>
+</button>
 </form>
 </span>
-</li>
-</ol>
+</div>
+</details>
 </section>
-<section class="pane" id="mine">
-<h2>Your PRs (1)</h2>
-<ol class="rows">
-<li class="row" data-href="/pr/org/repo/9">
-<span class="state good" title="mergeable">mergeable</span>
-<span class="drafts">
+<section class="list" id="mine">
+<h2>Your PRs <span class="dim">1</span>
+<span class="sp">
 </span>
-<span class="new-cell">
+</h2>
+<div class="group-h">READY · 1</div>
+<div class="ib" data-row data-key="org/repo#9" data-href="/pr/org/repo/9">
+<span class="n">
 </span>
-<a class="gh" href="https://github.com/org/repo/pull/9">https://github.com/org/repo/pull/9</a>
-<span class="title-cell">
-<a class="title" href="/pr/org/repo/9">My change</a>
+<span class="x">
+<span class="chip u-good">mergeable</span>
 </span>
-<span class="actions">
+<span class="t">
+<a href="/pr/org/repo/9" title="My change">My change</a>
+</span>
+<span class="m">
+<a class="ref" href="https://github.com/org/repo/pull/9" title="https://github.com/org/repo/pull/9">org/repo#9 ↗</a>
+</span>
+<span class="a">
 <form class="archive" method="post" action="/pr/org/repo/9/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button type="submit">Archive</button>
+<button class="linkbtn" type="submit">archive <span class="k">a</span>
+</button>
 </form>
 </span>
-</li>
-</ol>
+</div>
 </section>
-<p class="toggle">
-<a id="toggle-archived" href="/?archived=true">Show archived PRs</a>
-</p>
+<p class="help-foot">
+<span class="k">j</span>
+<span class="k">k</span> move (a folded group is skipped) · <span class="k">Tab</span> other list · <span class="k">Enter</span> open · <span class="k">r</span>
+<span class="k">a</span>
+<span class="k">i</span>
+<span class="k">c</span> act on the selected row · <span class="k">A</span> archived · <span class="k">?</span> all keys</p>
 </div>
 </main>
 <div class="overlay" id="help" hidden>

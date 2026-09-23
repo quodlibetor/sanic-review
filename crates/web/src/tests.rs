@@ -459,21 +459,18 @@ async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
     )]));
     let page = f.get("/").await;
     assert!(page.body.contains("manual reviews"), "{}", page.body);
-    assert!(
-        page.body
-            .contains(r#"<span class="status held">held</span>"#)
-    );
+    assert!(page.body.contains(r#"<span class="chip held">held</span>"#));
     assert!(page.body.contains("waiting 1:00:00"), "{}", page.body);
 }
 
 #[tokio::test]
 async fn a_pr_page_shows_drafts_in_their_diff_and_marks_the_pr_seen() {
     let f = fixture(false).await;
-    assert!(f.get("/").await.body.contains(r#"class="unseen""#));
+    assert!(f.get("/").await.body.contains(r#"class="newdot""#));
     let page = f.get("/pr/org/repo/7").await;
     assert_eq!(page.status, StatusCode::OK);
     insta::assert_snapshot!(readable(&f, &page.body));
-    assert!(!f.get("/").await.body.contains(r#"class="unseen""#));
+    assert!(!f.get("/").await.body.contains(r#"class="newdot""#));
 
     assert_eq!(f.get("/pr/org/repo/99").await.status, StatusCode::NOT_FOUND);
 }
@@ -841,12 +838,13 @@ async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
     let index = f.get("/").await.body;
     assert!(!index.contains("Fix &lt;script&gt; escaping"));
     assert!(
-        index.contains("Reviews you owe (2 · 1 archived)"),
+        index.contains(r#"Reviews you owe <span class="dim">2</span>"#)
+            && index.contains("show 1 archived"),
         "{index}"
     );
     let all = f.get("/?archived=true").await.body;
     assert!(all.contains("Fix &lt;script&gt; escaping"));
-    assert!(all.contains(r#"<span class="status dim">archived</span>"#));
+    assert!(all.contains(r#"<span class="chip dim">archived</span>"#));
 
     let reply = f
         .post(
@@ -906,7 +904,7 @@ async fn pages_another_site_opens_are_only_a_link_to_themselves() {
     }
     // Nor does it mark a PR seen.
     f.send(opened("/pr/org/repo/7", "cross-site")).await;
-    assert!(f.get("/").await.body.contains(r#"class="unseen""#));
+    assert!(f.get("/").await.body.contains(r#"class="newdot""#));
     // Typed or bookmarked, or followed from the dashboard, it's the page.
     for site in ["none", "same-origin"] {
         let reply = f.send(opened(&preview, site)).await;
@@ -1257,10 +1255,11 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     let f = fixture(false).await;
     let index = f.get("/").await.body;
     for cell in [
-        r#"<span class="state act" title="1 unanswered">1 unanswered</span>"#,
-        r#"<span class="state quiet" title="changes requested">changes requested</span>"#,
-        r#"<span class="state quiet" title="—">—</span>"#,
-        r#"<span class="state good" title="mergeable">mergeable</span>"#,
+        // PR 7 leads with its drafts, and says the rest after.
+        r#"<span class="u-act">1 unanswered</span>"#,
+        r#"<span class="u-quiet">changes requested</span>"#,
+        // Yours leads with it.
+        r#"<span class="x"><span class="chip u-good">mergeable</span></span>"#,
     ] {
         assert!(index.contains(cell), "{cell}: {index}");
     }
@@ -1307,27 +1306,61 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     .await;
     let all = f.get("/?archived=true").await.body;
     assert!(
-        all.contains(r#"<span class="state quiet">archived</span>"#),
+        all.contains(r#"<span class="x"><span class="chip dim">archived</span></span>"#),
         "{all}"
     );
 }
 
-#[test]
-fn a_long_state_keeps_its_most_pressing_words_in_the_column() {
-    use sanic_core::state::{Approval, Checks, PrState};
+#[tokio::test]
+async fn the_index_groups_rows_by_what_they_ask_of_you() {
+    // The heading of the group a row is under.
+    fn group_in(index: &str, title: &str) -> String {
+        let at = index.find(&format!(r#"title="{title}""#)).unwrap();
+        let heading = &index[index[..at].rfind(r#"class="group-h"#).unwrap()..at];
+        let text = &heading[heading.find('>').unwrap() + 1..];
+        text.split(" ·").next().unwrap().to_owned()
+    }
+    let f = fixture(true).await;
+    {
+        let mut store = f.dashboard.app.store();
+        // PR 12 waits out the quiet period; PR 13's review is held.
+        for (number, title) in [(12, "Waiting one"), (13, "Held one")] {
+            store
+                .record(&snapshot(number, "dave", title), "default", &[])
+                .unwrap();
+        }
+        store
+            .queue_review(&ReviewRequest {
+                key: key(13),
+                profile: "default".into(),
+                head_sha: "head13".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap();
+    }
+    let index = f.get("/").await.body;
+    let group_of = |title: &str| group_in(&index, title);
+    assert_eq!(group_of("Add the thing"), "NEEDS YOU", "{index}");
+    assert_eq!(group_of("Fix &lt;script&gt; escaping"), "NEEDS YOU");
+    assert_eq!(group_of("Held one"), "NEEDS YOU");
+    assert_eq!(group_of("Waiting one"), "IN FLIGHT");
+    assert_eq!(group_of("WIP: try things"), "NOTHING TO DO NOW");
+    // The held one leads with it; the waiting one with its wait.
+    assert!(index.contains(r#"<span class="chip held">held</span>"#));
+    assert!(index.contains(r#"<span class="chip dim">waiting</span>"#));
+    // Rows carry the PR they're about, for selection to follow.
+    assert!(index.contains(r#"data-key="org/repo#13""#));
 
-    let state = PrState {
-        approval: Approval::Approved(Checks::Failing),
-        unanswered: 2,
-        mine: true,
-    };
+    // A PR whose failed run a new push replaces waits, as its status says.
+    f.due.send_replace(HashMap::from([(
+        key(8),
+        Instant::now() + Duration::from_secs(60),
+    )]));
+    let index = f.get("/").await.body;
     assert_eq!(
-        crate::page::fitted_state_cell(state).into_string(),
-        r#"<span class="state act" title="approved · ci failing · 2 unanswered">approved · 2 new</span>"#
-    );
-    // The PR page has the room for all of it.
-    assert_eq!(
-        crate::page::state_cell(state).into_string(),
-        r#"<span class="state act">approved · ci failing · 2 unanswered</span>"#
+        group_in(&index, "Fix &lt;script&gt; escaping"),
+        "IN FLIGHT",
+        "{index}"
     );
 }
