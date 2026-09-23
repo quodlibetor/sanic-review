@@ -163,6 +163,12 @@ against stored state, never from notification payloads.
 - **Open PRs only.** A notification can point at a closed or merged PR,
   which still lists its pending review requests. Refreshes skip those PRs,
   so they don't look like new requests.
+  A tracked PR is marked no longer open when a refresh finds it closed or
+  gone, or when a successful reconcile doesn't return it: merged PRs drop
+  out of the `is:open` searches and would otherwise never be refreshed
+  again. The same happens to a PR that stops involving you or whose repo
+  stops being watched. The next refresh that finds it marks it open
+  again.
 - **Team review requests.** A review requested from a team counts as a
   request to you if you're a member of that team (from `GET /user/teams`,
   refreshed on each reconcile; needs `read:org`) and `review_requests.teams`
@@ -306,7 +312,7 @@ invited to draft replies or fixes on someone else's PR.
 | Table | Contents |
 |-------|----------|
 | `repos` | owner, name, mirror path |
-| `prs` | repo, number, title, description, author, is_mine, state, matched profile |
+| `prs` | repo, number, title, description, author, is_mine, open, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |

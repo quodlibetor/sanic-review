@@ -21,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_initial.sql"),
     include_str!("migrations/0002_runs_drafts.sql"),
     include_str!("migrations/0003_pr_body.sql"),
+    include_str!("migrations/0004_pr_open.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -178,6 +179,41 @@ impl Store {
             .collect()
     }
 
+    /// Marks `key` as no longer open, if it's tracked. A later
+    /// [`Store::record`] marks it open again.
+    pub fn mark_closed(&self, key: &PrKey) -> Result<()> {
+        self.conn.execute(
+            "UPDATE prs SET open = 0 WHERE repo = ?1 AND number = ?2",
+            params![key.repo.to_string(), key.number],
+        )?;
+        Ok(())
+    }
+
+    /// Marks every tracked PR not in `open` as no longer open: `open` is the
+    /// complete set a reconcile found.
+    pub fn keep_open(&mut self, open: &[PrKey]) -> Result<()> {
+        let open: HashSet<(String, u32)> = open
+            .iter()
+            .map(|k| (k.repo.to_string(), k.number))
+            .collect();
+        let tx = self.conn.transaction()?;
+        let tracked = tx
+            .prepare("SELECT repo, number FROM prs WHERE open")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (repo, number) in tracked {
+            if !open.contains(&(repo.clone(), number)) {
+                tx.execute(
+                    "UPDATE prs SET open = 0 WHERE repo = ?1 AND number = ?2",
+                    params![repo, number],
+                )?;
+            }
+        }
+        tx.commit().wrap_err("marking PRs closed")
+    }
+
     pub fn tracked_prs(&self) -> Result<u32> {
         Ok(self
             .conn
@@ -231,14 +267,14 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
     tx.execute(
         &format!(
             "INSERT INTO prs (repo, number, title, url, author, head_sha, base_sha, is_draft,
-                              review_requested, profile, body, first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, {NOW}, {NOW})
+                              review_requested, profile, body, open, first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, {NOW}, {NOW})
              ON CONFLICT (repo, number) DO UPDATE SET
                  title = excluded.title, body = excluded.body, url = excluded.url,
                  author = excluded.author,
                  head_sha = excluded.head_sha, base_sha = excluded.base_sha,
                  is_draft = excluded.is_draft, review_requested = excluded.review_requested,
-                 profile = excluded.profile, updated_at = excluded.updated_at"
+                 profile = excluded.profile, open = 1, updated_at = excluded.updated_at"
         ),
         params![
             repo,
@@ -406,6 +442,35 @@ mod tests {
         assert_eq!(events[0].key, snap.key);
         assert_eq!(events[0].kind, "review_requested");
         assert_eq!(events[0].detail["head_sha"], "h1");
+    }
+
+    #[test]
+    fn prs_close_and_reopen() {
+        let mut store = Store::open_in_memory().unwrap();
+        let snap = snapshot();
+        let mut other = snapshot();
+        other.key.number = 8;
+        store.record(&snap, "default", &[]).unwrap();
+        store.record(&other, "default", &[]).unwrap();
+        let open = |store: &Store| -> Vec<u32> {
+            store
+                .conn
+                .prepare("SELECT number FROM prs WHERE open ORDER BY number")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(open(&store), [7, 8]);
+
+        store.keep_open(std::slice::from_ref(&other.key)).unwrap();
+        assert_eq!(open(&store), [8]);
+        store.mark_closed(&other.key).unwrap();
+        assert_eq!(open(&store), Vec::<u32>::new());
+        // Seen open again.
+        store.record(&snap, "default", &[]).unwrap();
+        assert_eq!(open(&store), [7]);
     }
 
     #[test]

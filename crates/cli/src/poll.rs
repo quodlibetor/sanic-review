@@ -105,7 +105,8 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// Open PRs that request your review or involve you, in watched repos.
-    /// Also refreshes your team memberships.
+    /// Also refreshes your team memberships, and marks tracked PRs missing
+    /// from the result as no longer open.
     pub async fn reconcile(&mut self) -> Result<Vec<PrKey>, ApiError> {
         // Without teams, team requests just stop counting; discovery still
         // works, so a lookup failure shouldn't stop the reconcile.
@@ -126,6 +127,7 @@ impl<G: GithubApi> Poller<G> {
             .collect();
         keys.sort();
         keys.dedup();
+        self.store.keep_open(&keys)?;
         Ok(keys)
     }
 
@@ -156,11 +158,12 @@ impl<G: GithubApi> Poller<G> {
 
     /// Fetches `key`, detects triggers against the stored baseline, and
     /// stores the new baseline. `None` if the PR is gone, closed or matches
-    /// no profile.
+    /// no profile; a gone or closed PR is marked no longer open.
     pub async fn refresh(&mut self, key: &PrKey) -> Result<Option<Refreshed>, ApiError> {
         let with_files = self.config.needs_files(&key.repo);
         let Some(mut snapshot) = self.github.pull_request(key, &self.me, with_files).await? else {
             tracing::debug!("not open or not visible; skipping");
+            self.store.mark_closed(key)?;
             return Ok(None);
         };
         let filter = &self.config.review_requests.teams;
@@ -329,6 +332,39 @@ mod tests {
             .insert(INVOLVES, vec![key("org/repo", 1), key("org/other", 2)]);
         let keys = poller(github).reconcile().await.unwrap();
         assert_eq!(keys, [key("org/other", 2), key("org/repo", 1)]);
+    }
+
+    #[tokio::test]
+    async fn prs_leave_the_open_set_when_closed_or_no_longer_found() {
+        let requested = key("org/a", 1);
+        let merged = key("org/b", 2);
+        let github = FakeGithub::default();
+        for pr in [&requested, &merged] {
+            let mut snap = snapshot(pr, "alice", &[]);
+            snap.review_requested = true;
+            github.prs.borrow_mut().insert(pr.clone(), snap);
+        }
+        let mut poller = poller(github);
+        poller.refresh(&requested).await.unwrap().unwrap();
+        poller.refresh(&merged).await.unwrap().unwrap();
+        let owed = |poller: &Poller<FakeGithub>| -> Vec<u32> {
+            let owed = poller.store().owed_reviews("me").unwrap();
+            owed.into_iter().map(|pr| pr.key.number).collect()
+        };
+        assert_eq!(owed(&poller), [1, 2]);
+
+        // GitHub stops returning the merged PR.
+        poller.github.prs.borrow_mut().remove(&merged);
+        assert!(poller.refresh(&merged).await.unwrap().is_none());
+        assert_eq!(owed(&poller), [1]);
+
+        // A reconcile that no longer finds a PR closes it too.
+        poller
+            .github
+            .searches
+            .insert(REVIEW_REQUESTED, vec![merged.clone()]);
+        poller.reconcile().await.unwrap();
+        assert_eq!(owed(&poller), Vec::<u32>::new());
     }
 
     /// Refreshes a PR that requests review from `requested`, as a member of

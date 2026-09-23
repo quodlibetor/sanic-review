@@ -61,7 +61,7 @@ pub enum ActivityKind {
 }
 
 impl Store {
-    /// PRs by others that request your review, by repo and number.
+    /// Open PRs by others that request your review, by repo and number.
     pub fn owed_reviews(&self, me: &str) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.repo, p.number, p.title, p.author,
@@ -71,7 +71,7 @@ impl Store {
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
-             WHERE p.review_requested AND lower(p.author) != lower(?1)
+             WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
              ORDER BY p.repo, p.number",
         )?;
         let rows = stmt
@@ -101,14 +101,14 @@ impl Store {
             .collect()
     }
 
-    /// PRs you authored, by repo and number.
+    /// Open PRs you authored, by repo and number.
     pub fn my_prs(&self, me: &str) -> Result<Vec<MyPr>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.repo, p.number, p.title, p.is_draft,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
-             WHERE lower(p.author) = lower(?1)
+             WHERE p.open AND lower(p.author) = lower(?1)
              ORDER BY p.repo, p.number",
         )?;
         let rows = stmt
@@ -283,6 +283,10 @@ mod tests {
         store.record(&requested, "default", &[]).unwrap();
         store.record(&mine, "default", &[]).unwrap();
         store.record(&snapshot(1, "bob"), "default", &[]).unwrap();
+        let mut merged = snapshot(4, "alice");
+        merged.review_requested = true;
+        store.record(&merged, "default", &[]).unwrap();
+        store.mark_closed(&merged.key).unwrap();
 
         let owed = store.owed_reviews("me").unwrap();
         assert_eq!(
@@ -362,6 +366,9 @@ mod tests {
             store.record(snap, "default", &[]).unwrap();
         }
         store.record(&snapshot(5, "alice"), "default", &[]).unwrap();
+        let merged = snapshot(6, "me");
+        store.record(&merged, "default", &[]).unwrap();
+        store.mark_closed(&merged.key).unwrap();
 
         let states: Vec<_> = store
             .my_prs("me")
