@@ -318,7 +318,9 @@ Rules:
    read `gh`'s stored token), and `--strict-mcp-config` loads no MCP servers.
    Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
    the agent reads their `SKILL.md` files directly. A run that outlives
-   `runner.timeout_secs` is killed and fails.
+   `runner.timeout_secs` is killed and fails. The agent runs in its own
+   process group, and whenever it stops, finished or killed, the whole
+   group is killed, so nothing it started outlives it.
    So the agent can check changes that span repositories, every local
    checkout named in any profile's `repos` (the PR's own repo's included)
    is also an `--add-dir`, plus any `runner.read_paths`. The system prompt
@@ -389,7 +391,12 @@ invited to draft replies or fixes on someone else's PR.
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
 
 A run's summary is stored as a `summary` draft, so it can be edited like any
-other draft. Runs left `running` by a previous process are requeued at
+other draft. When `serve` exits (Ctrl-C, or quitting the TUI), running
+reviews are cancelled rather than waited for: their agents are killed,
+their worktrees removed, and their runs queued again, which is logged with
+their PRs. The next start runs them, or holds them under
+`--manual-reviews`. A second Ctrl-C exits without waiting for that. Runs
+left `running` by a previous process are requeued at
 startup, unless the same PR also has a run queued after it: that one is for
 a newer head, so the older run is marked `superseded` instead.
 

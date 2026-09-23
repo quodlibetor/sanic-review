@@ -85,7 +85,9 @@ fn fake_claude(dir: &Path) -> std::path::PathBuf {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nd='{}'\nenv > \"$d/env\"\ncat > /dev/null\ncat \"$d/output.jsonl\"\n",
+            "#!/bin/sh\nd='{}'\nenv > \"$d/env\"\ncat > /dev/null\n\
+             if [ -e \"$d/hang\" ]; then echo $$ > \"$d/pid\"; exec sleep 60; fi\n\
+             cat \"$d/output.jsonl\"\n",
             dir.display()
         ),
     )
@@ -381,6 +383,81 @@ async fn sanic_review_review_starts_a_held_review() {
         line.contains("url=https://github.com/org/repo/pull/7"),
         "{line}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_cancels_a_running_review_and_requeues_it() {
+    let w = world().await;
+    // The agent hangs, as a long review would.
+    std::fs::write(w.fake.join("hang"), "").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
+        .arg("serve")
+        // Any free port, so tests running at once don't collide.
+        .args(["--port", "0"])
+        .arg("--config")
+        .arg(&w.config)
+        .arg("--data-dir")
+        .arg(&w.data)
+        .env("GITHUB_TOKEN", "t0ken")
+        .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let pid_file = w.fake.join("pid");
+    let begun = std::time::Instant::now();
+    while !pid_file.exists() {
+        assert!(
+            begun.elapsed() < Duration::from_secs(30),
+            "the review never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let agent = std::fs::read_to_string(&pid_file).unwrap();
+    let signal = |sig: &str, pid: &str| {
+        Command::new("kill")
+            .args([sig, pid])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(signal("-INT", &child.id().to_string()));
+
+    let begun = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            begun.elapsed() < Duration::from_secs(8),
+            "serve waited on the review"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(status.success(), "{status}");
+    let lines: Vec<String> = rx.try_iter().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("cancelling 1 running review")
+                && l.contains("https://github.com/org/repo/pull/7")),
+        "{}",
+        lines.join("\n")
+    );
+    assert!(!signal("-0", agent.trim()), "the agent outlived serve");
+    let store = Store::open(&w.data.join("state.db")).unwrap();
+    assert_eq!(store.run_counts().unwrap().queued, 1);
+    assert!(!w.data.join("worktrees/1").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

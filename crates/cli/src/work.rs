@@ -8,7 +8,11 @@ use std::{
     any::Any,
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use color_eyre::eyre::{Result, eyre};
@@ -32,6 +36,9 @@ pub struct Worker {
     limit: Arc<Semaphore>,
     /// The review each PR has running, so a newer head can stop it.
     active: Mutex<HashMap<PrKey, Active>>,
+    /// Set by [`Worker::cancel_all`]: stopped runs are queued again rather
+    /// than superseded, and nothing new starts.
+    stopping: AtomicBool,
 }
 
 struct Active {
@@ -73,6 +80,41 @@ impl Worker {
             settings: RwLock::new(Settings::new(config)),
             limit: Arc::new(Semaphore::new(config.runner.max_concurrent)),
             active: Mutex::default(),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
+    /// Stops every running review for shutdown, returning their PRs. Each
+    /// is queued again, so the next start runs (or holds) it; see
+    /// [`Worker::wait_idle`].
+    pub fn cancel_all(&self) -> Vec<PrKey> {
+        self.stopping.store(true, Ordering::SeqCst);
+        let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        for run in active.values() {
+            run.cancel.notify_one();
+        }
+        let mut keys: Vec<PrKey> = active.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    /// Waits up to `limit` for the cancelled reviews to wind down: agents
+    /// killed, worktrees removed, runs requeued. `false` if some didn't.
+    pub async fn wait_idle(&self, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let idle = self
+                .active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty();
+            if idle {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -180,6 +222,10 @@ impl Worker {
         let Ok(_permit) = self.limit.acquire().await else {
             return;
         };
+        // Shutting down: it stays queued for the next start.
+        if self.stopping.load(Ordering::SeqCst) {
+            return;
+        }
         // Registered before claiming: a newer head queued after the claim
         // then always finds this run to stop, and one queued before it has
         // already superseded the run in the store, so the claim fails.
@@ -187,6 +233,11 @@ impl Worker {
             debug!("already started");
             return;
         };
+        // `cancel_all` may have run between the check above and `start`.
+        if self.stopping.load(Ordering::SeqCst) {
+            self.finish(&run);
+            return;
+        }
         // Bound first so the store guard is dropped before the review awaits.
         let claimed = self.store().claim_run(run.id);
         let outcome = match claimed {
@@ -200,6 +251,10 @@ impl Worker {
         };
         self.finish(&run);
         let stored = match outcome {
+            Ok(None) if self.stopping.load(Ordering::SeqCst) => {
+                info!("cancelled by shutdown; queued again for the next start");
+                self.store().requeue_run(run.id)
+            }
             Ok(None) => {
                 info!("stopped: a newer head of the PR was queued");
                 self.store().supersede_run(run.id)

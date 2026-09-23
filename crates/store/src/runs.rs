@@ -244,6 +244,17 @@ impl Store {
         Ok(())
     }
 
+    /// Puts a run that was interrupted back in the queue, for the next
+    /// start to run (or hold).
+    pub fn requeue_run(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET status = 'queued', started_at = NULL, finished_at = NULL
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
     pub fn fail_run(&self, id: i64, error: &str) -> Result<()> {
         self.end_run(id, "failed", error)
     }
@@ -732,6 +743,16 @@ mod tests {
         store.request_start(&key).unwrap();
         assert_eq!(store.take_start_requests().unwrap(), [key.clone(), key]);
         assert!(store.take_start_requests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_run_is_queued_again() {
+        let mut store = store();
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.requeue_run(run.id).unwrap();
+        assert_eq!(status(&store, run.id), "queued");
+        assert_eq!(store.recover_runs().unwrap(), [run]);
     }
 
     #[test]

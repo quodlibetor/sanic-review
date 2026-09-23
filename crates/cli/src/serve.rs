@@ -137,9 +137,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     };
 
     let mut poller = Poller::new(github, store, config, me);
-    // Dropping `ui` afterwards restores the terminal before any error is
-    // printed.
-    tokio::select! {
+    // Kept past the `select!`, so running reviews can wind down cleanly
+    // rather than be dropped midway.
+    let reviews = run_reviews(Arc::clone(&worker), runs_rx, started_rx);
+    tokio::pin!(reviews);
+    let result = tokio::select! {
         result = quit => {
             info!("shutting down");
             result
@@ -154,12 +156,49 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             manual: args.manual_reviews,
             start: started,
         }) => Ok(()),
-        () = run_reviews(Arc::clone(&worker), runs_rx, started_rx) => Ok(()),
+        () = &mut reviews => Ok(()),
         result = web.serve(args.port) => result,
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
         }
+    };
+    // Restores the terminal before anything is printed, however `serve`
+    // stopped: the TUI only gives it back by itself when you quit it.
+    drop(ui);
+    cancel_running(&worker, args.ui == Ui::Tui).await;
+    result
+}
+
+/// How long running reviews get to stop before `serve` exits anyway.
+const CANCEL_LIMIT: Duration = Duration::from_secs(10);
+
+/// Stops running reviews on the way out: their agents are killed, their
+/// worktrees removed, and their runs queued again for the next start. A
+/// second Ctrl-C exits without waiting; dropping the reviews then still
+/// kills the agents.
+async fn cancel_running(worker: &Worker, tell_terminal: bool) {
+    let cancelled = worker.cancel_all();
+    if cancelled.is_empty() {
+        return;
+    }
+    let urls: Vec<String> = cancelled.iter().map(PrKey::url).collect();
+    if tell_terminal {
+        eprintln!("cancelling running reviews: {}", urls.join(" "));
+    }
+    info!(
+        reviews = %urls.join(" "),
+        "cancelling {} running review{}; they run again on the next start",
+        urls.len(),
+        plural(urls.len(), "", "s")
+    );
+    tokio::select! {
+        stopped = worker.wait_idle(CANCEL_LIMIT) => {
+            if !stopped {
+                warn!("reviews didn't stop in {CANCEL_LIMIT:?}; exiting anyway");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => warn!("exiting without waiting for reviews to stop"),
     }
 }
 
