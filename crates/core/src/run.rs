@@ -11,6 +11,8 @@ use crate::pr::{PrKey, Thread};
 pub enum RunKind {
     /// Review someone else's PR.
     Review,
+    /// Revise a review with your instructions; see [`Revision`].
+    Regenerate,
 }
 
 impl RunKind {
@@ -18,6 +20,7 @@ impl RunKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Review => "review",
+            Self::Regenerate => "regenerate",
         }
     }
 }
@@ -87,6 +90,19 @@ pub struct PrContext {
 pub struct QueuedRun {
     pub id: i64,
     pub request: ReviewRequest,
+    /// Set for a `regenerate` run.
+    pub revision: Option<Revision>,
+}
+
+/// What a `regenerate` run revises: an earlier review, whose agent session
+/// it resumes with your instruction. It reviews that run's head, and its
+/// drafts are its own; the earlier run's stay as they were.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revision {
+    pub source_run: i64,
+    pub session_id: String,
+    /// What you asked for, as you wrote it.
+    pub instruction: String,
 }
 
 /// What the agent suggests you do with the review. There is deliberately no

@@ -5,7 +5,7 @@ use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 use sanic_core::{
     pr::{Comment, PrKey, Thread},
     repo::RepoName,
-    run::{PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger, RunKind},
+    run::{PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind},
 };
 
 use crate::{NOW, Store};
@@ -20,6 +20,11 @@ pub struct RunRecord {
     pub suggested_verdict: Option<String>,
     pub session_id: Option<String>,
     pub transcript_path: Option<String>,
+    /// For a `regenerate` run: the review it revises, the original one
+    /// when it revises a regeneration.
+    pub source_run: Option<i64>,
+    /// For a `regenerate` run: what you asked for.
+    pub instruction: Option<String>,
 }
 
 /// A run whose agent session can be resumed.
@@ -28,6 +33,55 @@ pub struct SessionRun {
     pub run: QueuedRun,
     pub session_id: String,
     pub status: String,
+}
+
+/// What [`Store::queue_regeneration`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Regeneration {
+    Queued(QueuedRun),
+    Refused(Refusal),
+}
+
+/// Why a review can't be regenerated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    NoSuchRun,
+    /// Its agent session is gone, or it never had one.
+    NoSession,
+    /// The PR moved on since: regenerating reviews the run's own head.
+    HeadMoved {
+        run_head: String,
+        pr_head: String,
+    },
+    /// A regeneration of it is already queued or running.
+    Underway {
+        run: i64,
+    },
+    /// Its worktree, which the regeneration needs, is in use: most likely
+    /// by a chat with its agent.
+    WorktreeInUse,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short = |sha: &str| sha.chars().take(8).collect::<String>();
+        match self {
+            Self::NoSuchRun => write!(f, "there's no such run"),
+            Self::NoSession => write!(f, "the run has no agent session to resume"),
+            Self::HeadMoved { run_head, pr_head } => write!(
+                f,
+                "the PR has moved from {} to {} since that review, and regenerating \
+                 reviews the old head; start a fresh review instead",
+                short(run_head),
+                short(pr_head)
+            ),
+            Self::Underway { run } => write!(f, "run {run} is already regenerating it"),
+            Self::WorktreeInUse => write!(
+                f,
+                "its worktree is in use, most likely by a chat with its agent; end that first"
+            ),
+        }
+    }
 }
 
 /// A stored draft.
@@ -155,6 +209,118 @@ impl Store {
         Ok(Some(QueuedRun {
             id,
             request: req.clone(),
+            revision: None,
+        }))
+    }
+
+    /// Queues a `regenerate` run revising run `source` with `instruction`,
+    /// or says why not. It's for `source`'s head, which must still be the
+    /// PR's, and it isn't held by `--manual-reviews`: it's started by hand.
+    ///
+    /// Revising a regeneration resumes its session, but the new run's
+    /// source is the original review: every revision's session lives in
+    /// that review's worktree path. `worktree_in_use` says whether that
+    /// review's worktree exists.
+    pub fn queue_regeneration(
+        &mut self,
+        source: i64,
+        instruction: &str,
+        worktree_in_use: impl FnOnce(i64) -> bool,
+    ) -> Result<Regeneration> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = tx
+            .query_row(
+                "SELECT r.repo, r.number, r.profile, r.head_sha, r.base_sha, r.session_id,
+                        p.head_sha, coalesce(r.source_run, r.id)
+                 FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+                 WHERE r.id = ?1",
+                [source],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((repo, number, profile, head_sha, base_sha, session_id, pr_head, source)) = row
+        else {
+            return Ok(Regeneration::Refused(Refusal::NoSuchRun));
+        };
+        // It checks out where the review ran, which a chat may be using.
+        if worktree_in_use(source) {
+            return Ok(Regeneration::Refused(Refusal::WorktreeInUse));
+        }
+        let Some(session_id) = session_id else {
+            return Ok(Regeneration::Refused(Refusal::NoSession));
+        };
+        if pr_head != head_sha {
+            return Ok(Regeneration::Refused(Refusal::HeadMoved {
+                run_head: head_sha,
+                pr_head,
+            }));
+        }
+        let underway: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM runs WHERE source_run = ?1 AND status IN ('queued', 'running')",
+                [source],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(run) = underway {
+            return Ok(Regeneration::Refused(Refusal::Underway { run }));
+        }
+        let earlier: u32 = tx.query_row(
+            "SELECT count(*) FROM runs WHERE source_run = ?1",
+            [source],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            &format!(
+                "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
+                                   base_sha, status, queued_at, source_run, instruction)
+                 VALUES (?1, ?2, ?3, 'regenerate', ?4, ?5, ?6, ?7, 'queued', {NOW}, ?8, ?9)"
+            ),
+            params![
+                repo,
+                number,
+                RunKind::Regenerate.as_str(),
+                format!("{source}/{}", earlier + 1),
+                profile,
+                head_sha,
+                base_sha,
+                source,
+                instruction
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()
+            .wrap_err_with(|| format!("queueing a regeneration of run {source}"))?;
+        Ok(Regeneration::Queued(QueuedRun {
+            id,
+            request: ReviewRequest {
+                key: PrKey {
+                    repo: RepoName::parse(&repo)?,
+                    number,
+                },
+                profile,
+                head_sha,
+                base_sha,
+                trigger: ReviewTrigger::Requested,
+            },
+            revision: Some(Revision {
+                source_run: source,
+                session_id,
+                instruction: instruction.to_owned(),
+            }),
         }))
     }
 
@@ -275,7 +441,7 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
-                            status
+                            status, source_run, instruction
                      FROM runs WHERE {filter} AND session_id IS NOT NULL
                      ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1"
                 ),
@@ -285,13 +451,22 @@ impl Store {
                         queued_row(row)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(queued, session_id, status)| {
+        row.map(|(queued, session_id, status, source_run, instruction)| {
+            let mut run = queued_run(queued)?;
+            // A regeneration's session lives where its source review ran.
+            run.revision = source_run.map(|source_run| Revision {
+                source_run,
+                session_id: session_id.clone(),
+                instruction: instruction.unwrap_or_default(),
+            });
             Ok(SessionRun {
-                run: queued_run(queued)?,
+                run,
                 session_id,
                 status,
             })
@@ -299,14 +474,14 @@ impl Store {
         .transpose()
     }
 
-    /// PRs with a review running, by repo and number.
+    /// PRs with a review or regeneration running, by repo and number.
     pub fn running_reviews(&self) -> Result<Vec<PrKey>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT repo, number FROM runs
-             WHERE status = 'running' AND kind = ?1 ORDER BY repo, number",
+             WHERE status = 'running' AND kind IN (?1, ?2) ORDER BY repo, number",
         )?;
         let rows = stmt
-            .query_map([REVIEW], |row| {
+            .query_map([REVIEW, RunKind::Regenerate.as_str()], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -366,6 +541,16 @@ impl Store {
                        AND (newer.queued_at, newer.id) > (runs.queued_at, runs.id))"
             ),
             [],
+        )?;
+        // A regeneration is started by hand, so one a previous process
+        // didn't finish isn't started again unasked.
+        tx.execute(
+            &format!(
+                "UPDATE runs SET status = 'failed', finished_at = {NOW},
+                     error = 'interrupted when serve stopped; regenerate again'
+                 WHERE kind = ?1 AND status IN ('queued', 'running')"
+            ),
+            [RunKind::Regenerate.as_str()],
         )?;
         tx.execute(
             "UPDATE runs SET status = 'queued', started_at = NULL WHERE status = 'running'",
@@ -435,7 +620,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT status, error, suggested_verdict, session_id, transcript_path
+                "SELECT status, error, suggested_verdict, session_id, transcript_path,
+                        source_run, instruction
                  FROM runs WHERE id = ?1",
                 [id],
                 |row| {
@@ -445,6 +631,8 @@ impl Store {
                         suggested_verdict: row.get(2)?,
                         session_id: row.get(3)?,
                         transcript_path: row.get(4)?,
+                        source_run: row.get(5)?,
+                        instruction: row.get(6)?,
                     })
                 },
             )
@@ -564,6 +752,7 @@ fn queued_run(
 ) -> Result<QueuedRun> {
     Ok(QueuedRun {
         id,
+        revision: None,
         request: ReviewRequest {
             key: PrKey {
                 repo: RepoName::parse(&repo)?,
@@ -852,6 +1041,135 @@ mod tests {
         assert_eq!(found.status, "succeeded");
         assert_eq!(store.session_run(first.id).unwrap().unwrap().run, first);
         assert_eq!(store.session_run(second.id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_review_is_regenerated_as_a_new_run_of_the_same_head() {
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        // No session until it has run.
+        assert_eq!(
+            store.queue_regeneration(source.id, "x", |_| false).unwrap(),
+            Regeneration::Refused(Refusal::NoSession)
+        );
+        store.claim_run(source.id).unwrap();
+        store.finish_review(source.id, &result()).unwrap();
+
+        let Regeneration::Queued(run) = store
+            .queue_regeneration(source.id, "be terser", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_ne!(run.id, source.id);
+        assert_eq!(run.request.head_sha, "h1");
+        assert_eq!(
+            run.revision,
+            Some(Revision {
+                source_run: source.id,
+                session_id: "sess".into(),
+                instruction: "be terser".into(),
+            })
+        );
+        let record = store.run(run.id).unwrap().unwrap();
+        assert_eq!(record.source_run, Some(source.id));
+        assert_eq!(record.instruction.as_deref(), Some("be terser"));
+        // One at a time.
+        assert_eq!(
+            store
+                .queue_regeneration(source.id, "again", |_| false)
+                .unwrap(),
+            Regeneration::Refused(Refusal::Underway { run: run.id })
+        );
+        store.claim_run(run.id).unwrap();
+        store.fail_run(run.id, "x").unwrap();
+        assert!(matches!(
+            store
+                .queue_regeneration(source.id, "again", |_| false)
+                .unwrap(),
+            Regeneration::Queued(_)
+        ));
+
+        // The PR moved on: regenerate reviews the old head, so it's refused.
+        let mut moved = snapshot();
+        moved.head_sha = "h2".into();
+        store.record(&moved, "default", &[]).unwrap();
+        let refused = store.queue_regeneration(source.id, "x", |_| false).unwrap();
+        assert_eq!(
+            refused,
+            Regeneration::Refused(Refusal::HeadMoved {
+                run_head: "h1".into(),
+                pr_head: "h2".into(),
+            })
+        );
+        let Regeneration::Refused(why) = refused else {
+            unreachable!()
+        };
+        assert!(
+            why.to_string().contains("start a fresh review instead"),
+            "{why}"
+        );
+        assert_eq!(
+            store.queue_regeneration(999, "x", |_| false).unwrap(),
+            Regeneration::Refused(Refusal::NoSuchRun)
+        );
+    }
+
+    #[test]
+    fn a_regeneration_is_revised_in_its_reviews_worktree() {
+        let mut store = store();
+        let review = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(review.id).unwrap();
+        store.finish_review(review.id, &result()).unwrap();
+        let Regeneration::Queued(first) =
+            store.queue_regeneration(review.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        store.claim_run(first.id).unwrap();
+        let revised = ReviewResult {
+            session_id: Some("sess-2".into()),
+            ..result()
+        };
+        store.finish_review(first.id, &revised).unwrap();
+        // A chat with it resumes where the review ran.
+        let session = store.session_run(first.id).unwrap().unwrap();
+        assert_eq!(session.run.revision.unwrap().source_run, review.id);
+
+        let mut checked = None;
+        let Regeneration::Queued(second) = store
+            .queue_regeneration(first.id, "y", |id| {
+                checked = Some(id);
+                false
+            })
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_eq!(checked, Some(review.id));
+        let revision = second.revision.unwrap();
+        assert_eq!(revision.source_run, review.id);
+        assert_eq!(revision.session_id, "sess-2");
+        assert_eq!(
+            store.queue_regeneration(review.id, "z", |_| true).unwrap(),
+            Regeneration::Refused(Refusal::WorktreeInUse)
+        );
+    }
+
+    #[test]
+    fn unfinished_regenerations_fail_on_restart() {
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        store.finish_review(source.id, &result()).unwrap();
+        let Regeneration::Queued(run) =
+            store.queue_regeneration(source.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        store.claim_run(run.id).unwrap();
+        assert!(store.recover_runs().unwrap().is_empty());
+        assert_eq!(status(&store, run.id), "failed");
     }
 
     #[test]

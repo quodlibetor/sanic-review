@@ -39,7 +39,7 @@ use color_eyre::eyre::{self, Result, WrapErr};
 use sanic_core::{clock::Clock, pr::PrKey, repo::RepoName, skip::SkipRules};
 use sanic_github::Client;
 use sanic_runner::review::RunSettings;
-use sanic_store::Store;
+use sanic_store::{Refusal, Store};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -62,6 +62,12 @@ pub trait Control: Send + Sync {
     /// What a run under `profile` would use now, as the config stands, for
     /// the command that chats with a review's agent.
     fn run_settings(&self, profile: &str) -> Result<RunSettings>;
+
+    /// Revises run `run_id`'s review with `instruction`: a new `regenerate`
+    /// run resumes its agent session, and its drafts are the new run's own.
+    /// It starts now, even under `--manual-reviews`. Returns the new run's
+    /// id, or why it can't; [`Refusal`] says why in words.
+    fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>>;
 }
 
 /// Everything the dashboard reads and acts through.

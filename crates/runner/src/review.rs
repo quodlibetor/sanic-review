@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use color_eyre::eyre::{Result, WrapErr};
+use color_eyre::eyre::{Result, WrapErr, bail};
 use sanic_core::{
     config::{Profile, RunnerSettings},
     run::{DraftComment, PrContext, QueuedRun, ReviewOutput, ReviewResult},
@@ -110,6 +110,15 @@ impl ReviewRunner {
             .await
             .wrap_err_with(|| format!("creating {}", run_dir.display()))?;
         let dest = self.worktree_path(run);
+        // Checking out removes whatever is there, and a chat may have opened
+        // the source review's worktree since the regeneration was queued.
+        if run.revision.is_some() && dest.exists() {
+            bail!(
+                "{} is in use, most likely by a chat with the review's agent; end that and \
+                 regenerate again",
+                dest.display()
+            );
+        }
         let worktree = self
             .mirrors
             .checkout(
@@ -140,8 +149,13 @@ impl ReviewRunner {
             .await;
     }
 
-    fn worktree_path(&self, run: &QueuedRun) -> PathBuf {
-        chat::worktree_path(&self.data_dir, run.id)
+    /// Where `run` checks out, for its review or a chat. A revision uses its
+    /// source run's path: Claude Code finds the session it resumes by
+    /// directory.
+    #[must_use]
+    pub fn worktree_path(&self, run: &QueuedRun) -> PathBuf {
+        let id = run.revision.as_ref().map_or(run.id, |r| r.source_run);
+        chat::worktree_path(&self.data_dir, id)
     }
 
     /// Checks `run`'s head out again where the review ran, for a chat that
@@ -183,7 +197,13 @@ impl ReviewRunner {
     /// as a chat should get them again: its run dir, skills and the
     /// reference checkouts that exist.
     fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
-        std::iter::once(self.data_dir.join("runs").join(run.id.to_string()))
+        let runs = self.data_dir.join("runs");
+        std::iter::once(runs.join(run.id.to_string()))
+            .chain(
+                run.revision
+                    .as_ref()
+                    .map(|r| runs.join(r.source_run.to_string())),
+            )
             .chain(settings.profile.skills.iter().cloned())
             .chain(
                 existing_dirs(&settings.reference_dirs)
@@ -216,13 +236,22 @@ impl ReviewRunner {
         let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
-        let brief = prompt::brief(&run.request, ctx, &diff, &diff_path);
+        let brief = match &run.revision {
+            Some(revision) => prompt::revision(&revision.instruction),
+            None => prompt::brief(&run.request, ctx, &diff, &diff_path),
+        };
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
 
         // The run dir holds the diff; skills and reference checkouts are
         // read in place.
+        // A revision's session knows the source run's dir by path.
+        let source_dir = run
+            .revision
+            .as_ref()
+            .map(|r| run_dir.with_file_name(r.source_run.to_string()));
         let add_dirs: Vec<PathBuf> = std::iter::once(run_dir.to_owned())
+            .chain(source_dir)
             .chain(profile.skills.iter().cloned())
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
@@ -238,6 +267,7 @@ impl ReviewRunner {
                 model: profile.model.as_deref(),
                 transcript: &transcript,
                 stderr: &run_dir.join("stderr.log"),
+                resume: run.revision.as_ref().map(|r| r.session_id.as_str()),
             })
             .await?;
         let output: ReviewOutput = serde_json::from_value(outcome.output)

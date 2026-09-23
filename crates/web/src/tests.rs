@@ -62,6 +62,14 @@ impl Control for FakeServe {
         Ok(true)
     }
 
+    fn regenerate(
+        &self,
+        _run_id: i64,
+        _instruction: &str,
+    ) -> color_eyre::Result<Result<i64, sanic_store::Refusal>> {
+        Ok(Err(sanic_store::Refusal::NoSession))
+    }
+
     fn run_settings(&self, profile: &str) -> color_eyre::Result<RunSettings> {
         let config = config();
         let profile = config

@@ -30,7 +30,7 @@ use sanic_core::{
 };
 use sanic_github::{ApiError, Client, Token};
 use sanic_runner::{review::RunSettings, vcs::VcsResolver};
-use sanic_store::Store;
+use sanic_store::{Refusal, Regeneration, Store};
 use sanic_web::Dashboard;
 use tokio::{
     sync::{mpsc, watch},
@@ -109,6 +109,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let live = Live::new(&config);
     let control = DashboardControl {
         requests: requests.clone(),
+        store: Arc::clone(&run_store),
+        started: started.clone(),
+        data_dir: data_dir.clone(),
         config_path: config_path.clone(),
         worker: Arc::clone(&worker),
     };
@@ -278,6 +281,11 @@ impl Live {
 /// run settings its chat commands are built from.
 struct DashboardControl {
     requests: mpsc::UnboundedSender<Request>,
+    /// For regenerations, which start at once and return their run.
+    store: Arc<Mutex<Store>>,
+    /// Straight to the worker, past any `--manual-reviews` hold.
+    started: mpsc::UnboundedSender<QueuedRun>,
+    data_dir: PathBuf,
     /// Edited in place; the watcher reloads it.
     config_path: PathBuf,
     /// Holds the run settings as the config last loaded.
@@ -296,6 +304,46 @@ impl sanic_web::Control for DashboardControl {
 
     fn run_settings(&self, profile: &str) -> Result<RunSettings> {
         self.worker.run_settings(profile)
+    }
+
+    fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>> {
+        regenerate(
+            &self.store,
+            &self.data_dir,
+            &self.started,
+            run_id,
+            instruction,
+        )
+    }
+}
+
+/// Queues a regeneration of run `source` and starts it, past any
+/// `--manual-reviews` hold, or says why not.
+fn regenerate(
+    store: &Mutex<Store>,
+    data_dir: &Path,
+    started: &mpsc::UnboundedSender<QueuedRun>,
+    source: i64,
+    instruction: &str,
+) -> Result<Result<i64, Refusal>> {
+    let queued = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .queue_regeneration(source, instruction, |review| {
+            sanic_runner::chat::worktree_path(data_dir, review).exists()
+        })?;
+    match queued {
+        Regeneration::Queued(run) => {
+            let id = run.id;
+            info!(url = %run.request.key.url(), run = id, source_run = source, "regenerating a review");
+            // Only fails once `serve` is stopping.
+            let _ = started.send(run);
+            Ok(Ok(id))
+        }
+        Regeneration::Refused(why) => {
+            info!(source_run = source, "not regenerated: {why}");
+            Ok(Err(why))
+        }
     }
 }
 
@@ -869,6 +917,9 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let control = DashboardControl {
             requests: mpsc::unbounded_channel().0,
+            store: Arc::clone(&store),
+            started: mpsc::unbounded_channel().0,
+            data_dir: dir.path().to_owned(),
             config_path: config_path.clone(),
             worker: Arc::new(Worker::new(dir.path(), store, &config)),
         };
@@ -881,6 +932,46 @@ mod tests {
              skip_titles = [\"wip*\"]\n\n[review_requests]\nskip_titles = [\"build(deps)*\"]\n"
         );
         assert!(control.add_skip_title("x*", Some("nope")).is_err());
+    }
+
+    #[test]
+    fn regenerating_starts_the_new_run_past_any_hold() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let source = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        store.claim_run(source.id).unwrap();
+        let result = sanic_core::run::ReviewResult {
+            summary: "s".into(),
+            verdict: sanic_core::run::Verdict::None,
+            comments: vec![],
+            session_id: Some("sess".into()),
+            transcript_path: "t".into(),
+        };
+        store.finish_review(source.id, &result).unwrap();
+        let store = Mutex::new(store);
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+
+        let id = regenerate(&store, dir.path(), &started, source.id, "be terser")
+            .unwrap()
+            .unwrap();
+        let run = started_rx.try_recv().unwrap();
+        assert_eq!(run.id, id);
+        assert_eq!(run.revision.unwrap().instruction, "be terser");
+        // Refusals come back as such, with nothing started.
+        assert_eq!(
+            regenerate(&store, dir.path(), &started, source.id, "again").unwrap(),
+            Err(Refusal::Underway { run: id })
+        );
+        std::fs::create_dir_all(sanic_runner::chat::worktree_path(dir.path(), source.id)).unwrap();
+        assert_eq!(
+            regenerate(&store, dir.path(), &started, source.id, "again").unwrap(),
+            Err(Refusal::WorktreeInUse)
+        );
+        assert!(started_rx.try_recv().is_err());
     }
 
     #[test]
