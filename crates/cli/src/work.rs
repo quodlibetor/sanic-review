@@ -141,7 +141,7 @@ impl Worker {
         }
     }
 
-    fn run_settings(&self, profile: &str) -> Result<RunSettings> {
+    pub fn run_settings(&self, profile: &str) -> Result<RunSettings> {
         let settings = self.settings.read().unwrap_or_else(PoisonError::into_inner);
         let agent = settings
             .profiles

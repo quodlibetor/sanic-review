@@ -183,6 +183,13 @@
         go("/?archived=" + !shown);
         break;
       }
+      case "c": {
+        const target = subject();
+        const href = target && target.dataset.chat;
+        if (href) go(href);
+        else say("c chats with the agent that reviewed the selected PR");
+        break;
+      }
       case "i": {
         const target = subject();
         const href = target && target.dataset.ignore;
@@ -197,6 +204,24 @@
   }
 
   document.addEventListener("keydown", onKey);
+  // Copy buttons put their command on the clipboard.
+  document.addEventListener("click", function (e) {
+    const button = e.target.closest("button[data-copy]");
+    if (!button) return;
+    const source = document.querySelector(button.dataset.copy);
+    if (!source || !navigator.clipboard) {
+      say("Select the command and copy it");
+      return;
+    }
+    navigator.clipboard.writeText(source.textContent.trim()).then(
+      function () {
+        say("Copied");
+      },
+      function () {
+        say("Couldn't copy; select the command and copy it");
+      }
+    );
+  });
   // Back and forward can bring a page back with its approval box ticked;
   // it's ticked afresh each time.
   window.addEventListener("pageshow", function () {

@@ -9,6 +9,7 @@
 //! you've seen the exact payload and pressed Confirm.
 
 mod assets;
+mod chat;
 mod diff;
 mod guard;
 mod ignore;
@@ -37,6 +38,7 @@ use axum::{
 use color_eyre::eyre::{self, Result, WrapErr};
 use sanic_core::{clock::Clock, pr::PrKey, repo::RepoName, skip::SkipRules};
 use sanic_github::Client;
+use sanic_runner::review::RunSettings;
 use sanic_store::Store;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -56,6 +58,10 @@ pub trait Control: Send + Sync {
     /// TUI's ignore editor does; `serve` picks it up by reloading. `false`
     /// if it's already there.
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool>;
+
+    /// What a run under `profile` would use now, as the config stands, for
+    /// the command that chats with a review's agent.
+    fn run_settings(&self, profile: &str) -> Result<RunSettings>;
 }
 
 /// Everything the dashboard reads and acts through.
@@ -66,6 +72,8 @@ pub struct Context {
     pub manual_reviews: bool,
     /// Where runs keep their files, under `runs/<id>/`.
     pub data_dir: PathBuf,
+    /// `serve`'s config file, for the commands the dashboard shows.
+    pub config_path: PathBuf,
     /// The dashboard's own connection; it edits drafts and records views.
     pub store: Store,
     /// Posts reviews, and nothing else.
@@ -84,6 +92,7 @@ struct App {
     me: String,
     manual_reviews: bool,
     data_dir: PathBuf,
+    config_path: PathBuf,
     store: Mutex<Store>,
     github: Client,
     control: Arc<dyn Control>,
@@ -118,6 +127,7 @@ impl Dashboard {
             me,
             manual_reviews,
             data_dir,
+            config_path,
             store,
             github,
             control,
@@ -131,6 +141,7 @@ impl Dashboard {
                 me,
                 manual_reviews,
                 data_dir,
+                config_path,
                 store: Mutex::new(store),
                 github,
                 control,

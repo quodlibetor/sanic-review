@@ -25,6 +25,7 @@ use sanic_core::{
     skip::SkipRules,
 };
 use sanic_github::{Client, Token};
+use sanic_runner::review::{AgentProfile, RunSettings};
 use sanic_store::Store;
 use serde_json::json;
 use tempfile::TempDir;
@@ -59,6 +60,21 @@ impl Control for FakeServe {
         }
         skipped.push(entry);
         Ok(true)
+    }
+
+    fn run_settings(&self, profile: &str) -> color_eyre::Result<RunSettings> {
+        let config = config();
+        let profile = config
+            .profiles
+            .iter()
+            .find(|p| p.name == profile)
+            .ok_or_else(|| color_eyre::eyre::eyre!("no profile `{profile}`"))?;
+        Ok(RunSettings::new(
+            AgentProfile::from(profile),
+            &config.runner,
+            &config.github.git_url,
+            vec![],
+        ))
     }
 }
 
@@ -137,7 +153,7 @@ struct Fixture {
     /// unanchored one, in that order.
     run: i64,
     drafts: [i64; 3],
-    _data: TempDir,
+    data: TempDir,
 }
 
 /// A store with: PR 7 you owe, reviewed; PR 8 you owe, whose review failed;
@@ -180,7 +196,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
                         true,
                     ),
                 ],
-                session_id: None,
+                session_id: Some("sess-7".into()),
                 transcript_path: "t".into(),
             },
         )
@@ -209,6 +225,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         me: "me".into(),
         manual_reviews,
         data_dir: data.path().to_owned(),
+        config_path: "/config/sanic review.toml".into(),
         store,
         github: Client::new(&github.uri(), Token::new("t0ken".into())).unwrap(),
         control: Arc::clone(&serve) as Arc<dyn Control>,
@@ -225,7 +242,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         due,
         run,
         drafts: [ids[0], ids[1], ids[2]],
-        _data: data,
+        data,
     }
 }
 
@@ -243,17 +260,23 @@ impl CheckoutResolver for NoCheckouts {
 }
 
 /// Skip rules from a config with two profiles and the default draft skip.
-fn skip_rules() -> SkipRules {
+fn config() -> Config {
     let text = r#"
+[runner]
+claude = "/opt/my claude"
+
 [profile.default]
 repos = [{ github = "org" }]
+skills = ["/skills/review"]
 
 [profile.vuln]
 repos = [{ github = "sec" }]
 "#;
-    Config::parse(text, std::path::Path::new("/"), &NoCheckouts)
-        .unwrap()
-        .skip_rules()
+    Config::parse(text, std::path::Path::new("/"), &NoCheckouts).unwrap()
+}
+
+fn skip_rules() -> SkipRules {
+    config().skip_rules()
 }
 
 struct Reply {
@@ -349,9 +372,18 @@ fn hidden_value(html: &str, name: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// `html` with a line per tag and the random token masked, for snapshots.
+/// `html` with a line per tag and the random token and data dir masked, for
+/// snapshots.
 fn readable(fixture: &Fixture, html: &str) -> String {
     html.replace(&fixture.token(), "<token>")
+        // Not `<data>`: the tag split below would put a newline in the
+        // command it ends.
+        .replace(&fixture.data.path().display().to_string(), "$DATA")
+        // The chat commands run the binary serve is: here, the test's.
+        .replace(
+            &sanic_runner::chat::quote(&std::env::current_exe().unwrap().display().to_string()),
+            "$EXE",
+        )
         .replace("><", ">\n<")
 }
 
@@ -1071,4 +1103,57 @@ async fn pages_set_a_same_origin_referrer_policy() {
     let f = fixture(false).await;
     let reply = f.get("/").await;
     assert_eq!(reply.headers[header::REFERRER_POLICY], "same-origin");
+}
+
+#[tokio::test]
+async fn the_pr_page_shows_how_to_chat_with_the_reviewer() {
+    let f = fixture(false).await;
+    let page = f.get("/pr/org/repo/7").await.body;
+    let chat = &page[page.find(r#"<section id="chat">"#).unwrap()..];
+    let chat = &chat[..chat.find("</section>").unwrap() + "</section>".len()];
+    insta::assert_snapshot!(readable(&f, chat));
+    // Nothing ran: the worktree is only named, never made.
+    assert!(!f.data.path().join("worktrees").exists());
+    // PR 8's review failed before a session, so there's nothing to chat with.
+    assert!(!f.get("/pr/org/repo/8").await.body.contains(r#"id="chat""#));
+}
+
+#[tokio::test]
+async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
+    let f = fixture(false).await;
+    let run = {
+        let mut store = f.dashboard.app.store();
+        let run = store
+            .queue_review(&ReviewRequest {
+                key: key(9),
+                profile: "gone".into(),
+                head_sha: "head9".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap()
+            .id;
+        store.claim_run(run).unwrap();
+        store
+            .finish_review(
+                run,
+                &ReviewResult {
+                    summary: "Fine.".into(),
+                    verdict: Verdict::Comment,
+                    comments: vec![],
+                    session_id: Some("sess-9".into()),
+                    transcript_path: "t".into(),
+                },
+            )
+            .unwrap();
+        run
+    };
+    let page = f.get("/pr/org/repo/9").await.body;
+    assert!(
+        page.contains(&format!("Can't chat with run {run}: no profile `gone`")),
+        "{page}"
+    );
+    // `sanic-review chat` would refuse too, so there's nothing to copy.
+    assert!(!page.contains("data-copy"), "{page}");
 }

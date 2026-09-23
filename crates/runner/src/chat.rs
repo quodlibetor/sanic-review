@@ -92,7 +92,8 @@ impl ChatCommand {
 }
 
 /// `word` as a single POSIX shell word.
-fn quote(word: &str) -> String {
+#[must_use]
+pub fn quote(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .chars()

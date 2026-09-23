@@ -124,6 +124,12 @@ This file isn't in the diff.</pre>
 </tr>
 <tr>
 <th>
+<kbd>c</kbd>
+</th>
+<td>chat with the agent that reviewed it: shows the command</td>
+</tr>
+<tr>
+<th>
 <kbd>?, Esc</kbd>
 </th>
 <td>show, close this help</td>
