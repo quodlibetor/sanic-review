@@ -20,7 +20,10 @@ use tokio::process::Command;
 
 pub struct Mirrors {
     root: PathBuf,
-    /// Fetches and worktree changes to one mirror run one at a time.
+    /// Checkouts (the fetch and `worktree add`) into one mirror run one at a
+    /// time. [`Worktree::remove`] doesn't take this lock, so a removal can
+    /// run alongside another run's checkout; `worktree add` locks its new
+    /// entry while creating it, so the removal's `worktree prune` skips it.
     locks: Mutex<HashMap<RepoName, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -161,7 +164,7 @@ impl Worktree {
     }
 
     /// Removes the worktree, best effort: a later checkout at the same path
-    /// clears whatever is left.
+    /// clears whatever is left. Doesn't take the mirror's checkout lock.
     pub async fn remove(self) {
         remove_worktree(&self.mirror, &self.path).await;
     }
