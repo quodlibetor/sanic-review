@@ -251,7 +251,10 @@ Rules:
   refreshes each PR after starting (the first reconcile covers every open
   one), a standing review request on someone else's PR that matches a
   profile goes to the scheduler like a new one. The idempotency rule then
-  skips any head that already has a queued, running or succeeded run. A
+  skips any head that already has a queued, running or succeeded run.
+  Such a head isn't debounced at all, so a review held by
+  `--manual-reviews` still shows as held after a restart rather than as
+  waiting. A
   reloaded `quiet_secs` applies from the next trigger on.
 - **Skips.** These PRs are never reviewed automatically:
   - archived ones (see Archive);

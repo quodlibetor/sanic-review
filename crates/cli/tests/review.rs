@@ -336,7 +336,7 @@ async fn a_request_debounced_across_a_restart_is_still_reviewed() {
     w.serve_until("drafted").await;
 
     // Once reviewed, another restart doesn't review the same head again.
-    w.serve_until("already reviewed").await;
+    w.serve_until("already has a review").await;
     assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
 }
 
