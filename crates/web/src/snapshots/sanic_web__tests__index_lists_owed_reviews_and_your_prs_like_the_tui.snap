@@ -1,0 +1,178 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &page.body)"
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
+<title>Dashboard · sanic-review</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer>
+</script>
+<script src="/assets/app.js" defer>
+</script>
+</head>
+<body data-page="index" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
+<header class="top">
+<a class="home" href="/">sanic-review</a>
+<span class="hint">? keys</span>
+</header>
+<main>
+<p class="status-line">0 queued · 0 running · 3 pending drafts</p>
+<div id="panes" hx-get="/?archived=false" hx-trigger="every 5s" hx-select="#panes" hx-swap="outerHTML" data-show-archived="false">
+<section class="pane" id="owed">
+<h2>Reviews you owe (3)</h2>
+<ol class="rows">
+<li class="row" data-href="/pr/org/repo/7">
+<span class="status ok">drafted</span>
+<span class="drafts">3 drafts</span>
+<span class="unseen" title="a review you haven't looked at yet">new</span>
+<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a>
+<a class="title" href="/pr/org/repo/7">Add the thing</a>
+<span class="author dim">(alice)</span>
+<span class="actions">
+<form class="archive" method="post" action="/pr/org/repo/7/archive">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="archived" value="true">
+<input type="hidden" name="next" value="index">
+<button type="submit">Archive</button>
+</form>
+</span>
+</li>
+<li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now">
+<span class="status bad">failed</span>
+<span class="drafts">
+</span>
+<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a>
+<a class="title" href="/pr/org/repo/8">Fix &lt;script&gt; escaping</a>
+<span class="author dim">(bob)</span>
+<span class="actions">
+<a class="button" href="/pr/org/repo/8/review-now">Review now</a>
+<form class="archive" method="post" action="/pr/org/repo/8/archive">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="archived" value="true">
+<input type="hidden" name="next" value="index">
+<button type="submit">Archive</button>
+</form>
+</span>
+<div class="error">claude exited with 1</div>
+</li>
+<li class="row" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now">
+<span class="status dim">skipped: draft</span>
+<span class="drafts">
+</span>
+<a class="gh" href="https://github.com/org/repo/pull/10">https://github.com/org/repo/pull/10</a>
+<a class="title" href="/pr/org/repo/10">WIP: try things</a>
+<span class="author dim">(carol)</span>
+<span class="actions">
+<a class="button" href="/pr/org/repo/10/review-now">Review now</a>
+<form class="archive" method="post" action="/pr/org/repo/10/archive">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="archived" value="true">
+<input type="hidden" name="next" value="index">
+<button type="submit">Archive</button>
+</form>
+</span>
+</li>
+</ol>
+</section>
+<section class="pane" id="mine">
+<h2>Your PRs (1)</h2>
+<ol class="rows">
+<li class="row" data-href="/pr/org/repo/9">
+<span class="status dim">waiting</span>
+<span class="drafts">
+</span>
+<a class="gh" href="https://github.com/org/repo/pull/9">https://github.com/org/repo/pull/9</a>
+<a class="title" href="/pr/org/repo/9">My change</a>
+<span class="actions">
+<form class="archive" method="post" action="/pr/org/repo/9/archive">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="archived" value="true">
+<input type="hidden" name="next" value="index">
+<button type="submit">Archive</button>
+</form>
+</span>
+</li>
+</ol>
+</section>
+<p class="toggle">
+<a id="toggle-archived" href="/?archived=true">Show archived PRs</a>
+</p>
+</div>
+</main>
+<div class="overlay" id="help" hidden>
+<div class="popup">
+<h2>Keys</h2>
+<table>
+<tr>
+<th>
+<kbd>q</kbd>
+</th>
+<td>close this help; otherwise back to the index</td>
+</tr>
+<tr>
+<th>
+<kbd>Tab, Shift-Tab</kbd>
+</th>
+<td>next, previous list</td>
+</tr>
+<tr>
+<th>
+<kbd>j/k, Down/Up</kbd>
+</th>
+<td>move in the list</td>
+</tr>
+<tr>
+<th>
+<kbd>g/G, Home/End</kbd>
+</th>
+<td>first, last row</td>
+</tr>
+<tr>
+<th>
+<kbd>Enter</kbd>
+</th>
+<td>open the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>r</kbd>
+</th>
+<td>review now: failed, held or skipped (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>archive or unarchive the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>A</kbd>
+</th>
+<td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>i</kbd>
+</th>
+<td>skip PRs by title: use i in the TUI for now</td>
+</tr>
+<tr>
+<th>
+<kbd>?, Esc</kbd>
+</th>
+<td>show, close this help</td>
+</tr>
+</table>
+<p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div id="notice" hidden>
+</div>
+</body>
+</html>

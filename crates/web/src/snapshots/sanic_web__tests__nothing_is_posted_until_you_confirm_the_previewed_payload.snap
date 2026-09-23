@@ -1,0 +1,138 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &preview.body)"
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
+<title>Submit review · sanic-review</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer>
+</script>
+<script src="/assets/app.js" defer>
+</script>
+</head>
+<body data-page="confirm" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
+<header class="top">
+<a class="home" href="/">sanic-review</a>
+<span class="hint">? keys</span>
+</header>
+<main>
+<h1>Submit review</h1>
+<p class="meta">
+<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> · Add the thing</p>
+<p class="verdict">Verdict: <strong>REQUEST_CHANGES</strong>
+</p>
+<p class="warn">Accepted comments that aren't on a line of the diff are in the body instead of inline: 1.</p>
+<h2>Body</h2>
+<pre class="body">Mostly fine; see inline.
+
+**src/gone.rs:40**
+
+This file isn't in the diff.</pre>
+<h2>Inline comments (1)</h2>
+<div class="comment">
+<code>src/lib.rs:3 RIGHT</code>
+<pre>Why `m`?</pre>
+</div>
+<h2>Exactly what's sent</h2>
+<p>
+<code>POST /repos/org/repo/pulls/7/reviews</code> at commit <code>head7</code>
+</p>
+<pre id="payload">{
+  &quot;commit_id&quot;: &quot;head7&quot;,
+  &quot;body&quot;: &quot;Mostly fine; see inline.\n\n**src/gone.rs:40**\n\nThis file isn't in the diff.&quot;,
+  &quot;event&quot;: &quot;REQUEST_CHANGES&quot;,
+  &quot;comments&quot;: [
+    {
+      &quot;path&quot;: &quot;src/lib.rs&quot;,
+      &quot;body&quot;: &quot;Why `m`?&quot;,
+      &quot;line&quot;: 3,
+      &quot;side&quot;: &quot;RIGHT&quot;
+    }
+  ]
+}</pre>
+<form id="confirm" method="post" action="/pr/org/repo/7/runs/1/submit">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="event" value="REQUEST_CHANGES">
+<input type="hidden" name="payload" value="{&quot;commit_id&quot;:&quot;head7&quot;,&quot;body&quot;:&quot;Mostly fine; see inline.\n\n**src/gone.rs:40**\n\nThis file isn't in the diff.&quot;,&quot;event&quot;:&quot;REQUEST_CHANGES&quot;,&quot;comments&quot;:[{&quot;path&quot;:&quot;src/lib.rs&quot;,&quot;body&quot;:&quot;Why `m`?&quot;,&quot;line&quot;:3,&quot;side&quot;:&quot;RIGHT&quot;}]}">
+<button type="submit">
+<kbd>y</kbd> Confirm and post to GitHub</button> <a id="cancel" href="/pr/org/repo/7?run=1">
+<kbd>Esc</kbd> Back to the drafts</a>
+</form>
+</main>
+<div class="overlay" id="help" hidden>
+<div class="popup">
+<h2>Keys</h2>
+<table>
+<tr>
+<th>
+<kbd>q</kbd>
+</th>
+<td>close this help; otherwise back to the index</td>
+</tr>
+<tr>
+<th>
+<kbd>Tab, Shift-Tab</kbd>
+</th>
+<td>next, previous list</td>
+</tr>
+<tr>
+<th>
+<kbd>j/k, Down/Up</kbd>
+</th>
+<td>move in the list</td>
+</tr>
+<tr>
+<th>
+<kbd>g/G, Home/End</kbd>
+</th>
+<td>first, last row</td>
+</tr>
+<tr>
+<th>
+<kbd>Enter</kbd>
+</th>
+<td>open the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>r</kbd>
+</th>
+<td>review now: failed, held or skipped (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>archive or unarchive the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>A</kbd>
+</th>
+<td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>i</kbd>
+</th>
+<td>skip PRs by title: use i in the TUI for now</td>
+</tr>
+<tr>
+<th>
+<kbd>?, Esc</kbd>
+</th>
+<td>show, close this help</td>
+</tr>
+</table>
+<p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div id="notice" hidden>
+</div>
+</body>
+</html>
