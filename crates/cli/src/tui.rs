@@ -30,7 +30,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
-use sanic_core::pr::PrKey;
+use sanic_core::{
+    pr::PrKey,
+    skip::{Skip, SkipRules},
+};
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
@@ -129,6 +132,8 @@ pub struct Shared {
     pub logs: LogLines,
     /// When the scheduler will queue each debounced review.
     pub due: watch::Receiver<DueTimes>,
+    /// Which PRs aren't reviewed automatically; follows config reloads.
+    pub skips: watch::Receiver<SkipRules>,
     /// Confirmed reruns.
     pub reruns: mpsc::UnboundedSender<PrKey>,
 }
@@ -190,6 +195,8 @@ pub struct Overview {
     pub counts: RunCounts,
     /// How long until each debounced review is queued.
     pub waiting: HashMap<PrKey, Duration>,
+    /// Owed reviews that aren't reviewed automatically, and why.
+    pub skipped: HashMap<PrKey, Skip>,
 }
 
 impl Overview {
@@ -201,8 +208,17 @@ impl Overview {
             .iter()
             .map(|(key, due)| (key.clone(), due.saturating_duration_since(now)))
             .collect();
+        let owed = store.owed_reviews(&shared.me)?;
+        let skips = shared.skips.borrow();
+        let skipped = owed
+            .iter()
+            .filter_map(|pr| Some((pr.key.clone(), skips.check(&pr.profile, &pr.title)?)))
+            .collect();
+        // Not held through the queries below: it blocks a config reload.
+        drop(skips);
         Ok(Self {
-            owed: store.owed_reviews(&shared.me)?,
+            owed,
+            skipped,
             mine: store.my_prs(&shared.me)?,
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
@@ -425,7 +441,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let rows: Vec<_> = overview
         .owed
         .iter()
-        .map(|pr| owed_row(pr, overview.waiting.get(&pr.key).copied(), *no_reviews))
+        .map(|pr| owed_row(pr, overview, *no_reviews))
         .collect();
     let pane = Pane::Owed.frame(*focus, &format!("Reviews you owe ({})", rows.len()));
     pane.render(frame, owed, rows, owed_state, "No reviews requested.");
@@ -504,10 +520,15 @@ impl PaneFrame<'_> {
 /// keeps a label as long as the column off what follows it.
 const STATUS_WIDTH: usize = 15;
 
-fn owed_row(pr: &OwedReview, waiting: Option<Duration>, no_reviews: bool) -> ListItem<'_> {
+fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, no_reviews: bool) -> ListItem<'a> {
     let latest = pr.latest_run.as_ref();
-    // A review waiting out the quiet period is newer news than the last run.
+    let waiting = overview.waiting.get(&pr.key).copied();
+    // A skip says why nothing will happen; a review waiting out the quiet
+    // period is newer news than the last run.
     let (label, color) = match (waiting, latest.map(|run| run.status.as_str())) {
+        _ if let Some(skip) = overview.skipped.get(&pr.key) => {
+            (format!("skipped: {}", skip.label()), Color::DarkGray)
+        }
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
         (None, None) => ("waiting".into(), Color::DarkGray),
         (None, Some("queued")) if no_reviews => ("held".into(), Color::Yellow),
@@ -716,39 +737,38 @@ mod tests {
         }
     }
 
+    /// An owed review with no runs.
+    fn owed(repo: &str, number: u32, title: &str, author: &str) -> OwedReview {
+        OwedReview {
+            key: pr(repo, number),
+            title: title.into(),
+            author: author.into(),
+            profile: "default".into(),
+            latest_run: None,
+            pending_drafts: 0,
+        }
+    }
+
     fn overview() -> Overview {
         Overview {
             owed: vec![
                 OwedReview {
-                    key: pr("org/api", 481),
-                    title: "Retry webhook deliveries".into(),
-                    author: "alice".into(),
                     latest_run: Some(latest("succeeded", None)),
                     pending_drafts: 3,
+                    ..owed("org/api", 481, "Retry webhook deliveries", "alice")
                 },
+                owed("org/api", 490, "build(deps): bump tokio", "dependabot"),
                 OwedReview {
-                    key: pr("org/web", 77),
-                    title: "Fix login flake".into(),
-                    author: "bob".into(),
                     latest_run: Some(latest("queued", None)),
-                    pending_drafts: 0,
+                    ..owed("org/web", 77, "Fix login flake", "bob")
                 },
+                owed("org/web", 78, "Bump serde", "dana"),
                 OwedReview {
-                    key: pr("org/web", 78),
-                    title: "Bump serde".into(),
-                    author: "dana".into(),
-                    latest_run: None,
-                    pending_drafts: 0,
-                },
-                OwedReview {
-                    key: pr("org/web", 79),
-                    title: "Cache avatars".into(),
-                    author: "carol".into(),
                     latest_run: Some(latest(
                         "crashed",
                         Some("index out of bounds\nat src/lib.rs"),
                     )),
-                    pending_drafts: 0,
+                    ..owed("org/web", 79, "Cache avatars", "carol")
                 },
             ],
             mine: vec![
@@ -801,6 +821,12 @@ mod tests {
                 pending_drafts: 3,
             },
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
+            skipped: HashMap::from([(
+                pr("org/api", 490),
+                Skip::Title {
+                    pattern: "build(deps)*".into(),
+                },
+            )]),
         }
     }
 
@@ -834,7 +860,7 @@ mod tests {
 
     #[test]
     fn renders_at_80_columns() {
-        insta::assert_snapshot!(draw(&mut app(false), 80, 30).backend());
+        insta::assert_snapshot!(draw(&mut app(false), 80, 34).backend());
     }
 
     #[test]
@@ -859,10 +885,11 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
         // Stops at the last row.
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(3));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(4));
         press(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(2));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(3));
 
         press(&mut app, KeyCode::BackTab);
         assert_eq!(app.focus, Pane::Log);

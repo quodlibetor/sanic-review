@@ -20,6 +20,7 @@ use color_eyre::eyre::Result;
 use sanic_core::{
     pr::PrKey,
     run::{QueuedRun, ReviewRequest, ReviewTrigger},
+    skip::{Skip, SkipRules},
     trigger::Trigger,
 };
 use sanic_store::Store;
@@ -164,13 +165,15 @@ impl Debouncer {
 }
 
 /// Debounces `updates` and sends each run the store accepts to `runs`,
-/// publishing pending reviews' due times to `due`. Returns when `updates`
-/// closes.
+/// publishing pending reviews' due times to `due`. A PR `skips` rules out
+/// when its review comes due is logged and not queued. Returns when
+/// `updates` closes.
 pub async fn schedule(
     mut updates: mpsc::UnboundedReceiver<Update>,
     store: Arc<Mutex<Store>>,
     runs: mpsc::UnboundedSender<QueuedRun>,
     due: watch::Sender<DueTimes>,
+    skips: watch::Receiver<SkipRules>,
 ) -> Result<()> {
     let mut debouncer = Debouncer::default();
     loop {
@@ -183,10 +186,21 @@ pub async fn schedule(
             },
             () = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
                 for request in debouncer.take_due(Instant::now()) {
-                    let queued = store
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .queue_review(&request);
+                    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                    // Checked now rather than when the trigger arrived, so a
+                    // title edit or config reload in the meantime counts.
+                    match skip(&store, &skips.borrow(), &request.key) {
+                        Ok(Some(skip)) => {
+                            info!(url = %request.key.url(), "review skipped: {skip}");
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(err) => warn!(
+                            url = %request.key.url(),
+                            "checking whether to skip the review failed: {err:?}"
+                        ),
+                    }
+                    let queued = store.queue_review(&request);
                     match queued {
                         Ok(Some(run)) => {
                             info!(url = %request.key.url(), run = run.id, "review queued");
@@ -210,6 +224,13 @@ pub async fn schedule(
             }
         }
     }
+}
+
+/// Why `key` isn't reviewed automatically, if it isn't.
+fn skip(store: &Store, rules: &SkipRules, key: &PrKey) -> Result<Option<Skip>> {
+    Ok(store
+        .pr_summary(key)?
+        .and_then(|pr| rules.check(&pr.profile, &pr.title)))
 }
 
 #[cfg(test)]
@@ -383,7 +404,8 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let (runs_tx, mut runs) = mpsc::unbounded_channel();
         let (due_tx, due) = watch::channel(DueTimes::new());
-        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx));
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips));
         let start = Instant::now();
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -407,5 +429,50 @@ mod tests {
         drop(tx);
         task.await.unwrap().unwrap();
         assert!(runs.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skipped_prs_are_not_queued_and_reloads_count() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let skipping = |pattern: &str| {
+            let config = sanic_core::config::Config::parse(
+                &format!(
+                    "[review_requests]\nskip_titles = [\"{pattern}\"]\n\
+                     [profile.default]\nrepos = [{{ github = \"org\" }}]\n"
+                ),
+                std::path::Path::new("/"),
+                &NoCheckouts,
+            )
+            .unwrap();
+            config.skip_rules()
+        };
+        let (skips_tx, skips) = watch::channel(skipping("t*"));
+        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips));
+
+        // The stored title is "t".
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(runs.try_recv().is_err());
+
+        skips_tx.send_replace(skipping("other*"));
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        let run = runs.recv().await.unwrap();
+        assert_eq!(run.request.head_sha, "h2");
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    struct NoCheckouts;
+
+    impl sanic_core::config::CheckoutResolver for NoCheckouts {
+        fn resolve(
+            &self,
+            path: &std::path::Path,
+            _: Option<&str>,
+        ) -> color_eyre::eyre::Result<(sanic_core::config::Vcs, RepoName)> {
+            color_eyre::eyre::bail!("unexpected checkout {}", path.display())
+        }
     }
 }

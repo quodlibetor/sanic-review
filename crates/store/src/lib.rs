@@ -38,6 +38,13 @@ pub struct Store {
     conn: Connection,
 }
 
+/// A tracked PR's fields that decide whether it's reviewed automatically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrSummary {
+    pub profile: String,
+    pub title: String,
+}
+
 /// A logged trigger, as read back from the event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -212,6 +219,24 @@ impl Store {
             }
         }
         tx.commit().wrap_err("marking PRs closed")
+    }
+
+    /// What decides whether `key` is reviewed automatically, as last
+    /// polled. `None` if it isn't tracked.
+    pub fn pr_summary(&self, key: &PrKey) -> Result<Option<PrSummary>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT profile, title FROM prs WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number],
+                |row| {
+                    Ok(PrSummary {
+                        profile: row.get(0)?,
+                        title: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn tracked_prs(&self) -> Result<u32> {
@@ -471,6 +496,23 @@ mod tests {
         // Seen open again.
         store.record(&snap, "default", &[]).unwrap();
         assert_eq!(open(&store), [7]);
+    }
+
+    #[test]
+    fn summaries_are_as_last_polled() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snap = snapshot();
+        assert_eq!(store.pr_summary(&snap.key).unwrap(), None);
+        store.record(&snap, "default", &[]).unwrap();
+        snap.title = "build(deps): bump".into();
+        store.record(&snap, "other", &[]).unwrap();
+        assert_eq!(
+            store.pr_summary(&snap.key).unwrap(),
+            Some(PrSummary {
+                profile: "other".into(),
+                title: "build(deps): bump".into(),
+            })
+        );
     }
 
     #[test]

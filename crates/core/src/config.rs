@@ -17,7 +17,11 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::{pr::TeamRef, repo::RepoName};
+use crate::{
+    pr::TeamRef,
+    repo::RepoName,
+    skip::{SkipRules, TitleFilter},
+};
 
 const DEFAULT_API_URL: &str = "https://api.github.com";
 const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
@@ -82,6 +86,8 @@ pub struct PollSettings {
 pub struct ReviewRequestSettings {
     /// Which of your teams' review requests count as requests to you.
     pub teams: TeamFilter,
+    /// PRs with a matching title are never reviewed automatically.
+    pub skip_titles: TitleFilter,
 }
 
 /// Ordered team globs; the last pattern that matches a team decides, and a
@@ -146,6 +152,8 @@ pub struct Profile {
     /// [`AUTO_MODEL`]: `claude` gets no `--model`.
     pub model: Option<String>,
     pub auto_fix: bool,
+    /// Added to `review_requests.skip_titles` for PRs this profile matches.
+    pub skip_titles: TitleFilter,
     pub targets: Vec<Target>,
 }
 
@@ -282,6 +290,19 @@ impl Config {
         dirs
     }
 
+    /// The skip settings, to share with what decides and shows skips.
+    #[must_use]
+    pub fn skip_rules(&self) -> SkipRules {
+        SkipRules {
+            titles: self.review_requests.skip_titles.clone(),
+            profiles: self
+                .profiles
+                .iter()
+                .map(|p| (p.name.clone(), p.skip_titles.clone()))
+                .collect(),
+        }
+    }
+
     fn targets(&self) -> impl Iterator<Item = (&Profile, &Target)> {
         self.profiles
             .iter()
@@ -371,6 +392,8 @@ impl Config {
                         .unwrap_or_else(|| vec!["*".into()]),
                 )
                 .wrap_err("in `review_requests.teams`")?,
+                skip_titles: TitleFilter::new(raw.review_requests.skip_titles)
+                    .wrap_err("in `review_requests.skip_titles`")?,
             },
             runner: RunnerSettings {
                 claude,
@@ -476,6 +499,7 @@ fn resolve_profile(
         skills: expand_all(&raw.skills)?,
         model: resolve_model(raw.model, default_model)?,
         auto_fix: raw.auto_fix,
+        skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
         targets,
     })
 }
@@ -624,6 +648,8 @@ struct RawPoll {
 #[serde(deny_unknown_fields)]
 struct RawReviewRequests {
     teams: Option<Vec<String>>,
+    #[serde(default)]
+    skip_titles: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -636,6 +662,8 @@ struct RawProfile {
     model: Option<String>,
     #[serde(default)]
     auto_fix: bool,
+    #[serde(default)]
+    skip_titles: Vec<String>,
     // Entries are converted by hand so errors can say which shape was meant.
     repos: Vec<toml::Value>,
 }
@@ -771,6 +799,37 @@ mod tests {
             matched(&config, "org/repo", &["b/x"]).as_deref(),
             Some("whole")
         );
+    }
+
+    #[test]
+    fn skip_titles_are_global_plus_per_profile() {
+        let config = parse(
+            r#"
+            [review_requests]
+            skip_titles = ["build(deps)*"]
+            [profile.a]
+            skip_titles = ["wip*"]
+            repos = [{ github = "org" }]
+            [profile.b]
+            repos = [{ github = "other" }]
+            "#,
+        )
+        .unwrap();
+        let rules = config.skip_rules();
+        assert!(rules.check("a", "WIP: x").is_some());
+        assert!(rules.check("b", "WIP: x").is_none());
+        assert!(rules.check("b", "build(deps): x").is_some());
+        assert!(
+            parse(EXAMPLE)
+                .unwrap()
+                .skip_rules()
+                .check("default", "wip")
+                .is_none()
+        );
+
+        let err = parse("[profile.a]\nskip_titles = [\"[\"]\nrepos = [{ github = \"org\" }]\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("in profile `a`"), "{err:#}");
     }
 
     #[test]

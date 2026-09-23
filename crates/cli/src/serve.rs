@@ -21,6 +21,7 @@ use sanic_core::{
     config::{Config, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
+    skip::SkipRules,
     trigger::Trigger,
 };
 use sanic_github::{ApiError, Client, Token};
@@ -101,6 +102,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     let (reruns, reruns_rx) = mpsc::unbounded_channel();
     let (due_tx, due) = watch::channel(DueTimes::new());
+    let (skips_tx, skips) = watch::channel(config.skip_rules());
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
@@ -109,6 +111,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 no_reviews: args.no_reviews,
                 logs,
                 due,
+                skips,
                 reruns,
             },
         )?),
@@ -129,8 +132,12 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             info!("shutting down");
             result
         }
-        result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
-        result = schedule(updates_rx, Arc::clone(&run_store), runs.clone(), due_tx) => result,
+        result = poll_forever(
+            &mut poller, &mut watcher, &config_path, &updates, &worker, &skips_tx,
+        ) => result,
+        result = schedule(
+            updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, skips_tx.subscribe(),
+        ) => result,
         () = rerun(reruns_rx, run_store, runs) => Ok(()),
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
@@ -199,6 +206,7 @@ async fn poll_forever<G: GithubApi>(
     config_path: &Path,
     updates: &mpsc::UnboundedSender<Update>,
     worker: &Worker,
+    skips: &watch::Sender<SkipRules>,
 ) -> Result<()> {
     let mut next_reconcile = Instant::now();
     let mut next_notifications = Instant::now();
@@ -212,7 +220,7 @@ async fn poll_forever<G: GithubApi>(
         tokio::select! {
             () = sleep_until(next_reconcile.min(next_notifications)) => {}
             () = watcher.changed() => {
-                if reload(poller, config_path, worker) {
+                if reload(poller, config_path, worker, skips) {
                     // New entries may cover PRs nothing has fetched yet.
                     next_reconcile = Instant::now();
                 }
@@ -302,13 +310,19 @@ async fn poll_forever<G: GithubApi>(
 
 /// Swaps in the config at `path`, keeping the current one if the new one
 /// doesn't load. Returns whether it changed.
-fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path, worker: &Worker) -> bool {
+fn reload<G: GithubApi>(
+    poller: &mut Poller<G>,
+    path: &Path,
+    worker: &Worker,
+    skips: &watch::Sender<SkipRules>,
+) -> bool {
     match Config::load(path, &VcsResolver) {
         Ok(config) => {
             if config.github.api_url != poller.config().github.api_url {
                 warn!("`github.api_url` changed; restart to use it");
             }
             worker.configure(&config);
+            skips.send_replace(config.skip_rules());
             poller.set_config(config);
             info!(config = %path.display(), "config reloaded");
             true

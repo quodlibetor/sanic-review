@@ -2,7 +2,7 @@
 source: crates/cli/src/tui.rs
 expression: "draw(&mut app, 80, 24).backend()"
 ---
-"┌ Reviews you owe (4) ─────────────────────────────────────────────────────────┐"
+"┌ Reviews you owe (5) ─────────────────────────────────────────────────────────┐"
 "│queued                  https://github.com/org/web/pull/77  Fix login flake (b│"
 "│waiting 1:40            https://github.com/org/web/pull/78  Bump serde (dana) │"
 "│crashed                 https://github.com/org/web/pull/79  Cache avatars (car│"
