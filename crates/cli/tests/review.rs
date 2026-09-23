@@ -18,7 +18,7 @@ use sanic_store::Store;
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Match, Mock, MockServer, Request, ResponseTemplate,
     matchers::{body_partial_json, method, path},
 };
 
@@ -102,13 +102,32 @@ fn graphql(body: serde_json::Value, response: serde_json::Value) -> Mock {
 }
 
 fn search(q: &str, nodes: &serde_json::Value) -> Mock {
-    graphql(
-        json!({ "variables": { "q": format!("is:open is:pr {q}") } }),
-        json!({ "data": { "search": {
-            "pageInfo": { "hasNextPage": false, "endCursor": null },
-            "nodes": nodes
-        }}}),
-    )
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(Searching(format!("is:open is:pr {q}")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": nodes
+            }}})),
+        )
+}
+
+/// A search for these qualifiers, with or without the recency window's
+/// `updated:>=` date, so the mock doesn't care what day it is.
+struct Searching(String);
+
+impl Match for Searching {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return false;
+        };
+        body["variables"]["q"].as_str().is_some_and(|q| {
+            q == self.0
+                || q.strip_prefix(self.0.as_str())
+                    .is_some_and(|rest| rest.starts_with(" updated:>="))
+        })
+    }
 }
 
 async fn mock_github(head: &str, base: &str) -> MockServer {

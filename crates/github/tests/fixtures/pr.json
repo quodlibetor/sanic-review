@@ -7,6 +7,7 @@
         "body": "Retries flaky fetches.\n\nCloses #3.",
         "url": "https://github.com/org/repo/pull/7",
         "isDraft": false,
+        "updatedAt": "2026-09-20T08:00:00Z",
         "headRefOid": "aaa111",
         "baseRefOid": "bbb222",
         "author": { "login": "alice" },

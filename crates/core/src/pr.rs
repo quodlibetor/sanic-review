@@ -68,6 +68,9 @@ pub struct PrSnapshot {
     pub threads: Vec<Thread>,
     /// Changed file paths; only fetched when path-scoped config needs them.
     pub files: Option<Vec<String>>,
+    /// When GitHub last saw activity on the PR, as it writes timestamps.
+    /// `None` if it didn't say.
+    pub updated_at: Option<String>,
 }
 
 /// A GitHub team, lowercased.

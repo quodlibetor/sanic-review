@@ -203,6 +203,7 @@ mod tests {
             reviews: vec![],
             threads: vec![],
             files: None,
+            updated_at: None,
         }
     }
 

@@ -472,6 +472,7 @@ mod tests {
                 ],
             }],
             files: None,
+            updated_at: None,
         }
     }
 

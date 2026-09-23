@@ -16,7 +16,7 @@ const PR_QUERY: &str = r"
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      number title body url isDraft state headRefOid baseRefOid
+      number title body url isDraft state headRefOid baseRefOid updatedAt
       author { login }
       reviewRequests(first: 100) {
         nodes {
@@ -385,6 +385,9 @@ struct RawPr {
     state: Option<String>,
     head_ref_oid: String,
     base_ref_oid: String,
+    // Always sent by GitHub; hand-written mocks may omit it.
+    #[serde(default)]
+    updated_at: Option<String>,
     author: Option<Login>,
     review_requests: Connection<RawReviewRequest>,
     reviews: Connection<RawReview>,
@@ -527,6 +530,7 @@ impl RawPr {
             reviews,
             threads,
             files,
+            updated_at: self.updated_at,
             key,
         }
     }

@@ -81,7 +81,9 @@ pub enum ActivityKind {
 
 impl Store {
     /// Open PRs by others that request your review, by repo and number.
-    pub fn owed_reviews(&self, me: &str) -> Result<Vec<OwedReview>> {
+    /// With `since`, only those GitHub saw activity on from then on, or
+    /// that have no GitHub timestamp stored.
+    pub fn owed_reviews(&self, me: &str, since: Option<&str>) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft, p.archived,
                     latest.status, latest.error,
@@ -94,10 +96,11 @@ impl Store {
                  WHERE r.repo = p.repo AND r.number = p.number
                  ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
              WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
+                   AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",
         )?;
         let owed = stmt
-            .query_map([me], |row| {
+            .query_map(params![me, since], |row| {
                 let status: Option<String> = row.get(7)?;
                 let error: Option<String> = row.get(8)?;
                 Ok(OwedReview {
@@ -116,18 +119,20 @@ impl Store {
         Ok(owed)
     }
 
-    /// Open PRs you authored, by repo and number.
-    pub fn my_prs(&self, me: &str) -> Result<Vec<MyPr>> {
+    /// Open PRs you authored, by repo and number, limited by `since` as
+    /// [`Store::owed_reviews`] is.
+    pub fn my_prs(&self, me: &str, since: Option<&str>) -> Result<Vec<MyPr>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.repo, p.number, p.title, p.is_draft, p.archived,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
              WHERE p.open AND lower(p.author) = lower(?1)
+                   AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",
         )?;
         let rows = stmt
-            .query_map([me], |row| {
+            .query_map(params![me, since], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get(1)?,
@@ -273,6 +278,7 @@ mod tests {
             reviews: vec![],
             threads: vec![],
             files: None,
+            updated_at: None,
         }
     }
 
@@ -321,7 +327,7 @@ mod tests {
         store.record(&merged, "default", &[]).unwrap();
         store.mark_closed(&merged.key).unwrap();
 
-        let owed = store.owed_reviews("me").unwrap();
+        let owed = store.owed_reviews("me", None).unwrap();
         assert_eq!(
             owed,
             [OwedReview {
@@ -339,15 +345,19 @@ mod tests {
 
         // Archived PRs are still listed, flagged, for the UI to hide.
         store.set_archived(&requested.key, true).unwrap();
-        assert!(store.owed_reviews("me").unwrap()[0].archived);
+        assert!(store.owed_reviews("me", None).unwrap()[0].archived);
         store.set_archived(&requested.key, false).unwrap();
 
         let run = store.queue_review(&request(&requested)).unwrap().unwrap();
-        let latest = |store: &Store| store.owed_reviews("me").unwrap()[0].latest_run.clone();
+        let latest = |store: &Store| {
+            store.owed_reviews("me", None).unwrap()[0]
+                .latest_run
+                .clone()
+        };
         assert_eq!(latest(&store).unwrap().status, "queued");
         store.claim_run(run.id).unwrap();
         store.finish_review(run.id, &result()).unwrap();
-        let owed = &store.owed_reviews("me").unwrap()[0];
+        let owed = &store.owed_reviews("me", None).unwrap()[0];
         assert_eq!(owed.latest_run.as_ref().unwrap().status, "succeeded");
         assert_eq!(owed.pending_drafts, 1);
 
@@ -424,7 +434,7 @@ mod tests {
         store.mark_closed(&merged.key).unwrap();
 
         let states: Vec<_> = store
-            .my_prs("me")
+            .my_prs("me", None)
             .unwrap()
             .into_iter()
             .map(|pr| (pr.key.number, pr.is_draft, pr.review_state))
@@ -438,6 +448,35 @@ mod tests {
                 (4, false, ReviewState::Waiting),
             ]
         );
+    }
+
+    #[test]
+    fn lists_can_leave_out_prs_quiet_since_a_time() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut old = snapshot(1, "alice");
+        old.review_requested = true;
+        old.updated_at = Some("2026-01-01T00:00:00Z".into());
+        let mut recent = snapshot(2, "alice");
+        recent.review_requested = true;
+        recent.updated_at = Some("2026-09-20T00:00:00Z".into());
+        let mut unknown = snapshot(3, "alice");
+        unknown.review_requested = true;
+        let mut mine = snapshot(4, "me");
+        mine.updated_at = Some("2026-01-01T00:00:00Z".into());
+        for snap in [&old, &recent, &unknown, &mine] {
+            store.record(snap, "default", &[]).unwrap();
+        }
+        let since = Some("2026-09-09T00:00:00Z");
+        let owed: Vec<u32> = store
+            .owed_reviews("me", since)
+            .unwrap()
+            .iter()
+            .map(|pr| pr.key.number)
+            .collect();
+        assert_eq!(owed, [2, 3]);
+        assert_eq!(store.owed_reviews("me", None).unwrap().len(), 3);
+        assert!(store.my_prs("me", since).unwrap().is_empty());
+        assert_eq!(store.my_prs("me", None).unwrap().len(), 1);
     }
 
     #[test]
