@@ -51,6 +51,11 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 ```toml
 [github]
 # Token comes from `gh auth token` unless GITHUB_TOKEN is set.
+# api_url = "https://api.github.com"   # override for tests or a proxy
+
+[poll]
+# reconcile_secs = ...                 # GraphQL reconcile interval
+# min_notification_secs = ...          # floor under GitHub's X-Poll-Interval
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
@@ -82,6 +87,10 @@ globs.
 **Precedence.** When several entries match a PR, across or within profiles,
 the most specific wins: path-scoped, then repo, then org. Between equally
 specific matches, the profile that appears first in the config file wins.
+
+**Repo entries claim their repo.** Once any entry names a repo, org entries
+stop applying to it. A PR in that repo that misses every path-scoped entry's
+globs, with no unscoped entry for the repo, matches nothing and is ignored.
 
 **Local entries have two roles.** They define what's watched, and they
 provide the default auto-fix checkout for that repo. The review runner still

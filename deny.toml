@@ -24,6 +24,8 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace path dependencies are unversioned by design.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
