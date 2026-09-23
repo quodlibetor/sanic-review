@@ -13,7 +13,7 @@ use color_eyre::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
     pr::{PrKey, PrSnapshot},
-    state::{PrState, StateFacts},
+    state::{PrState, ReviewFact, StateFacts},
     trigger::{Known, Trigger},
 };
 
@@ -39,7 +39,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 pub use dashboard::{DraftRow, DraftStatus, PrPage, ReviewRun};
-pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview, ReviewState};
+pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview};
 pub use runs::{Draft, RunCounts, RunRecord, SessionRun};
 
 /// A connection to the database. The poller and the runner each open their
@@ -357,11 +357,26 @@ impl Store {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
         let threads = self.threads(key)?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT author, state FROM reviews
+             WHERE repo = ?1 AND number = ?2 AND NOT by_bot
+             ORDER BY submitted_at, rowid",
+        )?;
+        let reviews = stmt
+            .query_map(params![key.repo.to_string(), key.number], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let reviews: Vec<ReviewFact<'_>> = reviews
+            .iter()
+            .map(|(author, state)| ReviewFact { author, state })
+            .collect();
         Ok(PrState::new(&StateFacts {
             review_decision: decision.as_deref(),
             merge_state: merge.as_deref(),
             checks: checks.as_deref(),
             threads: &threads,
+            reviews: &reviews,
             me,
             mine,
         }))

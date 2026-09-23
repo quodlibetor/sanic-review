@@ -1125,7 +1125,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use sanic_core::state::{Approval, Checks};
     use sanic_core::{pr::PrKey, repo::RepoName};
-    use sanic_store::{LatestRun, ReviewState};
+    use sanic_store::LatestRun;
 
     use super::*;
 
@@ -1169,7 +1169,6 @@ mod tests {
             title: title.into(),
             is_draft: false,
             archived: false,
-            review_state: ReviewState::Waiting,
             pending_drafts: 0,
             chat_run: None,
             state: PrState::default(),

@@ -16,11 +16,23 @@ pub struct StateFacts<'a> {
     /// The head commit's combined check state.
     pub checks: Option<&'a str>,
     pub threads: &'a [Thread],
+    /// Submitted reviews, oldest first, bots' left out. Approval is worked
+    /// out from them when GitHub gives no `reviewDecision`, as for a repo
+    /// that doesn't require reviews.
+    pub reviews: &'a [ReviewFact<'a>],
     /// The current user.
     pub me: &'a str,
     /// Your own PR: every thread can need your answer. On someone else's,
     /// only threads you've commented in can.
     pub mine: bool,
+}
+
+/// One submitted review, for [`StateFacts::reviews`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewFact<'a> {
+    pub author: &'a str,
+    /// GitHub's name for its state, e.g. `APPROVED`.
+    pub state: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -154,7 +166,10 @@ fn approval(facts: &StateFacts<'_>) -> Approval {
         Some("PENDING" | "EXPECTED") => Checks::Pending,
         _ => Checks::Other,
     };
-    match facts.review_decision {
+    match facts
+        .review_decision
+        .or_else(|| decision_from(facts.reviews))
+    {
         Some("CHANGES_REQUESTED") => Approval::ChangesRequested,
         Some("APPROVED") => {
             // GitHub's own word, when it gave one; else passing checks.
@@ -170,6 +185,33 @@ fn approval(facts: &StateFacts<'_>) -> Approval {
             }
         }
         _ => Approval::None,
+    }
+}
+
+/// The `reviewDecision` GitHub would give if it gave one, from each
+/// reviewer's latest word: a change request by anyone, else an approval by
+/// anyone. Comments don't change where a reviewer stands, and a dismissal
+/// takes their word back.
+fn decision_from<'a>(reviews: &[ReviewFact<'a>]) -> Option<&'static str> {
+    let mut latest: Vec<ReviewFact<'a>> = Vec::new();
+    for &review in reviews {
+        if !matches!(review.state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+            continue;
+        }
+        match latest
+            .iter_mut()
+            .find(|seen| seen.author.eq_ignore_ascii_case(review.author))
+        {
+            Some(seen) => seen.state = review.state,
+            None => latest.push(review),
+        }
+    }
+    if latest.iter().any(|r| r.state == "CHANGES_REQUESTED") {
+        Some("CHANGES_REQUESTED")
+    } else if latest.iter().any(|r| r.state == "APPROVED") {
+        Some("APPROVED")
+    } else {
+        None
     }
 }
 
@@ -244,6 +286,7 @@ mod tests {
             merge_state: merge,
             checks,
             threads: &[],
+            reviews: &[],
             me: "me",
             mine: true,
         })
@@ -255,10 +298,56 @@ mod tests {
             merge_state: None,
             checks: None,
             threads,
+            reviews: &[],
             me: "Me",
             mine,
         })
         .unanswered
+    }
+
+    fn from_reviews(
+        reviews: &[(&str, &str)],
+        decision: Option<&str>,
+        checks: Option<&str>,
+    ) -> String {
+        let reviews: Vec<ReviewFact<'_>> = reviews
+            .iter()
+            .map(|&(author, state)| ReviewFact { author, state })
+            .collect();
+        PrState::new(&StateFacts {
+            review_decision: decision,
+            merge_state: None,
+            checks,
+            threads: &[],
+            reviews: &reviews,
+            me: "me",
+            mine: true,
+        })
+        .status()
+    }
+
+    #[test]
+    fn without_githubs_decision_each_reviewers_latest_word_counts() {
+        // Changes requested by anyone outweigh approvals.
+        let blocked = [("bob", "APPROVED"), ("carol", "CHANGES_REQUESTED")];
+        assert_eq!(from_reviews(&blocked, None, None), "changes requested");
+        // A reviewer's later approval replaces their change request, in any case.
+        let turned = [("bob", "CHANGES_REQUESTED"), ("Bob", "APPROVED")];
+        assert_eq!(from_reviews(&turned, None, None), "approved");
+        assert_eq!(from_reviews(&turned, None, Some("SUCCESS")), "mergeable");
+        assert_eq!(
+            from_reviews(&turned, None, Some("FAILURE")),
+            "approved · ci failing"
+        );
+        // Comments don't change a standing; a dismissal takes it back.
+        let commented = [("bob", "APPROVED"), ("bob", "COMMENTED")];
+        assert_eq!(from_reviews(&commented, None, None), "approved");
+        let dismissed = [("bob", "CHANGES_REQUESTED"), ("bob", "DISMISSED")];
+        assert_eq!(from_reviews(&dismissed, None, None), "—");
+        assert_eq!(from_reviews(&[], None, None), "—");
+        // GitHub's own word wins when it gives one.
+        assert_eq!(from_reviews(&blocked, Some("REVIEW_REQUIRED"), None), "—");
+        assert_eq!(from_reviews(&blocked, Some("APPROVED"), None), "approved");
     }
 
     #[test]
