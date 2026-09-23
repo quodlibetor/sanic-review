@@ -6,5 +6,6 @@ pub mod pr;
 pub mod repo;
 pub mod run;
 pub mod skip;
+pub mod start;
 pub mod state;
 pub mod trigger;

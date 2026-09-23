@@ -35,6 +35,7 @@ use sanic_core::{
     clock::{Clock, window_start},
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
+    start::Why,
     state::{PrState, Urgency},
 };
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
@@ -385,17 +386,6 @@ enum Overlay {
     ConfirmQuit(Vec<PrKey>),
 }
 
-/// Why a review may be started by hand.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Why {
-    /// The latest run failed or crashed.
-    Failed,
-    /// `--manual-reviews` is holding its queued review.
-    Held,
-    /// It isn't reviewed automatically, for this reason.
-    Skipped(Skip),
-}
-
 /// What the loop does after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -582,16 +572,11 @@ impl App {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
-        let skipped = self.overview.skipped.get(&pr.key).cloned();
         let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
-        let why = match (skipped, status) {
-            (Some(skip), _) => Why::Skipped(skip),
-            (None, Some("failed" | "crashed")) => Why::Failed,
-            (None, Some("queued")) if self.manual_reviews => Why::Held,
-            _ => {
-                self.notice = Some(RERUN_HINT.into());
-                return;
-            }
+        let skip = self.overview.skipped.get(&pr.key);
+        let Some(why) = Why::of(skip, status, self.manual_reviews) else {
+            self.notice = Some(RERUN_HINT.into());
+            return;
         };
         self.overlay = Some(Overlay::ConfirmRerun {
             key: pr.key.clone(),

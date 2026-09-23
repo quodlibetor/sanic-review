@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
-use sanic_core::{pr::PrKey, skip::Skip, state::PrState};
+use sanic_core::{pr::PrKey, skip::Skip, start::Why, state::PrState};
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, DraftStatus, PrPage, ReviewRun};
 use serde::Deserialize;
@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
-    index::{Overview, Why, archive_form, owed_status},
+    index::{Overview, archive_form, owed_status, why},
     page::{self, Kind, csrf_field, first_line, github_link, state_cell},
     pr_href,
 };
@@ -110,7 +110,7 @@ fn pr_header(
     // `—` fills a column; in a sentence it says nothing.
     let state = state.filter(|state| *state != PrState::default());
     let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));
-    let why = owed.and_then(|o| Why::of(o, overview.skipped.get(&o.key), app.manual_reviews));
+    let why = owed.and_then(|o| why(o, overview, app.manual_reviews));
     let href = pr_href(&pr.key);
     html! {
         h1 { (pr.title) }
@@ -379,7 +379,7 @@ pub async fn confirm_review_now(
         .owed
         .iter()
         .find(|pr| pr.key == key)
-        .and_then(|pr| Why::of(pr, overview.skipped.get(&key), app.manual_reviews));
+        .and_then(|pr| why(pr, &overview, app.manual_reviews));
     let href = pr_href(&key);
     let content = html! {
         h1 { "Review now" }
@@ -434,7 +434,7 @@ pub async fn review_now(
             key.url()
         )));
     };
-    if Why::of(owed, overview.skipped.get(&key), app.manual_reviews).is_none() {
+    if why(owed, &overview, app.manual_reviews).is_none() {
         return Err(Error::Refused(format!(
             "there's nothing to start for {}: its review isn't failed, held or skipped",
             key.url()
