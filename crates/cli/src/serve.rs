@@ -29,7 +29,7 @@ use sanic_core::{
     trigger::Trigger,
 };
 use sanic_github::{ApiError, Client, Token};
-use sanic_runner::vcs::VcsResolver;
+use sanic_runner::{review::RunSettings, vcs::VcsResolver};
 use sanic_store::Store;
 use sanic_web::Dashboard;
 use tokio::{
@@ -110,6 +110,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let control = DashboardControl {
         requests: requests.clone(),
         config_path: config_path.clone(),
+        worker: Arc::clone(&worker),
     };
     let web = live.dashboard(&me, args.manual_reviews, &data_dir, &github, control, &due)?;
     let mut ui = match logs {
@@ -260,6 +261,7 @@ impl Live {
             me: me.to_owned(),
             manual_reviews,
             data_dir: data_dir.to_owned(),
+            config_path: control.config_path.clone(),
             store: Store::open(&data_dir.join("state.db"))?,
             github: github.clone(),
             control: Arc::new(control),
@@ -271,12 +273,15 @@ impl Live {
     }
 }
 
-/// The dashboard starts reviews the way the TUI's `r` does, and adds
-/// `skip_titles` patterns the way its ignore editor does.
+/// The dashboard starts reviews the way the TUI's `r` does, adds
+/// `skip_titles` patterns the way its ignore editor does, and reads the
+/// run settings its chat commands are built from.
 struct DashboardControl {
     requests: mpsc::UnboundedSender<Request>,
     /// Edited in place; the watcher reloads it.
     config_path: PathBuf,
+    /// Holds the run settings as the config last loaded.
+    worker: Arc<Worker>,
 }
 
 impl sanic_web::Control for DashboardControl {
@@ -287,6 +292,10 @@ impl sanic_web::Control for DashboardControl {
 
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool> {
         config_edit::add_skip_title_to_file(&self.config_path, profile, pattern)
+    }
+
+    fn run_settings(&self, profile: &str) -> Result<RunSettings> {
+        self.worker.run_settings(profile)
     }
 }
 
@@ -856,9 +865,12 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         let text = "# Mine.\n[profile.default] # the org\nrepos = [{ github = \"org\" }]\n";
         std::fs::write(&config_path, text).unwrap();
+        let config = Config::parse(text, dir.path(), &VcsResolver).unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let control = DashboardControl {
             requests: mpsc::unbounded_channel().0,
             config_path: config_path.clone(),
+            worker: Arc::new(Worker::new(dir.path(), store, &config)),
         };
         assert!(control.add_skip_title("build(deps)*", None).unwrap());
         assert!(!control.add_skip_title("build(deps)*", None).unwrap());

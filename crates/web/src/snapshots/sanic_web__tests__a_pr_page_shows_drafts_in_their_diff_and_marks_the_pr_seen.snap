@@ -25,7 +25,7 @@ expression: "readable(&f, &page.body)"
 <p class="meta">
 <a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="status ok">drafted</span>
 </p>
-<div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore">
+<div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
 <a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
@@ -38,6 +38,27 @@ expression: "readable(&f, &page.body)"
 <summary>Description</summary>
 <pre>Add the thing, in detail.</pre>
 </details>
+<section id="chat">
+<h2>Chat with the reviewer</h2>
+<p>Ask the agent that did run 1 about its review. Paste this into a terminal:</p>
+<div class="copyable">
+<pre id="chat-command">
+<code>$EXE chat 1 --config '/config/sanic review.toml' --data-dir $DATA</code>
+</pre>
+<button type="button" data-copy="#chat-command">Copy</button>
+</div>
+<p class="dim">It checks the review's worktree out again, at the path the review used, and removes it when the chat ends. The agent keeps the review's limits: read-only tools and no GitHub token. Add <code>--allow-edits</code> to let it edit that copy of the worktree.</p>
+<details>
+<summary>Or run claude yourself</summary>
+<p>This needs the worktree, which <code>$EXE chat --print-command 1 --config '/config/sanic review.toml' --data-dir $DATA</code> checks out and prints this line for. Remove the worktree afterwards with <code>$EXE chat --cleanup 1 --config '/config/sanic review.toml' --data-dir $DATA</code>.</p>
+<div class="copyable">
+<pre id="claude-command">
+<code>cd $DATA/worktrees/1 &amp;&amp; env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-7 --restricted --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --add-dir $DATA/runs/1 --add-dir /skills/review</code>
+</pre>
+<button type="button" data-copy="#claude-command">Copy</button>
+</div>
+</details>
+</section>
 <details class="runs">
 <summary>Reviews (1)</summary>
 <ol>
@@ -210,6 +231,12 @@ expression: "readable(&f, &page.body)"
 <kbd>i</kbd>
 </th>
 <td>skip PRs with titles like the selected one</td>
+</tr>
+<tr>
+<th>
+<kbd>c</kbd>
+</th>
+<td>chat with the agent that reviewed it: shows the command</td>
 </tr>
 <tr>
 <th>

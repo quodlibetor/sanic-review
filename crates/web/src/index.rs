@@ -236,7 +236,8 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     html! {
         li.row.archived[pr.archived] data-href=(href)
             data-review-now=[why.map(|_| format!("{href}/review-now"))]
-            data-ignore={ (href) "/ignore" } {
+            data-ignore={ (href) "/ignore" }
+            data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             span.status.(class) { (label) }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
@@ -248,6 +249,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
                     a.button href={ (href) "/review-now" } { "Review now" }
                 }
                 a.button href={ (href) "/ignore" } { "Ignore by title" }
+                @if pr.chat_run.is_some() { a.button href={ (href) "#chat" } { "Chat" } }
                 (archive_form(app, &pr.key, pr.archived, "index"))
             }
             @if let Some(error) = error {
@@ -266,14 +268,18 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
     };
     let href = pr_href(&pr.key);
     html! {
-        li.row.archived[pr.archived] data-href=(href) {
+        li.row.archived[pr.archived] data-href=(href)
+            data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             span.status.(class) { (label) }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
             (github_link(&pr.key))
             @if pr.is_draft { span.dim { "[draft] " } }
             a.title href=(href) { (pr.title) }
-            span.actions { (archive_form(app, &pr.key, pr.archived, "index")) }
+            span.actions {
+                @if pr.chat_run.is_some() { a.button href={ (href) "#chat" } { "Chat" } }
+                (archive_form(app, &pr.key, pr.archived, "index"))
+            }
         }
     }
 }

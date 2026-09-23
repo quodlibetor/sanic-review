@@ -457,6 +457,16 @@ embedded in the binary, so nothing is fetched at runtime.
   the runner can resume a session. The PR's own actions are the TUI's: a
   review now, with a confirm page, and archive or unarchive, which writes
   the store as `sanic-review archive` does.
+- **Chat with the reviewer.** A PR page with a review that has an agent
+  session shows, for the latest such run, `sanic-review chat <run id>`,
+  with `serve`'s `--config` and `--data-dir`, to copy into a terminal,
+  and says it checks the review's worktree out again and removes it when
+  the chat ends. Under it, the `claude` line that chat runs, from
+  `ChatCommand::shell_line()`, for running it yourself after
+  `--print-command`, then `--cleanup`. The
+  dashboard runs neither. If the run's profile is no longer configured,
+  which `sanic-review chat` refuses, it says so instead. Index rows with
+  a session link there, as does `c`.
 - **Ignore by title.** The TUI's ignore editor, as a page, from `i` or a
   button on a review you owe: the PR's title and description, read-only,
   over a pattern prefilled with the title (glob syntax escaped) to edit
@@ -486,9 +496,10 @@ embedded in the binary, so nothing is fetched at runtime.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm page, `a` archives or unarchives, `A` shows
-  archived PRs, `i` opens the ignore editor. `Enter` opens the selected
-  PR. `q` closes the help, or else goes back to the index. A confirm page takes `y`, and `Esc` or `q`
-  cancels. Keys are ignored while you type in a draft; `Esc` leaves it.
+  archived PRs, `i` opens the ignore editor, `c` the chat commands.
+  `Enter` opens the selected PR. `q` closes the help, or else goes back to
+  the index. A confirm page takes `y`, and `Esc` or `q` cancels. Keys are
+  ignored while you type in a draft; `Esc` leaves it.
 - **Settings.** The dashboard can edit settings such as
   `review_requests.teams`. Edits are written back to the config file,
   preserving its comments and layout, and take effect through the same

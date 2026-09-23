@@ -159,11 +159,30 @@ impl ReviewRunner {
             .await
     }
 
+    /// How to resume `run`'s session `session_id` in its worktree, as
+    /// `sanic-review chat` runs it and the dashboard shows it. Only names
+    /// the worktree; [`ReviewRunner::chat_worktree`] checks it out.
+    #[must_use]
+    pub fn chat_command(
+        &self,
+        run: &QueuedRun,
+        session_id: &str,
+        settings: &RunSettings,
+        allow_edits: bool,
+    ) -> chat::ChatCommand {
+        chat::ChatCommand {
+            program: settings.claude.clone(),
+            session_id: session_id.to_owned(),
+            cwd: self.worktree_path(run),
+            add_dirs: self.chat_dirs(run, settings),
+            allow_edits,
+        }
+    }
+
     /// The directories besides the worktree that `run`'s agent could read,
     /// as a chat should get them again: its run dir, skills and the
     /// reference checkouts that exist.
-    #[must_use]
-    pub fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
+    fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
         std::iter::once(self.data_dir.join("runs").join(run.id.to_string()))
             .chain(settings.profile.skills.iter().cloned())
             .chain(

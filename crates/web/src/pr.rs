@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tracing::info;
 
 use crate::{
-    App, Error, PrPath, Shared, diff,
+    App, Error, PrPath, Shared, chat, diff,
     index::{Overview, Why, archive_form, owed_status},
     page::{self, Kind, csrf_field, first_line, github_link},
     pr_href,
@@ -61,14 +61,16 @@ pub async fn page(
         Some(run) => read_diff(&app, run.id),
         None => None,
     };
+    let chat = chat::section(&app, &key);
     let content = html! {
-        (pr_header(&app, &pr, &overview))
+        (pr_header(&app, &pr, &overview, chat.is_some()))
         @if !pr.body.trim().is_empty() {
             details.description {
                 summary { "Description" }
                 pre { (pr.body) }
             }
         }
+        @if let Some(chat) = &chat { (chat) }
         (run_list(&pr.key, &runs, shown.as_ref()))
         @if let Some(run) = &shown {
             (drafts_section(&app, &pr, run, &drafts, diff.as_ref()))
@@ -89,7 +91,7 @@ fn read_diff(app: &App, run: i64) -> Option<DiffIndex> {
         .map(|text| DiffIndex::parse(&text))
 }
 
-fn pr_header(app: &App, pr: &PrPage, overview: &Overview) -> Markup {
+fn pr_header(app: &App, pr: &PrPage, overview: &Overview, chat: bool) -> Markup {
     let owed = overview.owed.iter().find(|o| o.key == pr.key);
     let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));
     let why = owed.and_then(|o| Why::of(o, overview.skipped.get(&o.key), app.manual_reviews));
@@ -105,7 +107,8 @@ fn pr_header(app: &App, pr: &PrPage, overview: &Overview) -> Markup {
             @if let Some((label, class)) = &status { " · " span.status.(class) { (label) } }
         }
         div.actions #pr-actions data-review-now=[why.map(|_| format!("{href}/review-now"))]
-            data-ignore=[owed.map(|_| format!("{href}/ignore"))] {
+            data-ignore=[owed.map(|_| format!("{href}/ignore"))]
+            data-chat=[chat.then_some("#chat")] {
             @if why.is_some() {
                 a.button href={ (href) "/review-now" } { "Review now" }
             }

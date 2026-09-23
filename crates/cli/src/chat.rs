@@ -118,18 +118,12 @@ pub struct Chat {
 
 impl Chat {
     /// Finds `target`'s session and checks its worktree out again. Refuses
-    /// while that worktree is in use: by the run itself, or by another chat.
+    /// while that worktree exists, since another chat has it. A run gets its
+    /// session when it finishes, so it's never still running.
     pub async fn prepare(paths: &Paths, target: &Target, allow_edits: bool) -> Result<Self> {
         let config = Config::load(&paths.config, &VcsResolver)?;
         let session = find(paths, target)?;
         let run = &session.run;
-        if session.status == "running" {
-            bail!(
-                "run {} of {} is under way, and its worktree with it; chat once it finishes",
-                run.id,
-                run.request.key.url()
-            );
-        }
         let dir = worktree_path(&paths.data_dir, run.id);
         if dir.exists() {
             return Err(eyre!(
@@ -163,13 +157,7 @@ impl Chat {
             .chat_worktree(run, &settings.git_url)
             .await
             .wrap_err_with(|| format!("checking out run {}'s worktree", run.id))?;
-        let command = ChatCommand {
-            program: settings.claude.clone(),
-            session_id: session.session_id.clone(),
-            cwd: worktree.path().to_owned(),
-            add_dirs: runner.chat_dirs(run, &settings),
-            allow_edits,
-        };
+        let command = runner.chat_command(run, &session.session_id, &settings, allow_edits);
         Ok(Self {
             session,
             worktree,
@@ -217,12 +205,6 @@ fn find(paths: &Paths, target: &Target) -> Result<SessionRun> {
 pub async fn cleanup(paths: &Paths, target: &Target) -> Result<PathBuf> {
     let session = find(paths, target)?;
     let dir = worktree_path(&paths.data_dir, session.run.id);
-    if session.status == "running" {
-        bail!(
-            "run {} is under way; its worktree is its own",
-            session.run.id
-        );
-    }
     ReviewRunner::new(&paths.data_dir)
         .discard_worktree(&session.run)
         .await;

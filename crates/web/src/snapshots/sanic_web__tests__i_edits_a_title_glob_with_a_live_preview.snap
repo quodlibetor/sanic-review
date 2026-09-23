@@ -122,6 +122,12 @@ expression: "readable(&f, &page.body)"
 </tr>
 <tr>
 <th>
+<kbd>c</kbd>
+</th>
+<td>chat with the agent that reviewed it: shows the command</td>
+</tr>
+<tr>
+<th>
 <kbd>?, Esc</kbd>
 </th>
 <td>show, close this help</td>

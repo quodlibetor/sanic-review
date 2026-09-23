@@ -26,7 +26,7 @@ expression: "readable(&f, &page.body)"
 <section class="pane" id="owed">
 <h2>Reviews you owe (3)</h2>
 <ol class="rows">
-<li class="row" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore">
+<li class="row" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
 <span class="status ok">drafted</span>
 <span class="drafts">3 drafts</span>
 <span class="unseen" title="a review you haven't looked at yet">new</span>
@@ -35,6 +35,7 @@ expression: "readable(&f, &page.body)"
 <span class="author dim">(alice)</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
+<a class="button" href="/pr/org/repo/7#chat">Chat</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -164,6 +165,12 @@ expression: "readable(&f, &page.body)"
 <kbd>i</kbd>
 </th>
 <td>skip PRs with titles like the selected one</td>
+</tr>
+<tr>
+<th>
+<kbd>c</kbd>
+</th>
+<td>chat with the agent that reviewed it: shows the command</td>
 </tr>
 <tr>
 <th>
