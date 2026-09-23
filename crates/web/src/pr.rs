@@ -22,7 +22,9 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
     index::{Overview, archive_form, owed_status, why},
-    page::{self, Kind, csrf_field, first_line, github_link, state_cell},
+    page::{
+        self, Card, Kind, Tone, csrf_field, first_line, github_link, keycap, pr_ref, state_cell,
+    },
     pr_href,
 };
 
@@ -139,10 +141,10 @@ fn pr_header(
             data-ignore=[owed.map(|_| format!("{href}/ignore"))]
             data-chat=[chat.then_some("#chat")] {
             @if why.is_some() {
-                a.button href={ (href) "/review-now" } { "Review now" }
+                a.btn href={ (href) "/review-now" } data-dialog { "Review now" (keycap("r")) }
             }
             @if owed.is_some() {
-                a.button href={ (href) "/ignore" } { "Ignore by title" }
+                a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
             }
             (archive_form(app, &pr.key, pr.archived, "pr"))
         }
@@ -174,6 +176,11 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
             }
         }
     }
+}
+
+/// The PR, as the top bar names it, linking to its page.
+pub fn crumb(key: &PrKey) -> Markup {
+    html! { a href=(pr_href(key)) { (key.repo) "#" (key.number) } }
 }
 
 fn short(sha: &str) -> &str {
@@ -381,61 +388,115 @@ fn decided(
     Ok(Redirect::to(&back).into_response())
 }
 
+/// What a review started by hand costs.
+const COST: &str = "Spends tokens: a full review of the head as last polled.";
+
 pub async fn confirm_review_now(
     State(app): State<Shared>,
     Path(path): Path<PrPath>,
 ) -> Result<Markup, Error> {
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
-    let why = overview
-        .owed
-        .iter()
-        .find(|pr| pr.key == key)
-        .and_then(|pr| why(pr, &overview, app.manual_reviews));
+    let owed = overview.owed.iter().find(|pr| pr.key == key);
+    let why = owed.and_then(|pr| why(pr, &overview, app.manual_reviews));
+    let pr = app
+        .store()
+        .pr_page(&key)
+        .map_err(Error::pr(&key))?
+        .ok_or_else(|| Error::NotFound(format!("{} isn't tracked", key.url())))?;
     let href = pr_href(&key);
-    let content = html! {
-        h1 { "Review now" }
-        @match why {
-            None => {
-                p { "There's nothing to start for " (github_link(&key)) ": only a review you owe "
-                    "whose latest run failed or crashed, that's skipped or archived, or that "
-                    "--manual-reviews is holding can be started by hand." }
-                p { a #cancel href=(href) { "Back" } }
-            }
-            Some(why) => {
-                // Worded as the TUI's confirm is.
-                p {
-                    @match &why {
-                        Why::Skipped(Skip::Reviewed { by, .. }) => {
-                            "Already reviewed by " (by) ". Review " (github_link(&key))
-                            " anyway, at its current head?"
-                        }
-                        Why::Skipped(skip) => {
-                            "Review this " (skip.label()) "-skipped PR anyway, "
-                            (github_link(&key)) " at its current head?"
-                        }
-                        Why::Failed => {
-                            "Rerun the review of " (github_link(&key)) " at its current head?"
-                        }
-                        Why::Held => { "Start the held review of " (github_link(&key)) " now?" }
-                    }
-                    " This spends tokens."
-                }
-                form #confirm method="post" action={ (href) "/review-now" } {
-                    (csrf_field(&app))
-                    button type="submit" { kbd { "y" } " Review now" }
-                    " "
-                    a #cancel href=(href) { kbd { "Esc" } " Cancel" }
-                }
+    let meta = html! {
+        (pr_ref(&key)) " · " (pr.author) " · head " code { (short(&pr.head_sha)) }
+        @if why == Some(Why::Held) { " · held by " code { "--manual-reviews" } }
+    };
+    let error = owed
+        .and_then(|pr| pr.latest_run.as_ref())
+        .and_then(|run| Some((run.status.as_str(), run.error.as_deref()?)));
+    let go = |label: &str| {
+        html! {
+            form #confirm method="post" action={ (href) "/review-now" } {
+                (csrf_field(&app))
+                // A dialog over the index sets it to `index`.
+                input type="hidden" name="next" value="pr";
+                button.btn.go type="submit" { (label) (keycap("y")) }
             }
         }
     };
-    Ok(page::layout(&app, Kind::Confirm, "Review now", &content))
+    // Worded as the TUI's confirm is.
+    let (heading, extra, cost, go) = match &why {
+        None => (
+            html! { "Nothing to start" },
+            html! {
+                p.note {
+                    "Only a review you owe whose latest run failed or crashed, that's "
+                    "skipped or archived, or that " code { "--manual-reviews" }
+                    " is holding can be started by hand."
+                }
+            },
+            None,
+            html! {},
+        ),
+        Some(Why::Skipped(Skip::Reviewed { by, .. })) => (
+            html! { "Already reviewed by " (by) ". Review anyway?" },
+            html! {},
+            Some(html! { (COST) " It stays skipped for automatic reviews." }),
+            go("Review anyway"),
+        ),
+        Some(Why::Skipped(skip)) => (
+            html! { "Review this " (skip.label()) "-skipped PR anyway?" },
+            html! {},
+            Some(html! { (COST) " It stays skipped for automatic reviews." }),
+            go("Review anyway"),
+        ),
+        Some(Why::Failed) => (
+            html! { "Rerun this review?" },
+            html! {
+                @if let Some((status, error)) = error {
+                    div.error { (status) ": " (error) }
+                }
+            },
+            Some(html! { (COST) }),
+            go("Rerun the review"),
+        ),
+        Some(Why::Held) => (
+            html! { "Start the held review now?" },
+            html! {},
+            Some(html! { (COST) }),
+            go("Start it"),
+        ),
+    };
+    let content = page::card(&Card {
+        kind: "Review now",
+        heading,
+        title: &pr.title,
+        meta,
+        extra,
+        cost,
+        go,
+        back: (&href, if why.is_some() { "Cancel" } else { "Back" }),
+        tone: Tone::Ask,
+    });
+    Ok(page::layout_in(
+        &app,
+        Kind::Confirm,
+        "Review now",
+        &[crumb(&key), html! { "review now" }],
+        &content,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewNowForm {
+    /// `index` to go back to the index afterwards, as a dialog opened
+    /// there asks; else the PR's page.
+    #[serde(default)]
+    next: String,
 }
 
 pub async fn review_now(
     State(app): State<Shared>,
     Path(path): Path<PrPath>,
+    Form(form): Form<ReviewNowForm>,
 ) -> Result<Redirect, Error> {
     let key = path.key()?;
     // As the confirm page decided, again: it may be stale, or sent twice.
@@ -455,7 +516,7 @@ pub async fn review_now(
     info!(url = %key.url(), "review requested from the dashboard");
     let href = pr_href(&key);
     app.control.review_now(key);
-    Ok(Redirect::to(&href))
+    Ok(Redirect::to(if form.next == "index" { "/" } else { &href }))
 }
 
 #[derive(Debug, Deserialize)]

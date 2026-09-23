@@ -27,7 +27,8 @@ expression: "readable(&f, &page.body)"
 <a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="state act">1 unanswered</span> · <span class="status ok">drafted</span>
 </p>
 <div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
-<a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
+<a class="btn" href="/pr/org/repo/7/ignore">Ignore by title<span class="k">i</span>
+</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -248,6 +249,10 @@ expression: "readable(&f, &page.body)"
 </tr>
 </table>
 <p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div class="overlay" id="dialog" hidden>
+<div class="popup dialog" role="dialog" aria-modal="true">
 </div>
 </div>
 <div id="notice" hidden>

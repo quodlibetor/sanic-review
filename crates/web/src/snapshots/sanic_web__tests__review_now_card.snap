@@ -1,0 +1,27 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, card_of(&ask.body))"
+---
+<div class="cf">
+<p class="kind">Review now</p>
+<h1>Rerun this review?</h1>
+<div class="who">
+<div class="t">Fix &lt;script&gt; escaping</div>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/8" title="https://github.com/org/repo/pull/8">org/repo#8 ↗</a> · bob · head <code>head8</code>
+</div>
+<div class="error">failed: claude exited with 1
+and more detail</div>
+</div>
+<p class="cost">Spends tokens: a full review of the head as last polled.</p>
+<div class="btns">
+<form id="confirm" method="post" action="/pr/org/repo/8/review-now">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="next" value="pr">
+<button class="btn go" type="submit">Rerun the review<span class="k">y</span>
+</button>
+</form>
+<a class="btn" id="cancel" href="/pr/org/repo/8">Cancel<span class="k">Esc</span>
+</a>
+</div>
+</div>

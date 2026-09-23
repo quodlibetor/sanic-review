@@ -9,8 +9,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use maud::html;
-use sanic_core::run::Side;
+use maud::{Markup, html};
+use sanic_core::{pr::PrKey, run::Side};
 use sanic_github::{ApiError, NewComment, NewReview, ReviewEvent};
 use sanic_store::{DraftRow, PrPage, ReviewRun};
 use serde::Deserialize;
@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::{
     App, Error, Shared,
-    page::{self, Kind, csrf_field, github_link},
+    page::{self, Card, Kind, Tone, csrf_field, github_link, pr_ref},
     pr, pr_href,
 };
 
@@ -250,12 +250,15 @@ pub async fn preview(
     let built = match built {
         Ok(built) => built,
         Err(why) => {
-            let content = html! {
-                h1 { "Nothing to submit" }
-                p { (why) }
-                p { a #cancel href=(back) { "Back to the drafts" } }
-            };
-            let page = page::layout(&app, Kind::Other, "Nothing to submit", &content);
+            let content = result_card(
+                &pr,
+                "Nothing to submit",
+                html! { p.note { (why) } },
+                html! {},
+                (&back, "Back to the drafts"),
+                Tone::Ask,
+            );
+            let page = result_page(&app, &pr.key, "Nothing to submit", &content);
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
     };
@@ -369,15 +372,20 @@ pub async fn submit(
                 path.run,
                 form.event.as_str()
             );
-            let content = html! {
-                h1 { "Not posted" }
-                p {
-                    "The drafts changed since the preview, or were already posted, so "
-                    "nothing was sent."
-                }
-                p { a href=(preview) { "Preview again" } " · " a #cancel href=(back) { "Back" } }
-            };
-            let page = page::layout(&app, Kind::Other, "Not posted", &content);
+            let content = result_card(
+                &pr,
+                "Not posted",
+                html! {
+                    p.note {
+                        "The drafts changed since the preview, or were already posted, so "
+                        "nothing was sent."
+                    }
+                },
+                html! { a.btn.primary href=(preview) { "Preview again" } },
+                (&back, "Back to the drafts"),
+                Tone::Ask,
+            );
+            let page = result_page(&app, key, "Not posted", &content);
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
     };
@@ -390,24 +398,7 @@ pub async fn submit(
             if let Err(err) = &marked {
                 warn!(url = %key.url(), "marking drafts posted failed: {err:?}");
             }
-            html! {
-                h1 { "Posted" }
-                p {
-                    // It's GitHub's to say, but only a web link is a link.
-                    @if posted.html_url.starts_with("https://") {
-                        a.gh href=(posted.html_url) { (posted.html_url) }
-                    } @else {
-                        code { (posted.html_url) }
-                    }
-                }
-                @if let Err(err) = marked {
-                    p.warn {
-                        "GitHub has the review, but marking its drafts posted failed: " (err)
-                        ". Don't submit them again."
-                    }
-                }
-                p { a #cancel href=(back) { "Back to the PR" } }
-            }
+            posted_card(&pr, &built, &posted.html_url, marked.err(), &back)
         }
         Err(err) => {
             warn!(url = %key.url(), "posting the review failed: {err}");
@@ -417,21 +408,112 @@ pub async fn submit(
                 ApiError::Other(report) => format!("{report:#}"),
                 other => other.to_string(),
             };
-            let content = html! {
-                h1 { "Posting the review failed" }
-                pre.error { (why) }
-                p {
-                    "Nothing was marked posted, and it won't be retried. If the failure "
-                    "came after GitHub took the request, the review may be there anyway: "
-                    "check " (github_link(key)) " before you submit again."
-                }
-                p { a #cancel href=(back) { "Back to the drafts" } }
-            };
-            let page = page::layout(&app, Kind::Other, "Not posted", &content);
+            let content = result_card(
+                &pr,
+                "Posting failed",
+                html! {
+                    pre.error { (why) }
+                    p.note {
+                        "Nothing was marked posted, and it won't be retried. If the failure "
+                        "came after GitHub took the request, the review may be there "
+                        "anyway: " a href=(key.url()) { "check the PR" }
+                        " before you submit again."
+                    }
+                },
+                html! {},
+                (&back, "Back to the drafts"),
+                Tone::Failed,
+            );
+            let page = result_page(&app, key, "Not posted", &content);
             return Ok((StatusCode::BAD_GATEWAY, page).into_response());
         }
     };
-    Ok(page::layout(&app, Kind::Other, "Posted", &content).into_response())
+    Ok(result_page(&app, key, "Posted", &content).into_response())
+}
+
+/// What a review GitHub took looks like: the card, with a link to it
+/// there, and a warning if its drafts couldn't be marked posted.
+fn posted_card(
+    pr: &PrPage,
+    built: &Built,
+    html_url: &str,
+    marked: Option<color_eyre::Report>,
+    back: &str,
+) -> Markup {
+    let key = &pr.key;
+    let comments = built.review.comments.len();
+    let meta = html! {
+        (pr_ref(key)) " · " (verdict(built.review.event)) " · "
+        (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
+    };
+    let extra = html! {
+        @if let Some(err) = marked {
+            p.warn {
+                "GitHub has the review, but marking its drafts posted failed: " (err)
+                ". Don't submit them again."
+            }
+        }
+    };
+    let go = html! {
+        // It's GitHub's to say, but only a web link is a link.
+        @if html_url.starts_with("https://") {
+            a.btn.primary href=(html_url) { "Open it on GitHub ↗" }
+        } @else {
+            code { (html_url) }
+        }
+    };
+    page::card(&Card {
+        kind: "Submit review",
+        heading: html! { "Posted" },
+        title: &pr.title,
+        meta,
+        extra,
+        cost: None,
+        go,
+        back: (back, "Back to the PR"),
+        tone: Tone::Done,
+    })
+}
+
+/// A submit's outcome, in the card confirm pages use.
+fn result_card(
+    pr: &PrPage,
+    heading: &str,
+    extra: Markup,
+    go: Markup,
+    back: (&str, &str),
+    tone: Tone,
+) -> Markup {
+    page::card(&Card {
+        kind: "Submit review",
+        heading: html! { (heading) },
+        title: &pr.title,
+        meta: pr_ref(&pr.key),
+        extra,
+        cost: None,
+        go,
+        back,
+        tone,
+    })
+}
+
+fn result_page(app: &App, key: &PrKey, title: &str, content: &Markup) -> Markup {
+    page::layout_in(
+        app,
+        Kind::Other,
+        title,
+        &[pr::crumb(key), html! { "submit" }],
+        content,
+    )
+}
+
+/// A verdict as people say it.
+fn verdict(event: ReviewEvent) -> &'static str {
+    match event {
+        ReviewEvent::Comment => "comment",
+        ReviewEvent::RequestChanges => "request changes",
+        ReviewEvent::Approve => "approve",
+    }
 }
 
 #[cfg(test)]

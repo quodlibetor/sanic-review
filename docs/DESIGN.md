@@ -507,8 +507,16 @@ embedded in the binary, so nothing is fetched at runtime.
   (htmx save on change, or a Save button), accept, reject, and undo back to
   pending. "Regenerate with an extra instruction" is shown disabled until
   the runner can resume a session. The PR's own actions are the TUI's: a
-  review now, with a confirm page, and archive or unarchive, which writes
+  review now, with a confirm, and archive or unarchive, which writes
   the store as `sanic-review archive` does.
+- **Confirms.** Asking before acting, and saying how a submit went, use one
+  card: what it is, the question or outcome, the PR by title with its
+  `owner/name#N`, author and head, why (a failed run's whole error, who
+  already reviewed it, the `--manual-reviews` hold), what it costs, and
+  the buttons with their keys. A posted review's card is green and links
+  to it on GitHub; a failed post's is red. Each is its own page, and from
+  the index or a PR page, `r` or the Review now link opens that page's card
+  as a dialog over the page instead, so you keep your place; see Security.
 - **Chat with the reviewer.** A PR page with a review that has an agent
   session shows, for the latest such run, `sanic-review chat <run id>`,
   with `serve`'s `--config` and `--data-dir`, to copy into a terminal,
@@ -547,11 +555,12 @@ embedded in the binary, so nothing is fetched at runtime.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
-  opens the review-now confirm page, `a` archives or unarchives, `A` shows
+  opens the review-now confirm, `a` archives or unarchives, `A` shows
   archived PRs, `i` opens the ignore editor, `c` the chat commands.
   `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
   skip a folded group. `q` closes the help, or else goes back to
-  the index. A confirm page takes `y`, and `Esc` or `q` cancels. Keys are
+  the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`
+  cancels; on a result page `Esc` takes its way back. Keys are
   ignored while you type in a draft; `Esc` leaves it.
 - **Settings.** The dashboard can edit settings such as
   `review_requests.teams`. Edits are written back to the config file,
@@ -713,6 +722,15 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   dashboard counts, and no `Referer` doesn't, since typed URLs and
   bookmarks send none. Keys also do nothing just after a page opens or
   comes to the front, or while held down.
+- A confirm can also open as a dialog over the index or a PR page. Only
+  the page's own script opens it, on your click or key there: it fetches
+  the confirm page and shows that page's card, so another site has no
+  way to open it, and its form posts exactly as the page's does, with the
+  token and the same-origin checks. Keys and clicks settle again when it
+  opens, keys are ignored while held, and it opens with focus on the card,
+  not its Confirm, so a stray `Enter` or `Space` presses nothing. The
+  page behind is inert while it's open, and only the latest ask opens.
+  Without the script, the link goes to the confirm page itself.
 - Responses forbid framing, so another page can't trick you into clicking
   Confirm, and the CSP allows only the dashboard's own scripts. The
   referrer policy is `same-origin`: links out to GitHub carry no

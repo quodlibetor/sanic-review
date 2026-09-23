@@ -139,6 +139,10 @@ This file isn't in the diff.</pre>
 <p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
 </div>
 </div>
+<div class="overlay" id="dialog" hidden>
+<div class="popup dialog" role="dialog" aria-modal="true">
+</div>
+</div>
 <div id="notice" hidden>
 </div>
 </body>

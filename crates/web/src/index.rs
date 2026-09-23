@@ -464,7 +464,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     };
     let actions = html! {
         @if why.is_some() {
-            a.linkbtn href={ (href) "/review-now" } { "review now " (keycap("r")) }
+            a.linkbtn href={ (href) "/review-now" } data-dialog { "review now " (keycap("r")) }
         }
         a.linkbtn href={ (href) "/ignore" } { "ignore by title " (keycap("i")) }
         @if pr.chat_run.is_some() {
