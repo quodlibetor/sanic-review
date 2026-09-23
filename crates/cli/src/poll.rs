@@ -1,6 +1,11 @@
 //! Turning GitHub state into stored snapshots and detected triggers.
 
-use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use sanic_core::pr::TeamRef;
 
@@ -70,6 +75,70 @@ impl GithubApi for Client {
     }
 }
 
+/// What a reconcile found, in watched repos.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    /// PRs that request your review.
+    pub requested: Vec<PrKey>,
+    /// The other PRs that involve you.
+    pub involved: Vec<PrKey>,
+}
+
+/// How soon a queued PR is refreshed: earlier variants first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Priority {
+    /// A reconcile found it requesting your review.
+    Requested,
+    /// A reconcile found it involving you.
+    Involved,
+    /// Only a notification pointed at it.
+    Notified,
+}
+
+/// PRs waiting to be refreshed, most urgent first and each once. A PR
+/// queued again keeps its more urgent priority.
+#[derive(Debug, Default)]
+pub struct RefreshQueue {
+    order: BTreeSet<(Priority, PrKey)>,
+    queued: HashMap<PrKey, Priority>,
+}
+
+impl RefreshQueue {
+    pub fn push(&mut self, key: PrKey, priority: Priority) {
+        match self.queued.get(&key) {
+            Some(&queued) if queued <= priority => return,
+            Some(&queued) => {
+                self.order.remove(&(queued, key.clone()));
+            }
+            None => {}
+        }
+        self.order.insert((priority, key.clone()));
+        self.queued.insert(key, priority);
+    }
+
+    pub fn extend(&mut self, keys: impl IntoIterator<Item = PrKey>, priority: Priority) {
+        for key in keys {
+            self.push(key, priority);
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<(PrKey, Priority)> {
+        let (priority, key) = self.order.pop_first()?;
+        self.queued.remove(&key);
+        Some((key, priority))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+}
+
 /// A refreshed PR that matched the config.
 #[derive(Debug)]
 pub struct Refreshed {
@@ -134,7 +203,7 @@ impl<G: GithubApi> Poller<G> {
     /// Open PRs that request your review or involve you, in watched repos.
     /// Also refreshes your team memberships, and marks tracked PRs missing
     /// from the result as no longer open.
-    pub async fn reconcile(&mut self) -> Result<Vec<PrKey>, ApiError> {
+    pub async fn reconcile(&mut self) -> Result<Reconciled, ApiError> {
         // Without teams, team requests just stop counting; discovery still
         // works, so a lookup failure shouldn't stop the reconcile.
         match self.github.my_teams().await {
@@ -154,15 +223,19 @@ impl<G: GithubApi> Poller<G> {
             .github
             .search_prs(&recent(INVOLVES, since.as_deref()))
             .await?;
-        let mut keys: Vec<PrKey> = requested
-            .into_iter()
-            .chain(involved)
-            .filter(|k| self.config.watches(&k.repo))
-            .collect();
-        keys.sort();
-        keys.dedup();
-        self.store.keep_open(&keys)?;
-        Ok(keys)
+        let watched = |keys: Vec<PrKey>| -> BTreeSet<PrKey> {
+            keys.into_iter()
+                .filter(|k| self.config.watches(&k.repo))
+                .collect()
+        };
+        let requested = watched(requested);
+        let involved: BTreeSet<PrKey> = &watched(involved) - &requested;
+        let found: Vec<PrKey> = requested.union(&involved).cloned().collect();
+        self.store.keep_open(&found)?;
+        Ok(Reconciled {
+            requested: requested.into_iter().collect(),
+            involved: involved.into_iter().collect(),
+        })
     }
 
     /// PRs in watched repos with notifications since the last poll, and
@@ -397,8 +470,37 @@ mod tests {
             searched(INVOLVES),
             vec![key("org/repo", 1), key("org/other", 2)],
         );
-        let keys = poller(github).reconcile().await.unwrap();
-        assert_eq!(keys, [key("org/other", 2), key("org/repo", 1)]);
+        let found = poller(github).reconcile().await.unwrap();
+        assert_eq!(
+            found,
+            Reconciled {
+                requested: vec![key("org/repo", 1)],
+                involved: vec![key("org/other", 2)],
+            }
+        );
+    }
+
+    #[test]
+    fn review_requests_are_refreshed_first_and_each_pr_once() {
+        let mut queue = RefreshQueue::default();
+        queue.push(key("org/a", 1), Priority::Notified);
+        queue.push(key("org/b", 2), Priority::Involved);
+        queue.push(key("org/z", 3), Priority::Requested);
+        // Queued again: a more urgent priority wins, a less urgent one
+        // changes nothing.
+        queue.push(key("org/a", 1), Priority::Requested);
+        queue.push(key("org/z", 3), Priority::Notified);
+        assert_eq!(queue.len(), 3);
+        let order: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+        assert_eq!(
+            order,
+            [
+                (key("org/a", 1), Priority::Requested),
+                (key("org/z", 3), Priority::Requested),
+                (key("org/b", 2), Priority::Involved),
+            ]
+        );
+        assert!(queue.is_empty());
     }
 
     #[tokio::test]

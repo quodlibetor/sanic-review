@@ -207,7 +207,11 @@ against stored state, never from notification payloads.
   are paginated in full, and only fetched when a path-scoped entry covers
   the repo.
 - **Sequential refreshes.** Both loops queue PR keys, and one task refreshes
-  the queue in turn. A rate limit pauses everything and keeps the queue.
+  the queue in turn, most urgent first: PRs the reconcile found requesting
+  your review, then the rest it found involving you, then PRs only a
+  notification pointed at. A PR is queued once, at its most urgent
+  priority. A rate limit pauses everything and keeps the queue, priorities
+  included.
 
 ## Triggers
 
