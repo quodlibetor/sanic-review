@@ -1262,7 +1262,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     // And the PR page says it too.
     let page = f.get("/pr/org/repo/9").await.body;
     assert!(
-        page.contains(r#"<span class="state good" title="mergeable">mergeable</span>"#),
+        page.contains(r#"<span class="state good">mergeable</span>"#),
         "{page}"
     );
     // Not in either list any more, a PR's page still says where it stands.
@@ -1277,9 +1277,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
         .unwrap();
     let page = f.get("/pr/org/repo/8").await.body;
     assert!(
-        page.contains(
-            r#"<span class="state quiet" title="changes requested">changes requested</span>"#
-        ),
+        page.contains(r#"<span class="state quiet">changes requested</span>"#),
         "{page}"
     );
     // With nothing to say, the header says nothing.
@@ -1303,5 +1301,25 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     assert!(
         all.contains(r#"<span class="state quiet">archived</span>"#),
         "{all}"
+    );
+}
+
+#[test]
+fn a_long_state_keeps_its_most_pressing_words_in_the_column() {
+    use sanic_core::state::{Approval, Checks, PrState};
+
+    let state = PrState {
+        approval: Approval::Approved(Checks::Failing),
+        unanswered: 2,
+        mine: true,
+    };
+    assert_eq!(
+        crate::page::fitted_state_cell(state).into_string(),
+        r#"<span class="state act" title="approved · ci failing · 2 unanswered">approved · 2 new</span>"#
+    );
+    // The PR page has the room for all of it.
+    assert_eq!(
+        crate::page::state_cell(state).into_string(),
+        r#"<span class="state act">approved · ci failing · 2 unanswered</span>"#
     );
 }

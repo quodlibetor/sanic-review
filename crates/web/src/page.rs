@@ -186,12 +186,29 @@ pub fn elsewhere(target: &str) -> Markup {
 /// Where a PR stands, in full, styled by how much it asks of you: as the
 /// TUI's state column, which has less room.
 pub fn state_cell(state: PrState) -> Markup {
-    let urgency = match state.urgency() {
+    let status = state.status();
+    html! { span.state.(urgency_class(state)) { (status) } }
+}
+
+/// Characters of state the index's state column holds at most; the
+/// column, sized to its widest cell (see `style.css`), stays that narrow.
+const STATE_COLUMN: usize = 24;
+
+/// [`state_cell`] fitted to the index's column as the TUI fits its own, so
+/// the most pressing word is the one kept; the whole of it is on hover.
+pub fn fitted_state_cell(state: PrState) -> Markup {
+    let full = state.status();
+    html! {
+        span.state.(urgency_class(state)) title=(full) {
+            (state.fit(full.clone(), STATE_COLUMN))
+        }
+    }
+}
+
+fn urgency_class(state: PrState) -> &'static str {
+    match state.urgency() {
         Urgency::Act => "act",
         Urgency::Good => "good",
         Urgency::Quiet => "quiet",
-    };
-    let status = state.status();
-    // The index cuts it to its column; the whole of it is on hover.
-    html! { span.state.(urgency) title=(status) { (status) } }
+    }
 }
