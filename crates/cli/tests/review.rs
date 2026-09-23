@@ -154,8 +154,16 @@ async fn mock_github(head: &str, base: &str) -> MockServer {
     server
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn serve_drafts_a_requested_review() {
+/// A mock GitHub, a local "github.com" and a fake `claude`, in one tempdir.
+struct World {
+    dir: TempDir,
+    _server: MockServer,
+    config: std::path::PathBuf,
+    fake: std::path::PathBuf,
+    data: std::path::PathBuf,
+}
+
+async fn world() -> World {
     let dir = TempDir::new().unwrap();
     let remote = dir.path().join("github");
     let (head, base) = git_remote(&remote);
@@ -177,64 +185,117 @@ async fn serve_drafts_a_requested_review() {
         ),
     )
     .unwrap();
-
     let data = dir.path().join("data");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
-        .arg("serve")
-        .arg("--config")
-        .arg(&config)
-        .arg("--data-dir")
-        .arg(&data)
-        .env("GITHUB_TOKEN", "t0ken")
-        .env("GH_TOKEN", "t0ken")
-        .env("RUST_LOG", "info")
-        .env("NO_COLOR", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+    World {
+        dir,
+        _server: server,
+        config,
+        fake,
+        data,
+    }
+}
+
+impl World {
+    fn set_quiet_secs(&self, secs: u64) {
+        let text = std::fs::read_to_string(&self.config).unwrap();
+        let text = replace_number(&text, "quiet_secs = ", secs);
+        std::fs::write(&self.config, text).unwrap();
+    }
+
+    /// Runs `serve` until it prints a line containing `needle`, then kills
+    /// it and returns that line.
+    async fn serve_until(&self, needle: &'static str) -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
+            .arg("serve")
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--data-dir")
+            .arg(&self.data)
+            .env("GITHUB_TOKEN", "t0ken")
+            .env("GH_TOKEN", "t0ken")
+            // The scheduler says at debug level when it skips a reviewed head.
+            .env("RUST_LOG", "info,sanic_review::schedule=debug")
+            .env("NO_COLOR", "1")
+            .current_dir(self.dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let found = tokio::task::spawn_blocking(move || {
+            let mut seen = Vec::new();
+            while let Ok(line) = rx.recv_timeout(Duration::from_secs(30)) {
+                if line.contains(needle) {
+                    return Ok(line);
+                }
+                seen.push(line);
+            }
+            Err(seen)
+        })
+        .await
         .unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        found.unwrap_or_else(|seen| panic!("no `{needle}` line; output:\n{}", seen.join("\n")))
+    }
+}
 
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let found = tokio::task::spawn_blocking(move || {
-        let mut seen = Vec::new();
-        while let Ok(line) = rx.recv_timeout(Duration::from_secs(30)) {
-            if line.contains("drafted") {
-                return Ok(line);
-            }
-            seen.push(line);
-        }
-        Err(seen)
-    })
-    .await
-    .unwrap();
-    child.kill().unwrap();
-    child.wait().unwrap();
+/// Replaces the number after `key` on its line with `value`.
+fn replace_number(text: &str, key: &str, value: u64) -> String {
+    text.lines()
+        .map(|line| match line.strip_prefix(key) {
+            Some(_) => format!("{key}{value}"),
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    let line =
-        found.unwrap_or_else(|seen| panic!("no review drafted; output:\n{}", seen.join("\n")));
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_drafts_a_requested_review() {
+    let w = world().await;
+    let line = w.serve_until("drafted").await;
     assert!(line.contains("org/repo#7"), "{line}");
     assert!(line.contains("Renames a line."), "{line}");
     assert!(line.contains("unanchored=1"), "{line}");
 
-    let env = std::fs::read_to_string(fake.join("env")).unwrap();
+    let env = std::fs::read_to_string(w.fake.join("env")).unwrap();
     assert!(
         !env.contains("t0ken"),
         "the agent saw a GitHub token:\n{env}"
     );
 
-    let store = Store::open(&data.join("state.db")).unwrap();
+    let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
     let drafts = store.drafts(1).unwrap();
     assert_eq!(drafts[0].kind, "summary");
     assert!(!drafts[1].unanchored);
     assert!(drafts[2].unanchored);
-    assert!(!data.join("worktrees/1").exists());
+    assert!(!w.data.join("worktrees/1").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_debounced_across_a_restart_is_still_reviewed() {
+    let w = world().await;
+    // The first process sees the request but stops before the review is due.
+    w.set_quiet_secs(3600);
+    w.serve_until("review requested at").await;
+    let store = Store::open(&w.data.join("state.db")).unwrap();
+    assert_eq!(store.run_counts().unwrap().queued, 0);
+
+    // After a restart the request is standing, not new, and still reviewed.
+    w.set_quiet_secs(0);
+    w.serve_until("drafted").await;
+
+    // Once reviewed, another restart doesn't review the same head again.
+    w.serve_until("already reviewed").await;
+    assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
 }

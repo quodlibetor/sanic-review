@@ -86,6 +86,25 @@ impl Update {
     }
 }
 
+/// A review request that was already standing when this process first
+/// refreshed the PR. Detection treats a standing request as seen, so without
+/// this a request that arrived just before a restart, while its review was
+/// still being debounced, would never be reviewed. Heads already reviewed
+/// are skipped when the run is queued.
+#[must_use]
+pub fn standing_request(refreshed: &Refreshed, me: &str) -> Option<Trigger> {
+    let snap = &refreshed.snapshot;
+    let already = refreshed
+        .triggers
+        .iter()
+        .any(|t| matches!(t, Trigger::ReviewRequested { .. }));
+    (snap.review_requested && !snap.is_authored_by(me) && !already).then(|| {
+        Trigger::ReviewRequested {
+            head_sha: snap.head_sha.clone(),
+        }
+    })
+}
+
 /// Pending reviews and when each is due.
 #[derive(Debug, Default)]
 pub struct Debouncer {
@@ -285,23 +304,54 @@ mod tests {
         assert_eq!(d.next_due(), Some(t0 + Duration::from_secs(60) + QUIET));
     }
 
-    fn store() -> Arc<Mutex<Store>> {
-        let mut store = Store::open_in_memory().unwrap();
-        let snapshot = PrSnapshot {
+    fn refreshed(author: &str, requested: bool, triggers: Vec<Trigger>) -> Refreshed {
+        Refreshed {
+            snapshot: snapshot(author, requested),
+            profile: "default".into(),
+            triggers,
+        }
+    }
+
+    #[test]
+    fn standing_requests_on_others_prs_are_reviewed() {
+        assert_eq!(
+            standing_request(&refreshed("alice", true, vec![]), "me"),
+            Some(requested("h1"))
+        );
+        assert_eq!(standing_request(&refreshed("Me", true, vec![]), "me"), None);
+        assert_eq!(
+            standing_request(&refreshed("alice", false, vec![]), "me"),
+            None
+        );
+        // A fresh request already triggers a review.
+        assert_eq!(
+            standing_request(&refreshed("alice", true, vec![requested("h1")]), "me"),
+            None
+        );
+    }
+
+    fn snapshot(author: &str, review_requested: bool) -> PrSnapshot {
+        PrSnapshot {
             key: key(1),
             title: "t".into(),
             url: "u".into(),
-            author: "alice".into(),
+            author: author.into(),
             head_sha: "h1".into(),
             base_sha: "b".into(),
             is_draft: false,
-            review_requested: true,
+            review_requested,
             requested_teams: vec![],
             reviews: vec![],
             threads: vec![],
             files: None,
-        };
-        store.record(&snapshot, "default", &[]).unwrap();
+        }
+    }
+
+    fn store() -> Arc<Mutex<Store>> {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .record(&snapshot("alice", true), "default", &[])
+            .unwrap();
         Arc::new(Mutex::new(store))
     }
 
