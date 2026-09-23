@@ -191,6 +191,7 @@ fn describe(trigger: &Trigger) -> String {
             review_ids.len(),
             plural(review_ids.len(), "", "s"),
         ),
+        Trigger::Approved { reviewers, .. } => format!("approved by {}", reviewers.join(", ")),
     }
 }
 
@@ -224,6 +225,13 @@ mod tests {
                 review_ids: vec![]
             }),
             "feedback on your PR: 1 comment, 0 reviews"
+        );
+        assert_eq!(
+            describe(&Trigger::Approved {
+                review_ids: vec!["r".into(), "s".into()],
+                reviewers: vec!["bob".into(), "carol".into()]
+            }),
+            "approved by bob, carol"
         );
     }
 }

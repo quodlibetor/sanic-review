@@ -37,6 +37,11 @@ pub enum Trigger {
         comment_ids: Vec<String>,
         review_ids: Vec<String>,
     },
+    /// Someone approved your PR. Informational: it starts no run.
+    Approved {
+        review_ids: Vec<String>,
+        reviewers: Vec<String>,
+    },
 }
 
 impl Trigger {
@@ -48,6 +53,7 @@ impl Trigger {
             Self::Push { .. } => "push",
             Self::Reply { .. } => "reply",
             Self::Feedback { .. } => "feedback",
+            Self::Approved { .. } => "approved",
         }
     }
 }
@@ -58,9 +64,16 @@ pub fn detect(me: &str, known: Option<&Known>, snapshot: &PrSnapshot) -> Vec<Tri
     let is_me = |login: &str| login.eq_ignore_ascii_case(me);
     if snapshot.is_authored_by(me) {
         return known
-            .and_then(|known| feedback(known, snapshot, is_me))
-            .into_iter()
-            .collect();
+            .map(|known| {
+                [
+                    feedback(known, snapshot, &is_me),
+                    approvals(known, snapshot, &is_me),
+                ]
+                .into_iter()
+                .flatten()
+                .collect()
+            })
+            .unwrap_or_default();
     }
 
     let mut triggers = Vec::new();
@@ -101,7 +114,23 @@ pub fn detect(me: &str, known: Option<&Known>, snapshot: &PrSnapshot) -> Vec<Tri
     triggers
 }
 
-fn feedback(known: &Known, snapshot: &PrSnapshot, is_me: impl Fn(&str) -> bool) -> Option<Trigger> {
+/// Reviews by others that `known` hasn't seen.
+fn new_reviews<'a>(
+    known: &'a Known,
+    snapshot: &'a PrSnapshot,
+    is_me: &'a impl Fn(&str) -> bool,
+) -> impl Iterator<Item = &'a crate::pr::Review> {
+    snapshot
+        .reviews
+        .iter()
+        .filter(move |r| !is_me(&r.author) && !known.review_ids.contains(&r.id))
+}
+
+fn feedback(
+    known: &Known,
+    snapshot: &PrSnapshot,
+    is_me: &impl Fn(&str) -> bool,
+) -> Option<Trigger> {
     let comment_ids: Vec<String> = snapshot
         .threads
         .iter()
@@ -109,18 +138,29 @@ fn feedback(known: &Known, snapshot: &PrSnapshot, is_me: impl Fn(&str) -> bool) 
         .filter(|c| !is_me(&c.author) && !known.comment_ids.contains(&c.id))
         .map(|c| c.id.clone())
         .collect();
-    // A bare approval needs no response; anything with words or a change
-    // request does.
-    let review_ids: Vec<String> = snapshot
-        .reviews
-        .iter()
-        .filter(|r| !is_me(&r.author) && !known.review_ids.contains(&r.id))
+    // A bare approval needs no response (it's reported by `approvals`);
+    // anything with words or a change request does.
+    let review_ids: Vec<String> = new_reviews(known, snapshot, is_me)
         .filter(|r| !r.body.trim().is_empty() || r.state == ReviewState::ChangesRequested)
         .map(|r| r.id.clone())
         .collect();
     (!comment_ids.is_empty() || !review_ids.is_empty()).then_some(Trigger::Feedback {
         comment_ids,
         review_ids,
+    })
+}
+
+fn approvals(
+    known: &Known,
+    snapshot: &PrSnapshot,
+    is_me: &impl Fn(&str) -> bool,
+) -> Option<Trigger> {
+    let approved: Vec<_> = new_reviews(known, snapshot, is_me)
+        .filter(|r| r.state == ReviewState::Approved)
+        .collect();
+    (!approved.is_empty()).then(|| Trigger::Approved {
+        review_ids: approved.iter().map(|r| r.id.clone()).collect(),
+        reviewers: approved.iter().map(|r| r.author.clone()).collect(),
     })
 }
 
@@ -284,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn feedback_on_my_pr_skips_bare_approvals_and_my_own_comments() {
+    fn bare_approvals_are_reported_but_need_no_response() {
         let before = snapshot("me");
         let mut after = before.clone();
         after.threads = vec![thread("t", vec![comment("c1", "me"), comment("c2", "bob")])];
@@ -295,10 +335,16 @@ mod tests {
         ];
         assert_eq!(
             detect(ME, Some(&known_from(&before)), &after),
-            [Trigger::Feedback {
-                comment_ids: vec!["c2".into()],
-                review_ids: vec!["r2".into(), "r3".into()],
-            }]
+            [
+                Trigger::Feedback {
+                    comment_ids: vec!["c2".into()],
+                    review_ids: vec!["r2".into(), "r3".into()],
+                },
+                Trigger::Approved {
+                    review_ids: vec!["r1".into()],
+                    reviewers: vec!["bob".into()],
+                },
+            ]
         );
     }
 

@@ -146,8 +146,9 @@ Rules:
 - **First sight is a baseline.** The first time a PR is seen, its existing
   comments and reviews are recorded without triggering. Only a pending review
   request triggers then, so starting the tool doesn't replay history.
-- **Bare approvals.** On your PRs, a review triggers `respond` only if it has
-  a body or requests changes.
+- **Approvals.** On your PRs, an approval raises an informational
+  `approved` trigger that starts no run. It also triggers `respond` if it has
+  a body; any review that requests changes does too.
 - **Stale drafts.** When a new head SHA arrives, pending drafts anchored on
   lines that changed are marked `stale`. They stay visible, not deleted.
 
@@ -214,6 +215,9 @@ available when tuning instruction files.
 
 - **Index.** PRs with unseen or pending drafts, grouped as "reviews I owe" and
   "my PRs", each with a count of pending drafts and the latest run status.
+  "My PRs" lists every open PR you authored in a watched repo, with its
+  review state (approved, changes requested, waiting), not only ones with
+  drafts.
 - **PR page.** Agent summary, drafts in diff context, and for each draft:
   inline edit (htmx save on blur), accept, reject, regenerate with an extra
   instruction.
