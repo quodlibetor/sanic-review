@@ -200,7 +200,12 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
         [TeamRef::new("lacework-dev", "storage-platform")]
     );
     assert_eq!(snap.reviews[0].state, ReviewState::ChangesRequested);
-    assert_eq!(snap.reviews[1].author, "ghost");
+    assert_eq!(snap.reviews[0].commit.as_deref(), Some("aaa111"));
+    assert!(!snap.reviews[0].by_bot);
+    // A GitHub App's review, by author type.
+    assert!(snap.reviews[1].by_bot);
+    assert_eq!(snap.reviews[2].author, "ghost");
+    assert_eq!(snap.reviews[2].commit, None);
     assert_eq!(snap.threads[0].id, CONVERSATION_THREAD);
     assert_eq!(snap.threads[1].path.as_deref(), Some("src/retry.rs"));
     assert_eq!(snap.threads[1].comments[1].author, "alice");

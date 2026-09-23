@@ -265,6 +265,11 @@ Rules:
   - archived ones (see Archive);
   - drafts, while `skip_drafts` is on (the default; a profile's own
     `skip_drafts` overrides `[review_requests]`);
+  - ones already reviewed: someone, you included, left a submitted review
+    (approving, requesting changes or commenting) on the current head
+    commit. Pending and dismissed reviews don't count, and bot accounts'
+    reviews (a `Bot` author, or a login ending in `[bot]`) are ignored
+    altogether. A push makes the PR eligible again;
   - ones whose title matches a `skip_titles` glob, from `[review_requests]`
     or from the PR's profile. Globs match the whole title, ignoring case,
     and only glob syntax is special, so `(` and `)` match themselves.
@@ -272,7 +277,9 @@ Rules:
   The check runs when a review comes due, against the PR and config at
   that moment, so edits, archiving and config reloads in the meantime
   count. A skipped review is logged on the PR, e.g. "review skipped: title
-  matches `build(deps)*`". The PR is still tracked and shown everywhere.
+  matches `build(deps)*`" or "review skipped: already reviewed by alice at
+  0123abcd". When several reasons apply, the first in the list above wins.
+  The PR is still tracked and shown everywhere.
 - **Archive.** Archiving a PR is yours alone to set and clear: new pushes
   and comments don't clear it. An archived PR is silent: it gets no
   automatic runs of any kind, and archiving supersedes every run of it
@@ -481,9 +488,12 @@ embedded in the binary, so nothing is fetched at runtime.
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
     `waiting` without a countdown means no run and no known due time.
-    A PR that isn't reviewed automatically shows why instead, e.g.
-    `skipped: draft` or `skipped: title`. A failed or crashed run
-    also shows the first line of its error.
+    A PR that isn't reviewed automatically shows why instead: `archived`,
+    `skipped: draft`, `reviewed by you, alice` (you first, then others,
+    two names at most and `+N` for the rest) or `skipped: title`.
+    `sanic_core::skip::SkipRules::decide` makes that decision and
+    `Skip::status` words it, for the TUI and the dashboard alike. A failed
+    or crashed run also shows the first line of its error.
   - **Your PRs:** every open PR you authored, with its review state
     (approved, changes requested, waiting) and pending drafts.
   - **Activity:** recent triggers and run queues, starts and finishes, with

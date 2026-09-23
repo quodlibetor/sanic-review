@@ -133,6 +133,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         }
     };
 
+    let me_for_scheduler = me.clone();
     let mut poller = Poller::new(github, store, config, me);
     // Kept past the `select!`, so running reviews can wind down cleanly
     // rather than be dropped midway.
@@ -148,7 +149,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         ) => result,
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
-            args.manual_reviews,
+            args.manual_reviews, me_for_scheduler,
         ) => result,
         () = handle_requests(requests_rx, run_store, Starter {
             manual: args.manual_reviews,

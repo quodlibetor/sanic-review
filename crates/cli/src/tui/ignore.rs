@@ -256,6 +256,8 @@ mod tests {
             profile: "p".into(),
             is_draft: false,
             archived: false,
+            head_sha: "h".into(),
+            head_reviewers: vec![],
             latest_run: None,
             pending_drafts: 0,
         }

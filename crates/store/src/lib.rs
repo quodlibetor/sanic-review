@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0007_start_requests.sql"),
     include_str!("migrations/0008_views.sql"),
     include_str!("migrations/0009_closed_prs.sql"),
+    include_str!("migrations/0010_review_commit.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -52,6 +53,9 @@ pub struct PrSummary {
     pub title: String,
     pub is_draft: bool,
     pub archived: bool,
+    pub head_sha: String,
+    /// See [`Store::head_reviewers`].
+    pub head_reviewers: Vec<String>,
 }
 
 /// A logged trigger, as read back from the event log.
@@ -273,10 +277,10 @@ impl Store {
     /// What decides whether `key` is reviewed automatically, as last
     /// polled. `None` if it isn't tracked.
     pub fn pr_summary(&self, key: &PrKey) -> Result<Option<PrSummary>> {
-        Ok(self
+        let Some(mut summary) = self
             .conn
             .query_row(
-                "SELECT profile, title, is_draft, archived FROM prs
+                "SELECT profile, title, is_draft, archived, head_sha FROM prs
                  WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
@@ -285,10 +289,34 @@ impl Store {
                         title: row.get(1)?,
                         is_draft: row.get(2)?,
                         archived: row.get(3)?,
+                        head_sha: row.get(4)?,
+                        head_reviewers: Vec::new(),
                     })
                 },
             )
-            .optional()?)
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        summary.head_reviewers = self.head_reviewers(key, &summary.head_sha)?;
+        Ok(Some(summary))
+    }
+
+    /// Who left a submitted review (approving, requesting changes or
+    /// commenting) on `head`, oldest first and each once. Bots don't count.
+    pub fn head_reviewers(&self, key: &PrKey, head: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT author FROM reviews
+             WHERE repo = ?1 AND number = ?2 AND commit_sha = ?3 AND NOT by_bot
+                   AND state IN ('APPROVED', 'CHANGES_REQUESTED', 'COMMENTED')
+             GROUP BY lower(author) ORDER BY min(submitted_at), min(rowid)",
+        )?;
+        let reviewers = stmt
+            .query_map(params![key.repo.to_string(), key.number, head], |row| {
+                row.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(reviewers)
     }
 
     /// Archives or unarchives `key`. Archiving also supersedes every run of
@@ -437,9 +465,11 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
     }
     for r in &snap.reviews {
         tx.execute(
-            "INSERT INTO reviews (id, repo, number, author, state, body, submitted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (id) DO UPDATE SET state = excluded.state, body = excluded.body",
+            "INSERT INTO reviews (id, repo, number, author, state, body, submitted_at,
+                                  commit_sha, by_bot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (id) DO UPDATE SET state = excluded.state, body = excluded.body,
+                 commit_sha = excluded.commit_sha, by_bot = excluded.by_bot",
             params![
                 r.id,
                 repo,
@@ -447,7 +477,9 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
                 r.author,
                 r.state.as_str(),
                 r.body,
-                r.submitted_at
+                r.submitted_at,
+                r.commit,
+                r.by_bot
             ],
         )?;
     }
@@ -484,6 +516,8 @@ mod tests {
                 state: ReviewState::Commented,
                 body: "hm".into(),
                 submitted_at: "2026-01-01T00:00:00Z".into(),
+                commit: Some("h1".into()),
+                by_bot: false,
             }],
             threads: vec![Thread {
                 id: "t1".into(),
@@ -595,6 +629,9 @@ mod tests {
                 title: "build(deps): bump".into(),
                 is_draft: false,
                 archived: false,
+                head_sha: "h1".into(),
+                // The fixture's review is on the head.
+                head_reviewers: vec!["bob".into()],
             })
         );
     }
@@ -637,6 +674,37 @@ mod tests {
         );
         store.forget_closed(&snap.key).unwrap();
         assert_eq!(store.closed_at(&snap.key).unwrap(), None);
+    }
+
+    #[test]
+    fn head_reviewers_are_people_with_a_submitted_review_on_the_head() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snap = snapshot();
+        let review =
+            |id: &str, author: &str, state: ReviewState, commit: &str, by_bot: bool| Review {
+                id: id.into(),
+                author: author.into(),
+                state,
+                body: String::new(),
+                submitted_at: format!("2026-01-01T00:00:0{}Z", id.len()),
+                commit: Some(commit.into()),
+                by_bot,
+            };
+        snap.reviews = vec![
+            review("r1", "carol", ReviewState::Approved, "h1", false),
+            review("r22", "Bob", ReviewState::Commented, "h1", false),
+            review("r333", "bob", ReviewState::ChangesRequested, "h1", false),
+            review("r4", "dave", ReviewState::Approved, "old", false),
+            review("r5", "erin", ReviewState::Pending, "h1", false),
+            review("r6", "fred", ReviewState::Dismissed, "h1", false),
+            review("r7", "renovate[bot]", ReviewState::Approved, "h1", true),
+        ];
+        store.record(&snap, "default", &[]).unwrap();
+        assert_eq!(
+            store.head_reviewers(&snap.key, "h1").unwrap(),
+            ["carol", "Bob"]
+        );
+        assert!(store.head_reviewers(&snap.key, "h2").unwrap().is_empty());
     }
 
     #[test]

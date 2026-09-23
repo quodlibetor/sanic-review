@@ -8,7 +8,11 @@ use std::{
 use axum::extract::{Query, State};
 use color_eyre::eyre::Result;
 use maud::{Markup, html};
-use sanic_core::{clock::window_start, pr::PrKey, skip::Skip};
+use sanic_core::{
+    clock::window_start,
+    pr::PrKey,
+    skip::{PrFacts, Skip},
+};
 use sanic_store::{MyPr, OwedReview, ReviewState, RunCounts};
 use serde::Deserialize;
 
@@ -47,10 +51,16 @@ impl Overview {
             let skips = app.skips.borrow();
             owed.iter()
                 .filter_map(|pr| {
-                    Some((
-                        pr.key.clone(),
-                        skips.check(&pr.profile, &pr.title, pr.is_draft)?,
-                    ))
+                    let facts = PrFacts {
+                        profile: &pr.profile,
+                        title: &pr.title,
+                        is_draft: pr.is_draft,
+                        archived: pr.archived,
+                        head_sha: &pr.head_sha,
+                        head_reviewers: &pr.head_reviewers,
+                        me: &app.me,
+                    };
+                    Some((pr.key.clone(), skips.decide(&facts)?))
                 })
                 .collect()
         };
@@ -87,9 +97,7 @@ pub fn owed_status(
     // period is newer news than the last run.
     match (overview.waiting.get(&pr.key), latest) {
         _ if pr.archived => ("archived".into(), "dim"),
-        _ if let Some(skip) = overview.skipped.get(&pr.key) => {
-            (format!("skipped: {}", skip.label()), "dim")
-        }
+        _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), "dim"),
         (Some(left), _) => (format!("waiting {}", countdown(left.as_secs())), "dim"),
         (None, None) => ("waiting".into(), "dim"),
         (None, Some("queued")) if manual_reviews => ("held".into(), "held"),
