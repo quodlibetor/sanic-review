@@ -384,7 +384,8 @@ available when tuning instruction files.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
-  TUI. Its only actions are rerunning a review and archiving a PR.
+  TUI. Its only actions are rerunning a review, archiving a PR and adding
+  a `skip_titles` pattern to the config.
   - **Reviews you owe:** open PRs by others that request your review, with the
     latest run's status (queued, held by `--no-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A review still waiting
@@ -413,6 +414,15 @@ available when tuning instruction files.
   `a` archives or unarchives the selected PR in either PR pane. Archived
   PRs are hidden, and each pane's title counts them; `A` shows them,
   dimmed and marked `archived`.
+  `i` on a review you owe opens an ignore editor: the PR's title and
+  description, read-only, over a pattern prefilled with the title (glob
+  syntax escaped) to edit down, e.g. to `build(deps)*`. Under it, a live
+  preview lists the reviews you owe it would skip; an invalid glob shows
+  its error and can't be saved. Enter asks where it goes, `[review_requests]`
+  or one profile, and adds it to that `skip_titles` unless it's already
+  there. The file is edited in place, keeping comments and layout, and
+  written atomically; `serve` picks the change up through its normal
+  config reload.
   `r` on a review you owe whose latest run failed or crashed, or that's
   skipped or archived, asks for confirmation, since it spends tokens, then
   queues a full review of the PR's head as last polled. For a skipped or

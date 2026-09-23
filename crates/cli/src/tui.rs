@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -39,7 +39,10 @@ use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCoun
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
-use crate::{logging::LogLines, schedule::DueTimes};
+use self::ignore::{IgnoreEditor, Outcome};
+use crate::{config_edit, logging::LogLines, schedule::DueTimes};
+
+mod ignore;
 
 /// How often the store is reread.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -137,6 +140,8 @@ pub struct Shared {
     pub skips: watch::Receiver<SkipRules>,
     /// What you ask `serve` to do.
     pub requests: mpsc::UnboundedSender<Request>,
+    /// The ignore editor adds `skip_titles` here; `serve` reloads it.
+    pub config_path: PathBuf,
 }
 
 fn run(
@@ -180,10 +185,34 @@ fn run(
                 Flow::Request(request) => {
                     let _ = shared.requests.send(request);
                 }
+                Flow::AddSkipTitle { pattern, profile } => {
+                    app.set_notice(add_skip_title(
+                        &shared.config_path,
+                        &pattern,
+                        profile.as_deref(),
+                    ));
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Adds `pattern` to the config file's `skip_titles`, and says how that
+/// went.
+fn add_skip_title(config: &Path, pattern: &str, profile: Option<&str>) -> String {
+    let place = profile.map_or_else(
+        || "[review_requests]".to_owned(),
+        |p| format!("[profile.{p}]"),
+    );
+    match config_edit::add_skip_title_to_file(config, profile, pattern) {
+        Ok(true) => format!("added `{pattern}` to skip_titles in {place}"),
+        Ok(false) => format!("`{pattern}` is already in {place} skip_titles"),
+        Err(err) => {
+            warn!("adding a skip_titles pattern failed: {err:?}");
+            format!("couldn't add `{pattern}`: {err}")
+        }
+    }
 }
 
 /// Everything the panes show from the store.
@@ -198,6 +227,8 @@ pub struct Overview {
     pub waiting: HashMap<PrKey, Duration>,
     /// Owed reviews that aren't reviewed automatically, and why.
     pub skipped: HashMap<PrKey, Skip>,
+    /// The config's profiles, in file order.
+    pub profiles: Vec<String>,
 }
 
 impl Overview {
@@ -220,11 +251,13 @@ impl Overview {
                 ))
             })
             .collect();
+        let profiles = skips.profile_names().to_vec();
         // Not held through the queries below: it blocks a config reload.
         drop(skips);
         Ok(Self {
             owed,
             skipped,
+            profiles,
             mine: store.my_prs(&shared.me)?,
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
@@ -284,6 +317,7 @@ pub struct App {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Overlay {
     Help,
+    Ignore(Box<IgnoreEditor>),
     /// Waiting for a yes before asking for a review of this PR. `skipped`
     /// says why it wouldn't be reviewed automatically, if it wouldn't.
     ConfirmRerun {
@@ -300,6 +334,11 @@ pub enum Flow {
     Quit,
     /// Something for `serve` to do.
     Request(Request),
+    /// Add a `skip_titles` glob to the config file, globally for `None`.
+    AddSkipTitle {
+        pattern: String,
+        profile: Option<String>,
+    },
 }
 
 /// What the UI asks `serve` to do.
@@ -393,6 +432,20 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.notice = None;
+        if let Some(Overlay::Ignore(editor)) = &mut self.overlay {
+            return match editor.handle_key(key, &self.overview.profiles) {
+                Outcome::Open => Flow::Continue,
+                Outcome::Quit => Flow::Quit,
+                Outcome::Cancel => {
+                    self.overlay = None;
+                    Flow::Continue
+                }
+                Outcome::Save { pattern, profile } => {
+                    self.overlay = None;
+                    Flow::AddSkipTitle { pattern, profile }
+                }
+            };
+        }
         if let Some(Overlay::ConfirmRerun { key: pr, .. }) = &self.overlay {
             let pr = pr.clone();
             self.overlay = None;
@@ -408,6 +461,7 @@ impl App {
             KeyCode::Char('c') if ctrl => return Flow::Quit,
             KeyCode::Char('r') => self.ask_rerun(),
             KeyCode::Char('a') => return self.toggle_archive(),
+            KeyCode::Char('i') => self.open_ignore(),
             KeyCode::Char('A') => {
                 self.show_archived = !self.show_archived;
                 self.notice = Some(if self.show_archived {
@@ -460,6 +514,23 @@ impl App {
         } else {
             self.notice = Some(RERUN_HINT.into());
         }
+    }
+
+    /// Opens the ignore editor on the selected review you owe.
+    fn open_ignore(&mut self) {
+        let selected = self.lists[Pane::Owed.index()]
+            .selected()
+            .and_then(|i| self.overview.owed.get(i))
+            .filter(|_| self.focus == Pane::Owed);
+        match selected {
+            Some(pr) => self.overlay = Some(Overlay::Ignore(Box::new(IgnoreEditor::new(pr)))),
+            None => self.notice = Some("i skips reviews you owe by title".into()),
+        }
+    }
+
+    /// Shows `notice` in the status bar until the next key.
+    pub fn set_notice(&mut self, notice: String) {
+        self.notice = Some(notice);
     }
 
     /// Archives the selected PR in either PR pane, or unarchives it.
@@ -583,6 +654,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     );
     match overlay {
         Some(Overlay::Help) => render_help(frame),
+        Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
         Some(Overlay::ConfirmRerun { key, skipped }) => render_confirm(frame, key, *skipped),
         None => {}
     }
@@ -803,6 +875,7 @@ const HELP: &[(&str, &str)] = &[
     ("r", "review a failed or skipped PR again"),
     ("a", "archive or unarchive the selected PR"),
     ("A", "show or hide archived PRs"),
+    ("i", "skip PRs with titles like the selected one"),
     ("?, Esc", "close this help"),
 ];
 
@@ -878,6 +951,7 @@ mod tests {
         OwedReview {
             key: pr(repo, number),
             title: title.into(),
+            body: format!("{title}, in detail."),
             author: author.into(),
             profile: "default".into(),
             is_draft: false,
@@ -969,6 +1043,7 @@ mod tests {
                 pending_drafts: 3,
             },
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
+            profiles: vec!["default".into(), "vuln".into()],
             skipped: HashMap::from([(
                 pr("org/api", 490),
                 Skip::Title {
@@ -1199,6 +1274,48 @@ mod tests {
             app.handle_key(key(KeyCode::Char('y'))),
             Flow::Request(Request::Rerun(pr("org/api", 490)))
         );
+    }
+
+    #[test]
+    fn i_edits_a_title_glob_and_picks_where_it_goes() {
+        let mut app = app(false);
+        // The skipped dependabot PR.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('i'));
+        assert!(matches!(app.overlay, Some(Overlay::Ignore(_))));
+        // Edit "build(deps): bump tokio" down to "build(deps)*"; typing
+        // `q` or `j` goes into the pattern rather than quitting or moving.
+        for _ in 0.."): bump tokio".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        press(&mut app, KeyCode::Char(')'));
+        press(&mut app, KeyCode::Char('*'));
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('j'));
+        insta::assert_snapshot!("ignore_target", draw(&mut app, 80, 24).backend());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Flow::AddSkipTitle {
+                pattern: "build(deps)*".into(),
+                profile: Some("default".into()),
+            }
+        );
+        assert_eq!(app.overlay, None);
+
+        // An invalid glob can't be saved, and Esc cancels.
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Flow::Continue
+        );
+        press(&mut app, KeyCode::Char('['));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlay, Some(Overlay::Ignore(_))));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, None);
     }
 
     #[test]

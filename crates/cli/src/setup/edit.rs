@@ -10,6 +10,8 @@ use sanic_core::{
 };
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
+use crate::config_edit::{new_table, set_value};
+
 /// What the user picked. Each list holds every option offered, with whether
 /// it was selected; options that weren't offered are left alone.
 #[derive(Debug, Default)]
@@ -108,22 +110,6 @@ fn set_teams(doc: &mut DocumentMut, teams: &[(TeamRef, bool)]) -> Result<()> {
     set_value(doc, "review_requests", "teams", Value::Array(patterns))
 }
 
-/// Sets `[table].key`, creating the table as needed. A replaced value keeps
-/// its surrounding whitespace and trailing comment.
-fn set_value(doc: &mut DocumentMut, table: &str, key: &str, mut value: Value) -> Result<()> {
-    let item = doc.entry(table).or_insert_with(|| Item::Table(new_table()));
-    let Some(item) = item.as_table_like_mut() else {
-        bail!("`{table}` in the config is not a table");
-    };
-    if let Some(old) = item.get_mut(key).and_then(Item::as_value_mut) {
-        *value.decor_mut() = old.decor().clone();
-        *old = value;
-    } else {
-        item.insert(key, Item::Value(value));
-    }
-    Ok(())
-}
-
 enum Entry {
     /// A local checkout. Only plain ones (`"path"` or `{ repo = "path" }`)
     /// are `managed`: setup never removes one with `paths` or `remote`,
@@ -162,12 +148,6 @@ fn entry_kind(entry: &Value, base: &Path) -> Result<Entry> {
 }
 
 /// A table set off from whatever precedes it by a blank line.
-fn new_table() -> Table {
-    let mut table = Table::new();
-    table.decor_mut().set_prefix("\n");
-    table
-}
-
 /// The `repos` array of `[profile.<name>]`, creating either as needed.
 fn profile_repos<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut Array> {
     let profiles = doc.entry("profile").or_insert_with(|| {

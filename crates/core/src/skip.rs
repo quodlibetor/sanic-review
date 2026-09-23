@@ -31,6 +31,11 @@ impl TitleFilter {
         })
     }
 
+    /// Whether `pattern` is a valid title glob; the error says why not.
+    pub fn check_pattern(pattern: &str) -> Result<()> {
+        Self::new(vec![pattern.to_owned()]).map(|_| ())
+    }
+
     /// The first pattern `title` matches.
     #[must_use]
     pub fn first_match(&self, title: &str) -> Option<&str> {
@@ -79,6 +84,8 @@ pub struct SkipRules {
     pub(crate) titles: TitleFilter,
     pub(crate) drafts: bool,
     pub(crate) profiles: HashMap<String, ProfileSkips>,
+    /// Profile names in config file order.
+    pub(crate) profile_names: Vec<String>,
 }
 
 impl Default for SkipRules {
@@ -87,6 +94,7 @@ impl Default for SkipRules {
             titles: TitleFilter::default(),
             drafts: true,
             profiles: HashMap::new(),
+            profile_names: Vec::new(),
         }
     }
 }
@@ -101,6 +109,12 @@ pub struct ProfileSkips {
 }
 
 impl SkipRules {
+    /// The config's profiles, in file order.
+    #[must_use]
+    pub fn profile_names(&self) -> &[String] {
+        &self.profile_names
+    }
+
     /// Why a PR matched to `profile` isn't reviewed automatically, if it
     /// isn't.
     #[must_use]
@@ -119,6 +133,23 @@ impl SkipRules {
     }
 }
 
+/// A glob that matches exactly `title`: glob syntax in it is escaped.
+#[must_use]
+pub fn escape_title(title: &str) -> String {
+    let mut glob = String::with_capacity(title.len());
+    for c in title.chars() {
+        match c {
+            '*' | '?' | '[' | ']' | '{' | '}' | '\\' => {
+                glob.push('[');
+                glob.push(c);
+                glob.push(']');
+            }
+            _ => glob.push(c),
+        }
+    }
+    glob
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +159,7 @@ mod tests {
         SkipRules {
             titles: filter(global).unwrap(),
             drafts: true,
+            profile_names: vec!["p".into()],
             profiles: HashMap::from([(
                 "p".to_owned(),
                 ProfileSkips {
@@ -173,6 +205,21 @@ mod tests {
         assert_eq!(rules.check("other", "ok", true), None);
         rules.profiles.get_mut("p").unwrap().drafts = Some(true);
         assert_eq!(rules.check("p", "ok", true), Some(Skip::Draft));
+    }
+
+    #[test]
+    fn escaped_titles_match_only_themselves() {
+        for title in [
+            "fix: handle * and ? in [brackets]",
+            "chore: {a,b} and a \\ backslash",
+            "plain",
+        ] {
+            let glob = escape_title(title);
+            let filter = TitleFilter::new(vec![glob.clone()]).unwrap();
+            assert!(filter.first_match(title).is_some(), "{glob}");
+            assert!(filter.first_match(&format!("{title}x")).is_none(), "{glob}");
+        }
+        assert_eq!(escape_title("build(deps): x*"), "build(deps): x[*]");
     }
 
     #[test]

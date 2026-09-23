@@ -113,6 +113,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 due,
                 skips,
                 requests,
+                config_path: config_path.clone(),
             },
         )?),
         None => None,
