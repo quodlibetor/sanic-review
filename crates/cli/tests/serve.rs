@@ -78,19 +78,39 @@ async fn mock_github() -> MockServer {
     server
 }
 
+/// Lines from a running `serve`, read on a background thread.
+struct Output {
+    lines: mpsc::Receiver<String>,
+}
+
+impl Output {
+    /// Blocks until a line containing `needle` arrives, panicking with
+    /// everything seen so far if it doesn't within the timeout.
+    fn wait_for(&self, needle: &str) -> String {
+        let mut seen = Vec::new();
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(30)) {
+            if line.contains(needle) {
+                return line;
+            }
+            seen.push(line);
+        }
+        panic!(
+            "no line containing {needle:?}; output:\n{}",
+            seen.join("\n")
+        );
+    }
+}
+
+fn config_text(api_url: &str) -> String {
+    format!("[github]\napi_url = \"{api_url}\"\n\n[profile.p]\nrepos = [{{ github = \"org\" }}]\n")
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn serve_logs_a_review_request() {
+async fn serve_logs_a_review_request_and_reloads_config() {
     let server = mock_github().await;
     let dir = TempDir::new().unwrap();
     let config = dir.path().join("config.toml");
-    std::fs::write(
-        &config,
-        format!(
-            "[github]\napi_url = \"{}\"\n\n[profile.p]\nrepos = [{{ github = \"org\" }}]\n",
-            server.uri()
-        ),
-    )
-    .unwrap();
+    std::fs::write(&config, config_text(&server.uri())).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
         .arg("serve")
@@ -105,9 +125,8 @@ async fn serve_logs_a_review_request() {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-
     let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
+    let (tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if tx.send(line).is_err() {
@@ -115,24 +134,22 @@ async fn serve_logs_a_review_request() {
             }
         }
     });
-    let found = tokio::task::spawn_blocking(move || {
-        let mut seen = Vec::new();
-        while let Ok(line) = rx.recv_timeout(Duration::from_secs(30)) {
-            if line.contains("review requested at aaaabbbb") {
-                return Ok(line);
-            }
-            seen.push(line);
-        }
-        Err(seen)
+    let output = Output { lines };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let line = output.wait_for("review requested at aaaabbbb");
+        assert!(line.contains("org/repo#7"), "{line}");
+
+        std::fs::write(&config, "[profile.p]\nrepos = []\n").unwrap();
+        output.wait_for("config change not applied");
+
+        std::fs::write(&config, config_text(&server.uri())).unwrap();
+        output.wait_for("config reloaded");
     })
-    .await
-    .unwrap();
+    .await;
     child.kill().unwrap();
     child.wait().unwrap();
-
-    let line =
-        found.unwrap_or_else(|seen| panic!("no trigger logged; output:\n{}", seen.join("\n")));
-    assert!(line.contains("org/repo#7"), "{line}");
+    result.unwrap();
     assert!(dir.path().join("data/state.db").exists());
 }
 

@@ -2,6 +2,7 @@
 
 pub mod poll;
 mod serve;
+mod watch;
 
 use std::path::PathBuf;
 
