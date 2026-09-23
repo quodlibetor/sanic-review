@@ -22,9 +22,7 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
     index::{Overview, archive_form, owed_status, why},
-    page::{
-        self, Card, Kind, Tone, csrf_field, first_line, github_link, keycap, pr_ref, state_cell,
-    },
+    page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href, submit,
 };
 
@@ -84,22 +82,51 @@ pub async fn page(
         None => None,
     };
     let chat = chat::section(&app, &key, shown.as_ref().map(|run| run.id));
+    // Revising needs the shown review's agent session.
+    let revisable = match &shown {
+        Some(run) if run.status == "succeeded" => app
+            .store()
+            .session_run(run.id)
+            .map_err(Error::pr(&key))?
+            .is_some(),
+        _ => false,
+    };
+    let header = Header {
+        pr: &pr,
+        state,
+        owed,
+        overview: &overview,
+        runs: &runs,
+        shown: shown.as_ref(),
+        chat: chat.is_some(),
+        revisable,
+    };
     let content = html! {
-        (pr_header(&app, &pr, state, owed, &overview, chat.is_some()))
-        @if !pr.body.trim().is_empty() {
-            details.description {
-                summary { "Description" }
-                pre { (pr.body) }
-            }
-        }
-        (run_list(&pr.key, &runs, shown.as_ref()))
+        (pr_header(&app, &header))
         @if let Some(run) = &shown {
             (drafts_section(&app, &pr, run, &drafts, diff.as_ref()))
+        } @else if runs.is_empty() {
+            p.dim { "No reviews yet." }
+        } @else {
+            p.dim { "No review has finished yet, so there are no drafts." }
         }
         // After the drafts: it's for once you've read them.
         @if let Some(chat) = &chat { (chat) }
+        p.help-foot {
+            (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
+            (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
+            " reject · " (keycap("u")) " undo · " (keycap("p")) " preview · "
+            (keycap("r")) (keycap("a")) (keycap("i")) (keycap("c")) " act on the PR · "
+            (keycap("q")) " index"
+        }
     };
-    Ok(page::layout(&app, Kind::Pr, &pr.title, &content))
+    Ok(page::layout_in(
+        &app,
+        Kind::Pr,
+        &pr.title,
+        &[crumb(&pr.key)],
+        &content,
+    ))
 }
 
 /// A run's stored diff, parsed; `None` if it's gone.
@@ -114,68 +141,139 @@ fn read_diff(app: &App, run: i64) -> Option<DiffIndex> {
         .map(|text| DiffIndex::parse(&text))
 }
 
-fn pr_header(
-    app: &App,
-    pr: &PrPage,
+/// What the PR page's header shows.
+struct Header<'a> {
+    pr: &'a PrPage,
     state: Option<PrState>,
-    owed: Option<&OwedReview>,
-    overview: &Overview,
+    owed: Option<&'a OwedReview>,
+    overview: &'a Overview,
+    runs: &'a [ReviewRun],
+    shown: Option<&'a ReviewRun>,
     chat: bool,
-) -> Markup {
+    /// The shown run has an agent session to revise it with.
+    revisable: bool,
+}
+
+/// The title; the PR's ref, author, run status and state, with its
+/// actions; then its description and runs, folded.
+fn pr_header(app: &App, h: &Header<'_>) -> Markup {
+    let pr = h.pr;
     // `—` fills a column; in a sentence it says nothing.
-    let state = state.filter(|state| !state.is_blank());
-    let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));
-    let why = owed.and_then(|o| why(o, overview, app.manual_reviews));
+    let state = h.state.filter(|state| !state.is_blank());
+    let status = h
+        .owed
+        .map(|o| owed_status(o, h.overview, app.manual_reviews));
+    let why = h.owed.and_then(|o| why(o, h.overview, app.manual_reviews));
     let href = pr_href(&pr.key);
     html! {
-        h1 { (pr.title) }
-        p.meta {
-            (github_link(&pr.key))
-            " by " (pr.author)
-            @if pr.is_draft { " · " span.dim { "draft" } }
-            @if !pr.open { " · " span.dim { "closed" } }
-            @if pr.archived { " · " span.dim { "archived" } }
-            @if let Some(state) = state { " · " (state_cell(state)) }
-            @if let Some((label, class)) = &status { " · " span.status.(class) { (label) } }
-        }
-        div.actions #pr-actions data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
-            data-ignore=[owed.map(|_| format!("{href}/ignore"))]
-            data-chat=[chat.then_some("#chat")] {
-            @if why.is_some() {
-                a.btn href={ (href) "/review-now" } data-dialog { "Review now" (keycap("r")) }
+        div.prh {
+            h1 { (pr.title) }
+            div.meta {
+                (pr_ref(&pr.key)) span { " · " (pr.author) }
+                @if pr.is_draft { " · " span.dim { "draft" } }
+                @if !pr.open { " · " span.dim { "closed" } }
+                @if pr.archived { " · " span.dim { "archived" } }
+                @if let Some((label, class)) = &status {
+                    " · " span.chip.(class) { (label) }
+                }
+                @if let Some(state) = state { " · " (state_cell(state)) }
+                span.sp #pr-actions
+                    data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
+                    data-ignore=[h.owed.map(|_| format!("{href}/ignore"))]
+                    data-chat=[h.chat.then_some("#chat")] {
+                    @if h.revisable {
+                        @if let Some(run) = h.shown {
+                            a.btn href={ (href) "/runs/" (run.id) "/regenerate" } data-dialog
+                                title="Revise this review with the agent, from your instruction" {
+                                "Agent…"
+                            }
+                        }
+                    }
+                    @if why.is_some() {
+                        a.btn href={ (href) "/review-now" } data-dialog { "Review now" (keycap("r")) }
+                    }
+                    @if h.owed.is_some() {
+                        a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
+                    }
+                    @if h.chat { a.btn href="#chat" { "Chat" (keycap("c")) } }
+                    (archive_form(app, &pr.key, pr.archived, "pr"))
+                }
             }
-            @if owed.is_some() {
-                a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
+            div.subnav {
+                @if !pr.body.trim().is_empty() {
+                    details.description {
+                        summary { "Description" }
+                        pre { (pr.body) }
+                    }
+                }
+                @if !h.runs.is_empty() { (run_list(&pr.key, h.runs, h.shown)) }
             }
-            (archive_form(app, &pr.key, pr.archived, "pr"))
         }
     }
 }
 
+/// When a run happened, for the browser to show in its own time; the
+/// timestamp itself, which is UTC, without the script.
+fn when(at: &str) -> Markup {
+    let shown = at.get(..16).unwrap_or(at).replace('T', " ");
+    html! { time datetime=(at) { (shown) " UTC" } }
+}
+
 fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Markup {
     let href = pr_href(key);
+    // Runs come newest first; "run 3 of 3" counts from the oldest.
+    let count = runs.len();
+    let number = |id: i64| {
+        runs.iter()
+            .position(|run| run.id == id)
+            .map_or(0, |i| count - i)
+    };
     html! {
-        @if runs.is_empty() {
-            p.dim { "No reviews yet." }
-        } @else {
-            details.runs open[runs.len() > 1 && shown.is_none()] {
-                summary { "Reviews (" (runs.len()) ")" }
-                ol {
-                    @for run in runs {
-                        li.current[shown.is_some_and(|s| s.id == run.id)] {
-                            a href={ (href) "?run=" (run.id) } {
-                                "run " (run.id) " at " code { (short(&run.head_sha)) }
+        details.runs {
+            summary {
+                @if let Some(run) = shown {
+                    "Run " (number(run.id)) " of " (count) " · "
+                    (when(run.finished_at.as_deref().unwrap_or(&run.queued_at)))
+                    " · reviewed " code { (short(&run.head_sha)) }
+                } @else {
+                    "Runs (" (count) ")"
+                }
+            }
+            ol reversed {
+                @for run in runs {
+                    li.current[shown.is_some_and(|s| s.id == run.id)] {
+                        a href={ (href) "?run=" (run.id) } { "run " (number(run.id)) }
+                        " at " code { (short(&run.head_sha)) } " · "
+                        (when(run.finished_at.as_deref().unwrap_or(&run.queued_at))) " · "
+                        span.(run_class(&run.status)) { (run.status) }
+                        @if let Some(source) = run.source_run {
+                            " · revises "
+                            a href={ (href) "?run=" (source) } { "run " (number(source)) }
+                        }
+                        @if let Some(instruction) = &run.instruction {
+                            " · " span.instruction title=(instruction) {
+                                "“" (first_line(instruction))
+                                @if instruction.trim_end().contains('\n') { "…" }
+                                "”"
                             }
-                            " " span.status { (run.status) }
-                            @if let Some(error) = &run.error { " " span.error { (first_line(error)) } }
+                        }
+                        @if let Some(error) = &run.error {
+                            " — " span.error { (first_line(error)) }
                         }
                     }
                 }
             }
-            @if shown.is_none() {
-                p.dim { "No review has finished yet, so there are no drafts." }
-            }
         }
+    }
+}
+
+fn run_class(status: &str) -> &'static str {
+    match status {
+        "succeeded" => "ok",
+        "failed" | "crashed" => "bad",
+        "running" => "running",
+        "queued" => "held",
+        _ => "dim",
     }
 }
 
@@ -202,99 +300,130 @@ fn drafts_section(
         "COMMENT"
     };
     let preview = format!("{}/runs/{}/preview", pr_href(&pr.key), run.id);
+    let count = |status: &str| drafts.iter().filter(|d| d.status == status).count();
     html! {
-        @if run.head_sha != pr.head_sha {
-            p.warn {
-                "This review is of " code { (short(&run.head_sha)) } "; the PR is now at "
-                code { (short(&pr.head_sha)) } ". Its comments post against the older commit."
+        // The verdict and Preview stay in view over the drafts.
+        form.rbar #review-bar method="get" action=(preview) {
+            span.tally {
+                b data-count="pending" { (count("pending")) } " pending · "
+                b.ok data-count="accepted" { (count("accepted")) } " accepted · "
+                b data-count="rejected" { (count("rejected")) } " rejected"
+            }
+            span.sp {
+                span.seg {
+                    // Approve's value says it was picked here, which an
+                    // approval needs.
+                    @for (value, label) in [
+                        ("COMMENT".to_owned(), "Comment"),
+                        ("REQUEST_CHANGES".to_owned(), "Request changes"),
+                        (submit::approve_value(app), "Approve"),
+                    ] {
+                        label {
+                            input type="radio" name="event" value=(value)
+                                checked[value == preselect];
+                            (label)
+                            @if value == preselect && suggested != "none" {
+                                span.sugg title="The agent's suggestion. It never suggests approving." {
+                                    "suggested"
+                                }
+                            }
+                        }
+                    }
+                }
+                button.btn.go #preview type="submit" { "Preview the review" (keycap("p")) }
             }
         }
-        @if diff.is_none() {
-            p.warn { "This run's diff is gone, so drafts are shown without context." }
+        @if run.head_sha != pr.head_sha {
+            div.banner {
+                "Reviewed at " code { (short(&run.head_sha)) } "; the PR has moved on to "
+                code { (short(&pr.head_sha)) } ". These comments post against the older commit."
+            }
+        }
+        // Where Revise lands: the new run, before it has drafts or a diff.
+        @if matches!(run.status.as_str(), "queued" | "running") {
+            div.banner {
+                "This run is " (run.status) ": its drafts show here once it finishes. "
+                "Reload to see them."
+            }
+        } @else if diff.is_none() {
+            div.banner { "This run's diff is gone, so drafts are shown without context." }
         }
         section #drafts {
             @for draft in drafts { (draft_card(app, draft, diff)) }
         }
-        form.submit method="get" action=(preview) {
-            fieldset {
-                legend { "Verdict" }
-                // Approve's value says it was picked here, which an
-                // approval needs.
-                @for (value, label) in [
-                    ("COMMENT".to_owned(), "Comment"),
-                    ("REQUEST_CHANGES".to_owned(), "Request changes"),
-                    (submit::approve_value(app), "Approve"),
-                ] {
-                    label {
-                        input type="radio" name="event" value=(value) checked[value == preselect];
-                        " " (label)
-                    }
-                }
-                p.dim {
-                    "The agent suggests " (suggested.replace('_', " "))
-                    ". It never suggests approving; that's only ever your pick."
-                }
-            }
-            button type="submit" { "Preview the review" }
-            " " span.dim { "Nothing is posted until you confirm on the next page." }
-        }
     }
 }
 
-/// One draft, with its diff context and what you can do with it.
+/// One draft: its anchor and decision, the diff around it, and its body,
+/// which a click or `e` turns into a box that saves as you leave it.
 pub fn draft_card(app: &App, draft: &DraftRow, diff: Option<&DiffIndex>) -> Markup {
     let editable = matches!(draft.status.as_str(), "pending" | "accepted" | "rejected");
     let edit = format!("/drafts/{}/edit", draft.id);
     let status = format!("/drafts/{}/status", draft.id);
-    let context = diff.and_then(|diff| diff::context(diff, draft));
+    // A rejected draft folds to one line.
+    let context = diff
+        .filter(|_| draft.status != "rejected")
+        .and_then(|diff| diff::context(diff, draft));
     html! {
-        article.draft.(draft.status) #{ "draft-" (draft.id) } {
-            header {
+        article.draft.dc.(draft.status).summary[draft.kind == "summary"] #{ "draft-" (draft.id) } {
+            div.h {
                 @if draft.kind == "summary" {
-                    strong { "Summary" }
+                    span.anc { "Summary" } span.tag-sum { "the review body" }
                 } @else {
-                    code { (anchor(draft)) }
+                    span.anc { (anchor(draft)) }
+                    @if let Some(severity) = &draft.severity { span.sev.(severity) { (severity) } }
+                    @if let Some(confidence) = &draft.confidence {
+                        span.dim.conf { (confidence) " conf." }
+                    }
+                    @if draft.unanchored {
+                        span.tag-body title="Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body." {
+                            "not in the diff → goes in the body"
+                        }
+                    }
                 }
-                @if let Some(severity) = &draft.severity { " " span.severity { (severity) } }
-                @if let Some(confidence) = &draft.confidence {
-                    " " span.dim { (confidence) " confidence" }
+                @if let Some(from) = draft.based_on {
+                    a.edited href={ "#draft-" (from) } { "revised from #" (from) }
                 }
-                " " span.badge { (draft.status) }
-                @if draft.edited_body.is_some() { " " span.dim { "edited" } }
-            }
-            @if draft.unanchored {
-                p.warn {
-                    "Not on a line of the diff, so GitHub won't take it inline. "
-                    "If you accept it, it's posted in the review body."
+                @if draft.edited_body.is_some() { span.edited { "edited" } }
+                span.sp {
+                    @if editable {
+                        form.decide method="post" action=(status) hx-post=(status)
+                            hx-target="closest article" hx-swap="outerHTML"
+                            hx-sync="closest article:queue all" {
+                            (csrf_field(app))
+                            @match draft.status.as_str() {
+                                "pending" => {
+                                    button.btn name="status" value="accepted" { "Accept" (keycap("y")) }
+                                    button.btn name="status" value="rejected" { "Reject" (keycap("n")) }
+                                }
+                                other => {
+                                    span.st.(other) {
+                                        @if other == "accepted" { "✓ accepted" } @else { "✕ rejected" }
+                                    }
+                                    button.btn name="status" value="pending" { "Undo" (keycap("u")) }
+                                }
+                            }
+                        }
+                    } @else {
+                        span.st.(draft.status) { (draft.status) }
+                    }
                 }
             }
             @if let Some(context) = context { (context) }
-            // Queued behind each other, so an edit saved on blur lands before
-            // the Accept click that caused the blur.
-            form.edit method="post" action=(edit) hx-post=(edit) hx-trigger="change"
-                hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all" {
-                (csrf_field(app))
-                textarea name="body" rows="4" readonly[!editable] { (draft.body()) }
-                @if editable { button.save type="submit" { "Save" } }
+            div.body data-edit[editable] title=[editable.then_some("click or e to edit")] {
+                (draft.body())
             }
             @if editable {
-                form.decide method="post" action=(status) hx-post=(status)
+                // Queued behind each other, so an edit saved on blur lands
+                // before the Accept click that caused the blur.
+                form.edit method="post" action=(edit) hx-post=(edit) hx-trigger="change"
                     hx-target="closest article" hx-swap="outerHTML"
                     hx-sync="closest article:queue all" {
                     (csrf_field(app))
-                    @if draft.status != "accepted" {
-                        button name="status" value="accepted" { "Accept" }
-                    }
-                    @if draft.status != "rejected" {
-                        button name="status" value="rejected" { "Reject" }
-                    }
-                    @if draft.status != "pending" {
-                        button name="status" value="pending" { "Undo" }
-                    }
-                    button type="button" disabled
-                        title="Coming later: the runner can't resume an agent session yet." {
-                        "Regenerate with instruction"
-                    }
+                    textarea name="body" rows="4" { (draft.body()) }
+                    // Without the script there's no click-to-edit: the box
+                    // shows, with this.
+                    button.btn.save type="submit" { "Save" }
                 }
             }
         }

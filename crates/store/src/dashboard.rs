@@ -10,6 +10,7 @@ use sanic_core::{pr::PrKey, run::RunKind};
 use crate::{NOW, Store, overview::key_columns};
 
 const REVIEW: &str = RunKind::Review.as_str();
+const REGENERATE: &str = RunKind::Regenerate.as_str();
 
 /// A tracked PR, as last polled, for its dashboard page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,12 @@ pub struct ReviewRun {
     pub suggested_verdict: Option<String>,
     /// The revision it reviewed; its comments are anchored to this commit.
     pub head_sha: String,
+    /// When it was last queued, as the store writes timestamps.
+    pub queued_at: String,
+    pub finished_at: Option<String>,
+    /// For a regeneration: the review it revises, and what you asked for.
+    pub source_run: Option<i64>,
+    pub instruction: Option<String>,
 }
 
 /// A stored draft with everything the dashboard shows and edits.
@@ -144,24 +151,33 @@ impl Store {
             .optional()?)
     }
 
-    /// `key`'s review runs, most recently queued first, as
-    /// [`Store::owed_reviews`] orders them to pick the latest.
+    /// `key`'s review runs, regenerations included, most recently queued
+    /// first, as [`Store::owed_reviews`] orders them to pick the latest.
     pub fn review_runs(&self, key: &PrKey) -> Result<Vec<ReviewRun>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, status, error, suggested_verdict, head_sha FROM runs
-             WHERE repo = ?1 AND number = ?2 AND kind = ?3
+            "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
+                    source_run, instruction
+             FROM runs
+             WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
         )?;
         let runs = stmt
-            .query_map(params![key.repo.to_string(), key.number, REVIEW], |row| {
-                Ok(ReviewRun {
-                    id: row.get(0)?,
-                    status: row.get(1)?,
-                    error: row.get(2)?,
-                    suggested_verdict: row.get(3)?,
-                    head_sha: row.get(4)?,
-                })
-            })?
+            .query_map(
+                params![key.repo.to_string(), key.number, REVIEW, REGENERATE],
+                |row| {
+                    Ok(ReviewRun {
+                        id: row.get(0)?,
+                        status: row.get(1)?,
+                        error: row.get(2)?,
+                        suggested_verdict: row.get(3)?,
+                        head_sha: row.get(4)?,
+                        queued_at: row.get(5)?,
+                        finished_at: row.get(6)?,
+                        source_run: row.get(7)?,
+                        instruction: row.get(8)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(runs)
     }

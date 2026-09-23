@@ -16,6 +16,7 @@ mod ignore;
 mod index;
 mod page;
 mod pr;
+mod regenerate;
 mod submit;
 #[cfg(test)]
 mod tests;
@@ -189,6 +190,10 @@ impl Dashboard {
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/submit",
                 post(submit::submit),
+            )
+            .route(
+                "/pr/{owner}/{name}/{number}/runs/{run}/regenerate",
+                get(regenerate::confirm).post(regenerate::regenerate),
             )
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
