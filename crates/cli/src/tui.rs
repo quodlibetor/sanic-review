@@ -231,6 +231,8 @@ pub struct Overview {
     pub counts: RunCounts,
     /// The poller's refresh batch under way, if any.
     pub refreshing: Option<Progress>,
+    /// PRs with a review running, which quitting cancels.
+    pub running: Vec<PrKey>,
     /// How long until each debounced review is queued.
     pub waiting: HashMap<PrKey, Duration>,
     /// Owed reviews that aren't reviewed automatically, and why.
@@ -271,6 +273,7 @@ impl Overview {
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
             refreshing: *shared.progress.borrow(),
+            running: store.running_reviews()?,
             waiting,
         })
     }
@@ -333,6 +336,8 @@ enum Overlay {
         key: PrKey,
         why: Why,
     },
+    /// Waiting for a yes before quitting, which cancels these reviews.
+    ConfirmQuit(Vec<PrKey>),
 }
 
 /// Why a review may be started by hand.
@@ -455,7 +460,10 @@ impl App {
         if let Some(Overlay::Ignore(editor)) = &mut self.overlay {
             return match editor.handle_key(key, &self.overview.profiles) {
                 Outcome::Open => Flow::Continue,
-                Outcome::Quit => Flow::Quit,
+                Outcome::Quit => {
+                    self.overlay = None;
+                    self.quit()
+                }
                 Outcome::Cancel => {
                     self.overlay = None;
                     Flow::Continue
@@ -466,19 +474,28 @@ impl App {
                 }
             };
         }
+        if let Some(Overlay::ConfirmQuit(_)) = &self.overlay {
+            self.overlay = None;
+            return match key.code {
+                // A second Ctrl-C doesn't ask again.
+                KeyCode::Char('c') if ctrl => Flow::Quit,
+                KeyCode::Char('y') | KeyCode::Enter => Flow::Quit,
+                _ => Flow::Continue,
+            };
+        }
         if let Some(Overlay::ConfirmRerun { key: pr, .. }) = &self.overlay {
             let pr = pr.clone();
             self.overlay = None;
             return match key.code {
-                KeyCode::Char('c') if ctrl => Flow::Quit,
+                KeyCode::Char('c') if ctrl => self.quit(),
                 KeyCode::Char('y') => Flow::Request(Request::Rerun(pr)),
                 // Anything else is a no, so a stray key can't spend tokens.
                 _ => Flow::Continue,
             };
         }
         match key.code {
-            KeyCode::Char('q') => return Flow::Quit,
-            KeyCode::Char('c') if ctrl => return Flow::Quit,
+            KeyCode::Char('q') => return self.quit(),
+            KeyCode::Char('c') if ctrl => return self.quit(),
             KeyCode::Char('r') => self.ask_rerun(),
             KeyCode::Char('a') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
@@ -536,6 +553,16 @@ impl App {
             key: pr.key.clone(),
             why,
         });
+    }
+
+    /// Quits, unless reviews are running: then it asks first, since
+    /// quitting cancels them.
+    fn quit(&mut self) -> Flow {
+        if self.loaded.running.is_empty() {
+            return Flow::Quit;
+        }
+        self.overlay = Some(Overlay::ConfirmQuit(self.loaded.running.clone()));
+        Flow::Continue
     }
 
     /// Opens the ignore editor on the selected review you owe.
@@ -672,6 +699,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
         Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, *why),
+        Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
         None => {}
     }
 }
@@ -947,6 +975,22 @@ fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: Why) {
     render_popup(frame, " Review now ", lines);
 }
 
+fn render_confirm_quit(frame: &mut Frame<'_>, running: &[PrKey]) {
+    let mut lines = vec![Line::raw(" Exiting will cancel these running tasks:")];
+    lines.extend(
+        running
+            .iter()
+            .map(|pr| Line::raw(format!(" · {} — reviewing", pr.url()))),
+    );
+    lines.push(Line::raw(" They run again on the next start.").dim());
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::raw(" Enter/y").bold(),
+        Span::raw(" exit · any other key stays"),
+    ]));
+    render_popup(frame, " Exit? ", lines);
+}
+
 fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let area = frame
@@ -1078,6 +1122,7 @@ mod tests {
                 pending_drafts: 3,
             },
             refreshing: None,
+            running: Vec::new(),
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
             profiles: vec!["default".into(), "vuln".into()],
             skipped: HashMap::from([(
@@ -1449,6 +1494,44 @@ mod tests {
         }
         press(&mut auto, KeyCode::Char('r'));
         assert_eq!(auto.overlay, None);
+    }
+
+    #[test]
+    fn quitting_while_reviews_run_asks_first() {
+        let mut app = app(false);
+        let mut busy = overview();
+        busy.running = vec![pr("org/api", 481)];
+        app.set_overview(busy);
+
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmQuit(vec![pr("org/api", 481)]))
+        );
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+        // Anything else stays.
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.overlay, None);
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Flow::Quit);
+        // Ctrl-C asks too, and a second one doesn't.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.handle_key(ctrl_c), Flow::Continue);
+        assert_eq!(app.handle_key(ctrl_c), Flow::Quit);
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.handle_key(key(KeyCode::Char('y'))), Flow::Quit);
+
+        // So does Ctrl-C from another overlay.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('i'));
+        assert!(matches!(app.overlay, Some(Overlay::Ignore(_))));
+        assert_eq!(app.handle_key(ctrl_c), Flow::Continue);
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmQuit(_))));
+        press(&mut app, KeyCode::Char('n'));
+
+        // With nothing running, it just quits.
+        app.set_overview(overview());
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Flow::Quit);
     }
 
     #[test]

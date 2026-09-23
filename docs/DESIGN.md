@@ -484,7 +484,10 @@ embedded in the binary, so nothing is fetched at runtime.
   short interval, so the poller, scheduler and runner don't know it exists.
   Logs never go to stdout while it runs. They go to the log pane and are
   appended to `serve.log` in the data dir.
-  Keys: `q` or Ctrl-C quits `serve`, Tab and Shift-Tab switch pane, `j`/`k`
+  Keys: `q` or Ctrl-C quits `serve`; while reviews are running it first
+  lists them ("exiting will cancel these running tasks:") and waits for
+  Enter or `y`, and any other key stays. A second Ctrl-C quits without
+  asking. Tab and Shift-Tab switch pane, `j`/`k`
   or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
   `a` archives or unarchives the selected PR in either PR pane. Archived
   PRs are hidden, and each pane's title counts them; `A` shows them,
