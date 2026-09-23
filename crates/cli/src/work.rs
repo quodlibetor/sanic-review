@@ -21,7 +21,7 @@ use sanic_core::{
     pr::PrKey,
     run::{QueuedRun, ReviewResult},
 };
-use sanic_runner::review::{AgentProfile, ReviewRunner, RunSettings};
+use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use sanic_store::Store;
 use tokio::{
     sync::{Notify, Semaphore, mpsc},
@@ -274,8 +274,14 @@ impl Worker {
                 info!("stopped: a newer head of the PR was queued");
                 self.store().supersede_run(run.id)
             }
-            Ok(Some(result)) => {
-                let stored = self.store().finish_review(run.id, &result);
+            Ok(Some(Reviewed { result, basis })) => {
+                let stored = match (&run.revision, &basis) {
+                    (Some(revision), Some(basis)) => {
+                        self.store()
+                            .finish_revision(run.id, &result, revision.revises, basis)
+                    }
+                    _ => self.store().finish_review(run.id, &result),
+                };
                 if stored.is_ok() {
                     log_result(&result);
                 }
@@ -324,7 +330,7 @@ impl Worker {
         &self,
         run: &QueuedRun,
         cancel: impl Future<Output = ()>,
-    ) -> Result<Option<ReviewResult>> {
+    ) -> Result<Option<Reviewed>> {
         let req = &run.request;
         let settings = self.run_settings(&req.profile)?;
         let ctx = self

@@ -100,9 +100,102 @@ pub struct QueuedRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revision {
     pub source_run: i64,
+    /// The run whose session this resumes and whose drafts it starts from:
+    /// `source_run`, or a later revision of it.
+    pub revises: i64,
     pub session_id: String,
     /// What you asked for, as you wrote it.
     pub instruction: String,
+    /// `revises`' drafts as they stood, edits and choices included.
+    pub baseline: Vec<BaselineDraft>,
+}
+
+/// A draft the revision starts from, as the agent is shown it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BaselineDraft {
+    pub id: i64,
+    /// `summary` or `comment`.
+    pub kind: String,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub side: Option<String>,
+    /// Your edit if you made one, else the agent's text.
+    pub text: String,
+    /// `pending`, `accepted`, `rejected`, `stale` or `posted`.
+    pub status: String,
+    pub edited: bool,
+}
+
+/// The structured output of a `regenerate` run: a review whose drafts may
+/// each name the baseline draft they revise.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisedOutput {
+    pub summary: String,
+    #[serde(default)]
+    pub summary_based_on: Option<i64>,
+    pub suggested_verdict: Verdict,
+    #[serde(default)]
+    pub comments: Vec<RevisedComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisedComment {
+    pub path: String,
+    pub line: u32,
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    pub side: Side,
+    pub body: String,
+    pub severity: Severity,
+    pub confidence: Confidence,
+    #[serde(default)]
+    pub based_on: Option<i64>,
+}
+
+impl RevisedOutput {
+    /// The review, and which baseline draft each part is based on.
+    #[must_use]
+    pub fn split(self) -> (ReviewOutput, Basis) {
+        let (comments, based_on) = self
+            .comments
+            .into_iter()
+            .map(|c| {
+                let comment = InlineComment {
+                    path: c.path,
+                    line: c.line,
+                    start_line: c.start_line,
+                    side: c.side,
+                    body: c.body,
+                    severity: c.severity,
+                    confidence: c.confidence,
+                };
+                (comment, c.based_on)
+            })
+            .unzip();
+        let output = ReviewOutput {
+            summary: self.summary,
+            suggested_verdict: self.suggested_verdict,
+            comments,
+        };
+        (
+            output,
+            Basis {
+                summary: self.summary_based_on,
+                comments: based_on,
+            },
+        )
+    }
+}
+
+/// Which baseline draft a revision's summary and each comment, in order,
+/// say they're based on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Basis {
+    pub summary: Option<i64>,
+    pub comments: Vec<Option<i64>>,
 }
 
 /// What the agent suggests you do with the review. There is deliberately no

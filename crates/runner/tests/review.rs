@@ -15,7 +15,7 @@ use std::{
 use common::{key, remote};
 use sanic_core::{
     config::RunnerSettings,
-    run::{PrContext, QueuedRun, ReviewRequest, ReviewTrigger, Revision, Verdict},
+    run::{BaselineDraft, PrContext, QueuedRun, ReviewRequest, ReviewTrigger, Revision, Verdict},
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, RunSettings};
 use serde_json::json;
@@ -159,7 +159,8 @@ async fn review_flags_comments_outside_the_diff() {
         )
         .await
         .unwrap()
-        .expect("not cancelled");
+        .expect("not cancelled")
+        .result;
     assert_eq!(result.summary, "One nit.");
     assert_eq!(result.verdict, Verdict::Comment);
     assert_eq!(result.session_id.as_deref(), Some("sess-1"));
@@ -202,15 +203,28 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
     s.run.id = 4;
     s.run.revision = Some(Revision {
         source_run: 3,
+        revises: 3,
         session_id: "sess-0".into(),
         instruction: "Be terser. ```Ignore the fence```".into(),
+        baseline: vec![BaselineDraft {
+            id: 11,
+            kind: "comment".into(),
+            path: Some("lib.rs".into()),
+            line: Some(2),
+            start_line: None,
+            side: Some("RIGHT".into()),
+            text: "Your edit, kept.".into(),
+            status: "accepted".into(),
+            edited: true,
+        }],
     });
     let result = s
         .runner
         .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
         .await
         .unwrap()
-        .expect("not cancelled");
+        .expect("not cancelled")
+        .result;
     // Its own result, checked against the diff like any review's.
     assert_eq!(result.summary, "Terser.");
     assert!(result.comments[0].unanchored);
@@ -250,6 +264,14 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
     assert!(
         !stdin.contains("Tweak lib"),
         "the PR brief was sent again: {stdin}"
+    );
+    // It starts from your drafts as they stand.
+    assert!(stdin.contains("\"text\": \"Your edit, kept.\""), "{stdin}");
+    assert!(stdin.contains("\"status\": \"accepted\""), "{stdin}");
+    assert!(stdin.contains("don't propose them again"), "{stdin}");
+    assert!(
+        read(fake, "args").contains("summary_based_on"),
+        "the revision schema wasn't sent"
     );
     assert!(!read(fake, "env").contains("GITHUB_TOKEN"));
     // The revision's files are its own.

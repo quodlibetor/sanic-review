@@ -1,11 +1,16 @@
 //! Queries for agent runs and their drafts.
 
+use std::collections::HashSet;
+
 use color_eyre::eyre::{Result, WrapErr};
-use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
     pr::{Comment, PrKey, Thread},
     repo::RepoName,
-    run::{PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind},
+    run::{
+        BaselineDraft, Basis, PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger,
+        Revision, RunKind,
+    },
 };
 
 use crate::{NOW, Store};
@@ -87,15 +92,21 @@ impl std::fmt::Display for Refusal {
 /// A stored draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
+    pub id: i64,
     pub kind: String,
     pub path: Option<String>,
     pub line: Option<u32>,
     pub start_line: Option<u32>,
     pub side: Option<String>,
     pub severity: Option<String>,
+    /// Your edit if you made one, else the agent's text.
     pub body: String,
+    pub edited: bool,
     pub status: String,
     pub unanchored: bool,
+    /// For a regenerated draft: the draft of the run it revised that it's
+    /// based on.
+    pub based_on: Option<i64>,
 }
 
 /// Counts for the terminal's summary line.
@@ -251,12 +262,12 @@ impl Store {
                 },
             )
             .optional()?;
-        let Some((repo, number, profile, head_sha, base_sha, session_id, pr_head, source)) = row
+        let Some((repo, number, profile, head_sha, base_sha, session_id, pr_head, original)) = row
         else {
             return Ok(Regeneration::Refused(Refusal::NoSuchRun));
         };
         // It checks out where the review ran, which a chat may be using.
-        if worktree_in_use(source) {
+        if worktree_in_use(original) {
             return Ok(Regeneration::Refused(Refusal::WorktreeInUse));
         }
         let Some(session_id) = session_id else {
@@ -271,7 +282,7 @@ impl Store {
         let underway: Option<i64> = tx
             .query_row(
                 "SELECT id FROM runs WHERE source_run = ?1 AND status IN ('queued', 'running')",
-                [source],
+                [original],
                 |row| row.get(0),
             )
             .optional()?;
@@ -280,7 +291,7 @@ impl Store {
         }
         let earlier: u32 = tx.query_row(
             "SELECT count(*) FROM runs WHERE source_run = ?1",
-            [source],
+            [original],
             |row| row.get(0),
         )?;
         tx.execute(
@@ -293,15 +304,16 @@ impl Store {
                 repo,
                 number,
                 RunKind::Regenerate.as_str(),
-                format!("{source}/{}", earlier + 1),
+                format!("{original}/{}", earlier + 1),
                 profile,
                 head_sha,
                 base_sha,
-                source,
+                original,
                 instruction
             ],
         )?;
         let id = tx.last_insert_rowid();
+        let baseline = baseline(&tx, source)?;
         tx.commit()
             .wrap_err_with(|| format!("queueing a regeneration of run {source}"))?;
         Ok(Regeneration::Queued(QueuedRun {
@@ -317,9 +329,11 @@ impl Store {
                 trigger: ReviewTrigger::Requested,
             },
             revision: Some(Revision {
-                source_run: source,
+                source_run: original,
+                revises: source,
                 session_id,
                 instruction: instruction.to_owned(),
+                baseline,
             }),
         }))
     }
@@ -360,6 +374,27 @@ impl Store {
 
     /// Stores a finished review's drafts and marks the run succeeded.
     pub fn finish_review(&mut self, id: i64, result: &ReviewResult) -> Result<()> {
+        self.finish(id, result, None)
+    }
+
+    /// Stores a finished regeneration's drafts, which start from those of
+    /// run `revises` as `basis` says, and marks the run succeeded.
+    pub fn finish_revision(
+        &mut self,
+        id: i64,
+        result: &ReviewResult,
+        revises: i64,
+        basis: &Basis,
+    ) -> Result<()> {
+        self.finish(id, result, Some((revises, basis)))
+    }
+
+    fn finish(
+        &mut self,
+        id: i64,
+        result: &ReviewResult,
+        revision: Option<(i64, &Basis)>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             &format!(
@@ -374,22 +409,53 @@ impl Store {
                 result.transcript_path
             ],
         )?;
+        let base = |based_on: Option<i64>| -> Result<Option<Base>> {
+            match revision {
+                Some((revises, _)) => Base::find(&tx, revises, based_on),
+                None => Ok(None),
+            }
+        };
+        // Base drafts already carried over whole, so a repeat is pending.
+        let mut kept = HashSet::new();
+        let none = (None, None, None, None);
+        let summary_based_on = revision.and_then(|(_, basis)| basis.summary);
+        let summary = Stored::new(
+            "summary",
+            &none,
+            &result.summary,
+            base(summary_based_on)?,
+            &mut kept,
+        );
         tx.execute(
             &format!(
-                "INSERT INTO drafts (run_id, kind, original_body, status, unanchored,
-                                     created_at, updated_at)
-                 VALUES (?1, 'summary', ?2, 'pending', 0, {NOW}, {NOW})"
+                "INSERT INTO drafts (run_id, kind, original_body, edited_body, status, unanchored,
+                                     based_on, created_at, updated_at)
+                 VALUES (?1, 'summary', ?2, ?3, ?4, 0, ?5, {NOW}, {NOW})"
             ),
-            params![id, result.summary],
+            params![
+                id,
+                summary.original_body,
+                summary.edited_body,
+                summary.status,
+                summary.based_on
+            ],
         )?;
-        for draft in &result.comments {
+        for (i, draft) in result.comments.iter().enumerate() {
             let c = &draft.comment;
+            let based_on = revision.and_then(|(_, basis)| basis.comments.get(i).copied().flatten());
+            let anchor = (
+                Some(c.path.clone()),
+                Some(c.line),
+                c.start_line,
+                Some(c.side.as_str().to_owned()),
+            );
+            let stored = Stored::new("comment", &anchor, &c.body, base(based_on)?, &mut kept);
             tx.execute(
                 &format!(
                     "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
-                                         confidence, original_body, status, unanchored,
-                                         created_at, updated_at)
-                     VALUES (?1, 'comment', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9,
+                                         confidence, original_body, edited_body, status,
+                                         unanchored, based_on, created_at, updated_at)
+                     VALUES (?1, 'comment', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                              {NOW}, {NOW})"
                 ),
                 params![
@@ -400,8 +466,11 @@ impl Store {
                     c.side.as_str(),
                     c.severity.as_str(),
                     c.confidence.as_str(),
-                    c.body,
-                    draft.unanchored
+                    stored.original_body,
+                    stored.edited_body,
+                    stored.status,
+                    draft.unanchored,
+                    stored.based_on
                 ],
             )?;
         }
@@ -462,8 +531,10 @@ impl Store {
             // A regeneration's session lives where its source review ran.
             run.revision = source_run.map(|source_run| Revision {
                 source_run,
+                revises: run.id,
                 session_id: session_id.clone(),
                 instruction: instruction.unwrap_or_default(),
+                baseline: Vec::new(),
             });
             Ok(SessionRun {
                 run,
@@ -643,7 +714,8 @@ impl Store {
     pub fn drafts(&self, run_id: i64) -> Result<Vec<Draft>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT kind, path, line, start_line, side, severity,
-                    coalesce(edited_body, original_body), status, unanchored
+                    coalesce(edited_body, original_body), status, unanchored, id,
+                    edited_body IS NOT NULL, based_on
              FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
         )?;
         let drafts = stmt
@@ -658,6 +730,9 @@ impl Store {
                     body: row.get(6)?,
                     status: row.get(7)?,
                     unanchored: row.get(8)?,
+                    id: row.get(9)?,
+                    edited: row.get(10)?,
+                    based_on: row.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -742,6 +817,113 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?;
         }
         Ok(threads)
+    }
+}
+
+/// Run `run`'s drafts as a revision starts from them.
+fn baseline(tx: &Transaction<'_>, run: i64) -> Result<Vec<BaselineDraft>> {
+    let mut stmt = tx.prepare(
+        "SELECT id, kind, path, line, start_line, side, coalesce(edited_body, original_body),
+                status, edited_body IS NOT NULL
+         FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
+    )?;
+    let drafts = stmt
+        .query_map([run], |row| {
+            Ok(BaselineDraft {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                line: row.get(3)?,
+                start_line: row.get(4)?,
+                side: row.get(5)?,
+                text: row.get(6)?,
+                status: row.get(7)?,
+                edited: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(drafts)
+}
+
+/// A baseline draft a revised one names, as stored.
+struct Base {
+    id: i64,
+    kind: String,
+    anchor: (Option<String>, Option<u32>, Option<u32>, Option<String>),
+    original_body: String,
+    edited_body: Option<String>,
+    status: String,
+}
+
+impl Base {
+    /// Run `revises`' draft `id`, if it is one.
+    fn find(tx: &Transaction<'_>, revises: i64, id: Option<i64>) -> Result<Option<Self>> {
+        let Some(id) = id else { return Ok(None) };
+        Ok(tx
+            .query_row(
+                "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status
+                 FROM drafts WHERE id = ?1 AND run_id = ?2",
+                params![id, revises],
+                |row| {
+                    Ok(Self {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        anchor: (row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?),
+                        original_body: row.get(6)?,
+                        edited_body: row.get(7)?,
+                        status: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn text(&self) -> &str {
+        self.edited_body.as_deref().unwrap_or(&self.original_body)
+    }
+}
+
+/// How a draft is stored: its text, your edit, its status and what it's
+/// based on. A revised draft that's word for word its base, at the same
+/// anchor, keeps the base's edit and status, unless an earlier draft
+/// already kept them (`kept`); any other is pending.
+struct Stored {
+    original_body: String,
+    edited_body: Option<String>,
+    status: String,
+    based_on: Option<i64>,
+}
+
+impl Stored {
+    fn new(
+        kind: &str,
+        anchor: &(Option<String>, Option<u32>, Option<u32>, Option<String>),
+        body: &str,
+        base: Option<Base>,
+        kept: &mut HashSet<i64>,
+    ) -> Self {
+        match base {
+            Some(base)
+                if base.kind == kind
+                    && base.anchor == *anchor
+                    && base.text() == body
+                    && kept.insert(base.id) =>
+            {
+                Self {
+                    original_body: base.original_body,
+                    edited_body: base.edited_body,
+                    status: base.status,
+                    based_on: Some(base.id),
+                }
+            }
+            // A summary isn't revised from a comment, or the other way.
+            base => Self {
+                original_body: body.to_owned(),
+                edited_body: None,
+                status: "pending".into(),
+                based_on: base.filter(|b| b.kind == kind).map(|b| b.id),
+            },
+        }
     }
 }
 
@@ -1063,14 +1245,16 @@ mod tests {
         };
         assert_ne!(run.id, source.id);
         assert_eq!(run.request.head_sha, "h1");
-        assert_eq!(
-            run.revision,
-            Some(Revision {
-                source_run: source.id,
-                session_id: "sess".into(),
-                instruction: "be terser".into(),
-            })
-        );
+        let revision = run.revision.clone().unwrap();
+        assert_eq!(revision.source_run, source.id);
+        assert_eq!(revision.revises, source.id);
+        assert_eq!(revision.session_id, "sess");
+        assert_eq!(revision.instruction, "be terser");
+        // The baseline is the source's drafts as they stand.
+        let kinds: Vec<&str> = revision.baseline.iter().map(|d| d.kind.as_str()).collect();
+        assert_eq!(kinds, ["summary", "comment"]);
+        assert_eq!(revision.baseline[1].text, "off by one?");
+        assert_eq!(revision.baseline[1].status, "pending");
         let record = store.run(run.id).unwrap().unwrap();
         assert_eq!(record.source_run, Some(source.id));
         assert_eq!(record.instruction.as_deref(), Some("be terser"));
@@ -1153,6 +1337,129 @@ mod tests {
         assert_eq!(
             store.queue_regeneration(review.id, "z", |_| true).unwrap(),
             Regeneration::Refused(Refusal::WorktreeInUse)
+        );
+    }
+
+    /// An anchored comment on `src/lib.rs`.
+    fn comment(body: &str, line: u32) -> DraftComment {
+        DraftComment {
+            comment: InlineComment {
+                path: "src/lib.rs".into(),
+                line,
+                start_line: None,
+                side: Side::Right,
+                body: body.into(),
+                severity: Severity::Minor,
+                confidence: Confidence::High,
+            },
+            unanchored: false,
+        }
+    }
+
+    #[test]
+    fn a_revision_keeps_your_choices_on_drafts_it_leaves_alone() {
+        use crate::DraftStatus;
+
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        let original = ReviewResult {
+            summary: "S".into(),
+            comments: vec![
+                comment("A", 1),
+                comment("B", 2),
+                comment("C", 3),
+                comment("D", 4),
+            ],
+            ..result()
+        };
+        store.finish_review(source.id, &original).unwrap();
+        let ids: Vec<i64> = store
+            .drafts(source.id)
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        let [summary, a, b, c, d] = ids[..] else {
+            panic!("{ids:?}")
+        };
+        store.set_draft_status(a, DraftStatus::Accepted).unwrap();
+        store.edit_draft(b, "B, as you put it").unwrap();
+        store.set_draft_status(b, DraftStatus::Accepted).unwrap();
+        store.set_draft_status(c, DraftStatus::Rejected).unwrap();
+
+        let Regeneration::Queued(run) =
+            store.queue_regeneration(source.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        let revised = ReviewResult {
+            summary: "S".into(),
+            comments: vec![
+                comment("A", 1),                // unchanged: still accepted
+                comment("B, as you put it", 2), // your edit, unchanged
+                comment("C", 3),                // rejected; shouldn't be back
+                comment("D, reworded", 4),      // changed: pending, from d
+                comment("A", 9),                // moved: pending, from a
+                comment("E", 5),                // new
+                comment("F", 6),                // names a draft it wasn't shown
+                comment("A", 1),                // a repeat of a: pending
+                comment("G", 7),                // names the summary: new
+            ],
+            ..result()
+        };
+        let basis = Basis {
+            summary: Some(summary),
+            comments: vec![
+                Some(a),
+                Some(b),
+                Some(c),
+                Some(d),
+                Some(a),
+                None,
+                Some(9999),
+                Some(a),
+                Some(summary),
+            ],
+        };
+        store
+            .finish_revision(run.id, &revised, source.id, &basis)
+            .unwrap();
+
+        let got: Vec<(String, bool, String, Option<i64>)> = store
+            .drafts(run.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.body, d.edited, d.status, d.based_on))
+            .collect();
+        let row = |body: &str, edited: bool, status: &str, based_on: Option<i64>| {
+            (body.to_owned(), edited, status.to_owned(), based_on)
+        };
+        assert_eq!(
+            got,
+            [
+                row("S", false, "pending", Some(summary)),
+                row("A", false, "accepted", Some(a)),
+                row("B, as you put it", true, "accepted", Some(b)),
+                row("C", false, "rejected", Some(c)),
+                row("D, reworded", false, "pending", Some(d)),
+                row("A", false, "pending", Some(a)),
+                row("E", false, "pending", None),
+                row("F", false, "pending", None),
+                row("A", false, "pending", Some(a)),
+                row("G", false, "pending", None),
+            ]
+        );
+        // The source run's drafts are as you left them.
+        let before: Vec<String> = store
+            .drafts(source.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.status)
+            .collect();
+        assert_eq!(
+            before,
+            ["pending", "accepted", "accepted", "rejected", "pending"]
         );
     }
 

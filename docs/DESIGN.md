@@ -374,9 +374,21 @@ Rules:
    with a review's restrictions and schema, in the source run's worktree
    path (Claude Code finds sessions by directory), with its run dir as an
    extra `--add-dir`. The prompt is your instruction, fenced as your words,
-   asking for the complete revised review. Its output becomes the new run's
-   drafts, checked against the diff as usual; the source run and its drafts,
-   your edits and choices included, stay as they were. It starts at once,
+   then the drafts of the run being revised as they stand, fenced as your
+   material: each one's id, kind, anchor, current text (your edit if you
+   made one) and status. The agent is told to keep accepted and edited
+   drafts word for word unless you ask otherwise, not to propose rejected
+   ones again, not to repeat posted ones, and to return the complete revised
+   review, naming for each comment (`based_on`) and for the summary
+   (`summary_based_on`) the draft it comes from; the regenerate schema adds
+   those two optional fields. Its output becomes the new run's drafts,
+   checked against the diff as usual. A draft that names a draft of the
+   revised run and matches it word for word, kind and anchor too, keeps that
+   draft's status and your edit: accepted stays accepted. Only the first
+   to do so keeps them; a repeat is pending. One that changed
+   is pending and records `based_on`, so the dashboard can say "revised
+   from #N"; one that names nothing (or a draft it wasn't shown) is new and
+   pending. The source run and its drafts stay as they were. It starts at once,
    even under `--manual-reviews`, and within `runner.max_concurrent`.
    It's refused when the run has no session, when the PR's head has moved
    since (regenerating reviews the old head, so start a fresh review), when
