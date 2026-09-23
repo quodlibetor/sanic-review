@@ -296,6 +296,7 @@ mod tests {
             base_sha: "b1".into(),
             is_draft: false,
             review_requested: true,
+            requested_teams: vec![],
             reviews: vec![Review {
                 id: "r1".into(),
                 author: "bob".into(),

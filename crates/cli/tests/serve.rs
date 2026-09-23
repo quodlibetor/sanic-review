@@ -55,7 +55,9 @@ async fn mock_github() -> MockServer {
             "number": 7, "title": "Add retries", "url": "https://github.com/org/repo/pull/7",
             "isDraft": false, "headRefOid": "aaaabbbbcccc", "baseRefOid": "b",
             "author": { "login": "alice" },
-            "reviewRequests": { "nodes": [] },
+            "reviewRequests": { "nodes": [
+                { "requestedReviewer": { "__typename": "User", "login": "me" } }
+            ] },
             "reviews": { "nodes": [] },
             "comments": { "nodes": [] },
             "reviewThreads": { "nodes": [] }
@@ -63,6 +65,11 @@ async fn mock_github() -> MockServer {
     )
     .mount(&server)
     .await;
+    Mock::given(method("GET"))
+        .and(path("/user/teams"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/notifications"))
         .respond_with(ResponseTemplate::new(304))

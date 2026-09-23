@@ -12,7 +12,13 @@
         "reviewRequests": {
           "nodes": [
             { "requestedReviewer": { "__typename": "User", "login": "Me" } },
-            { "requestedReviewer": { "__typename": "Team" } }
+            {
+              "requestedReviewer": {
+                "__typename": "Team",
+                "slug": "Sanic-Speedsters",
+                "organization": { "login": "sanic-hq-dev" }
+              }
+            }
           ]
         },
         "reviews": {

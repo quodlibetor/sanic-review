@@ -26,14 +26,41 @@ pub struct PrSnapshot {
     pub head_sha: String,
     pub base_sha: String,
     pub is_draft: bool,
-    /// Review is requested from the current user, directly or via a team.
+    /// Review is requested from the current user. GitHub fills this for
+    /// direct requests; the poller adds team requests that pass the config's
+    /// team filter.
     pub review_requested: bool,
+    /// Teams whose review is requested, whether or not you're a member.
+    pub requested_teams: Vec<TeamRef>,
     pub reviews: Vec<Review>,
     /// Inline review threads, plus the PR conversation as a thread with id
     /// [`CONVERSATION_THREAD`].
     pub threads: Vec<Thread>,
     /// Changed file paths; only fetched when path-scoped config needs them.
     pub files: Option<Vec<String>>,
+}
+
+/// A GitHub team, lowercased.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TeamRef {
+    pub org: String,
+    pub slug: String,
+}
+
+impl TeamRef {
+    #[must_use]
+    pub fn new(org: &str, slug: &str) -> Self {
+        Self {
+            org: org.to_ascii_lowercase(),
+            slug: slug.to_ascii_lowercase(),
+        }
+    }
+}
+
+impl fmt::Display for TeamRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.org, self.slug)
+    }
 }
 
 /// Thread id for a PR's top-level conversation comments.
