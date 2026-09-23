@@ -15,6 +15,8 @@ pub struct OwedReview {
     pub key: PrKey,
     pub title: String,
     pub author: String,
+    /// The profile it matched when last polled.
+    pub profile: String,
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
@@ -75,7 +77,7 @@ impl Store {
     /// Open PRs by others that request your review, by repo and number.
     pub fn owed_reviews(&self, me: &str) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.repo, p.number, p.title, p.author, latest.status, latest.error,
+            "SELECT p.repo, p.number, p.title, p.author, p.profile, latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
@@ -93,19 +95,21 @@ impl Store {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get(5)?,
+                    row.get(4)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(
-                |(repo, number, title, author, status, error, pending_drafts)| {
+                |(repo, number, title, author, profile, status, error, pending_drafts)| {
                     Ok(OwedReview {
                         key: key(&repo, number)?,
                         title,
                         author,
+                        profile,
                         latest_run: status.map(|status| LatestRun { status, error }),
                         pending_drafts,
                     })
@@ -312,6 +316,7 @@ mod tests {
                 key: requested.key.clone(),
                 title: "PR 2".into(),
                 author: "alice".into(),
+                profile: "default".into(),
                 latest_run: None,
                 pending_drafts: 0,
             }]
