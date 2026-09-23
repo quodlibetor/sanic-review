@@ -1,11 +1,17 @@
 //! The foreground `serve` loop.
 //!
-//! One task does everything in turn: reconcile and notification polls queue
-//! PRs, then each queued PR is refreshed. Keeping it sequential means a PR
-//! is never refreshed twice at once. A config file change is picked up
-//! between cycles.
+//! One task does all the polling in turn: reconcile and notification polls
+//! queue PRs, then each queued PR is refreshed. Keeping it sequential means
+//! a PR is never refreshed twice at once. A config file change is picked up
+//! between cycles. Refreshes with triggers go to the scheduler, which
+//! debounces them into queued runs for the worker.
 
-use std::{collections::BTreeSet, path::Path, time::Duration};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use color_eyre::{
     Section,
@@ -19,29 +25,43 @@ use sanic_core::{
 use sanic_github::{ApiError, Client, Token};
 use sanic_runner::vcs::VcsResolver;
 use sanic_store::Store;
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, sleep_until},
+};
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
     ServeArgs, Ui,
     poll::{GithubApi, Poller, Refreshed},
+    schedule::{Update, schedule},
     watch::ConfigWatcher,
+    work::Worker,
 };
 
 pub async fn run(args: ServeArgs) -> Result<()> {
     if args.ui == Ui::Tui {
         bail!("`--ui tui` is not implemented yet; use `--ui logs`");
     }
-    let config_path = match args.config {
+    // Absolute, because runs hand these paths to `git -C <mirror>` and to
+    // `claude` running in a worktree, where relative ones would resolve
+    // somewhere else.
+    let config_path = std::path::absolute(match args.config {
         Some(path) => path,
         None => default_config_path()?,
-    };
+    })
+    .wrap_err("resolving the config path")?;
     let config = Config::load(&config_path, &VcsResolver)?;
-    let data_dir = match args.data_dir {
+    let data_dir = std::path::absolute(match args.data_dir {
         Some(dir) => dir,
         None => default_data_dir()?,
-    };
-    let store = Store::open(&data_dir.join("state.db"))?;
+    })
+    .wrap_err("resolving the data directory")?;
+    let db_path = data_dir.join("state.db");
+    let store = Store::open(&db_path)?;
+    // The scheduler and worker share a second connection, so the poller
+    // never waits on them.
+    let run_store = Arc::new(Mutex::new(Store::open(&db_path)?));
     let github = Client::new(&config.github.api_url, Token::discover()?)?;
     let me = github
         .viewer_login()
@@ -50,9 +70,25 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     info!(user = %me, config = %config_path.display(), "watching GitHub");
 
     let mut watcher = ConfigWatcher::new(&config_path)?;
+    let (updates, updates_rx) = mpsc::unbounded_channel();
+    let (runs, runs_rx) = mpsc::unbounded_channel();
+    let recovered = run_store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .recover_runs()?;
+    if !recovered.is_empty() {
+        info!(runs = recovered.len(), "resuming queued runs");
+    }
+    for run in recovered {
+        let _ = runs.send(run);
+    }
+    let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
+
     let mut poller = Poller::new(github, store, config, me);
     tokio::select! {
-        result = poll_forever(&mut poller, &mut watcher, &config_path) => result,
+        result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
+        result = schedule(updates_rx, run_store, runs) => result,
+        () = Arc::clone(&worker).work(runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
@@ -64,6 +100,8 @@ async fn poll_forever<G: GithubApi>(
     poller: &mut Poller<G>,
     watcher: &mut ConfigWatcher,
     config_path: &Path,
+    updates: &mpsc::UnboundedSender<Update>,
+    worker: &Worker,
 ) -> Result<()> {
     let mut next_reconcile = Instant::now();
     let mut next_notifications = Instant::now();
@@ -74,7 +112,7 @@ async fn poll_forever<G: GithubApi>(
         tokio::select! {
             () = sleep_until(next_reconcile.min(next_notifications)) => {}
             () = watcher.changed() => {
-                if reload(poller, config_path) {
+                if reload(poller, config_path, worker) {
                     // New entries may cover PRs nothing has fetched yet.
                     next_reconcile = Instant::now();
                 }
@@ -122,6 +160,12 @@ async fn poll_forever<G: GithubApi>(
                 Ok(Some(refreshed)) => {
                     triggered += refreshed.triggers.len();
                     log_triggers(&refreshed);
+                    if !refreshed.triggers.is_empty() {
+                        // Only fails once the scheduler has stopped, which
+                        // ends `serve` anyway.
+                        let quiet = poller.config().poll.quiet_period;
+                        let _ = updates.send(Update::new(&refreshed, quiet));
+                    }
                 }
                 Ok(None) => {}
                 Err(err @ (ApiError::RateLimited { .. } | ApiError::Unauthorized)) => {
@@ -152,12 +196,13 @@ async fn poll_forever<G: GithubApi>(
 
 /// Swaps in the config at `path`, keeping the current one if the new one
 /// doesn't load. Returns whether it changed.
-fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path) -> bool {
+fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path, worker: &Worker) -> bool {
     match Config::load(path, &VcsResolver) {
         Ok(config) => {
             if config.github.api_url != poller.config().github.api_url {
                 warn!("`github.api_url` changed; restart to use it");
             }
+            worker.configure(&config);
             poller.set_config(config);
             info!(config = %path.display(), "config reloaded");
             true
