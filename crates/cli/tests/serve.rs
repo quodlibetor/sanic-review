@@ -135,7 +135,7 @@ async fn serve_logs_a_review_request_and_reloads_config() {
         .arg("serve")
         // The config uses the real `claude` and github.com; only the quiet
         // period would otherwise keep a review from running.
-        .arg("--no-reviews")
+        .arg("--manual-reviews")
         .arg("--config")
         .arg(&config)
         .arg("--data-dir")

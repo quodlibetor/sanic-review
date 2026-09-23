@@ -271,26 +271,55 @@ impl Store {
         let rows = stmt
             .query_map([REVIEW], queued_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
-            .map(
-                |(id, repo, number, profile, head_sha, base_sha, from_sha)| {
-                    Ok(QueuedRun {
-                        id,
-                        request: ReviewRequest {
-                            key: PrKey {
-                                repo: RepoName::parse(&repo)?,
-                                number,
-                            },
-                            profile,
-                            head_sha,
-                            base_sha,
-                            trigger: from_sha.map_or(ReviewTrigger::Requested, |from_sha| {
-                                ReviewTrigger::Push { from_sha }
-                            }),
-                        },
-                    })
-                },
+        rows.into_iter().map(queued_run).collect()
+    }
+
+    /// `key`'s review that's queued but not started, if any.
+    pub fn queued_review(&self, key: &PrKey) -> Result<Option<QueuedRun>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
+                 FROM runs WHERE status = 'queued' AND kind = ?1 AND repo = ?2 AND number = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![REVIEW, key.repo.to_string(), key.number],
+                queued_row,
             )
+            .optional()?;
+        row.map(queued_run).transpose()
+    }
+
+    /// Asks the running `serve` to review `key` now; see
+    /// [`Store::take_start_requests`].
+    pub fn request_start(&self, key: &PrKey) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO start_requests (repo, number, requested_at) VALUES (?1, ?2, {NOW})"
+            ),
+            params![key.repo.to_string(), key.number],
+        )?;
+        Ok(())
+    }
+
+    /// Removes and returns the PRs `sanic-review review` asked to review
+    /// now, oldest first.
+    pub fn take_start_requests(&mut self) -> Result<Vec<PrKey>> {
+        let tx = self.conn.transaction()?;
+        let rows = tx
+            .prepare("SELECT repo, number FROM start_requests ORDER BY id")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.execute("DELETE FROM start_requests", [])?;
+        tx.commit().wrap_err("taking start requests")?;
+        rows.into_iter()
+            .map(|(repo, number)| {
+                Ok(PrKey {
+                    repo: RepoName::parse(&repo)?,
+                    number,
+                })
+            })
             .collect()
     }
 
@@ -413,6 +442,26 @@ impl Store {
 }
 
 type QueuedRow = (i64, String, u32, String, String, String, Option<String>);
+
+fn queued_run(
+    (id, repo, number, profile, head_sha, base_sha, from_sha): QueuedRow,
+) -> Result<QueuedRun> {
+    Ok(QueuedRun {
+        id,
+        request: ReviewRequest {
+            key: PrKey {
+                repo: RepoName::parse(&repo)?,
+                number,
+            },
+            profile,
+            head_sha,
+            base_sha,
+            trigger: from_sha.map_or(ReviewTrigger::Requested, |from_sha| ReviewTrigger::Push {
+                from_sha,
+            }),
+        },
+    })
+}
 
 fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
     Ok((
@@ -627,6 +676,29 @@ mod tests {
         let mut other = snapshot().key;
         other.number = 8;
         assert_eq!(store.review_request(&other).unwrap(), None);
+    }
+
+    #[test]
+    fn a_prs_queued_review_can_be_found() {
+        let mut store = store();
+        assert_eq!(store.queued_review(&snapshot().key).unwrap(), None);
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert_eq!(
+            store.queued_review(&snapshot().key).unwrap(),
+            Some(run.clone())
+        );
+        store.claim_run(run.id).unwrap();
+        assert_eq!(store.queued_review(&snapshot().key).unwrap(), None);
+    }
+
+    #[test]
+    fn start_requests_are_taken_once() {
+        let mut store = store();
+        let key = snapshot().key;
+        store.request_start(&key).unwrap();
+        store.request_start(&key).unwrap();
+        assert_eq!(store.take_start_requests().unwrap(), [key.clone(), key]);
+        assert!(store.take_start_requests().unwrap().is_empty());
     }
 
     #[test]

@@ -339,10 +339,10 @@ async fn a_request_debounced_across_a_restart_is_still_reviewed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_reviews_queues_without_running_until_a_normal_start() {
+async fn manual_reviews_hold_runs_until_a_normal_start() {
     let w = world().await;
     let line = w
-        .serve_with_until(&["--no-reviews"], "review queued, not run")
+        .serve_with_until(&["--manual-reviews"], "review held")
         .await;
     assert!(
         line.contains("url=https://github.com/org/repo/pull/7"),
@@ -350,7 +350,7 @@ async fn no_reviews_queues_without_running_until_a_normal_start() {
     );
     assert!(
         !w.fake.join("env").exists(),
-        "claude ran despite --no-reviews"
+        "claude ran despite --manual-reviews"
     );
     let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().queued, 1);
@@ -358,6 +358,27 @@ async fn no_reviews_queues_without_running_until_a_normal_start() {
     // Held runs are still queued, so a normal start runs them.
     w.serve_until("drafted").await;
     assert!(w.fake.join("env").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sanic_review_review_starts_a_held_review() {
+    let w = world().await;
+    w.serve_with_until(&["--manual-reviews"], "review held")
+        .await;
+    let output = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
+        .args(["review", "https://github.com/org/repo/pull/7", "--data-dir"])
+        .arg(&w.data)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // Still under --manual-reviews, serve picks the request up and runs
+    // just that review.
+    let line = w.serve_with_until(&["--manual-reviews"], "drafted").await;
+    assert!(
+        line.contains("url=https://github.com/org/repo/pull/7"),
+        "{line}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -30,9 +30,12 @@ enum Command {
     /// Write or update the config: pick teams, local checkouts and orgs.
     Setup(setup::SetupArgs),
     /// Stop reviewing a PR automatically, and hide it in the TUI.
-    Archive(archive::ArchiveArgs),
+    Archive(archive::PrArgs),
     /// Undo `archive`.
-    Unarchive(archive::ArchiveArgs),
+    Unarchive(archive::PrArgs),
+    /// Ask the running `serve` to review a PR now, e.g. one held by
+    /// `--manual-reviews`.
+    Review(archive::PrArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -53,10 +56,11 @@ pub struct ServeArgs {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
-    /// Watch and queue reviews, but don't run any. Queued reviews stay in
-    /// the database and run on the next start without this flag.
+    /// Queue reviews but only run the ones you start: `r` in the TUI, or
+    /// `sanic-review review <PR url>`. The rest stay queued and run on the
+    /// next start without this flag.
     #[arg(long)]
-    no_reviews: bool,
+    manual_reviews: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -78,11 +82,15 @@ impl Cli {
             }
             Command::Archive(args) => {
                 logging::init_stdout();
-                archive::run(args, true)
+                archive::archive(&args, true)
             }
             Command::Unarchive(args) => {
                 logging::init_stdout();
-                archive::run(args, false)
+                archive::archive(&args, false)
+            }
+            Command::Review(args) => {
+                logging::init_stdout();
+                archive::review(&args)
             }
         }
     }

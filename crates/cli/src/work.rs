@@ -144,21 +144,26 @@ impl Worker {
     }
 
     /// Registers `run` as its PR's running review, returning the signal
-    /// that stops it.
-    fn start(&self, run: &QueuedRun) -> Arc<Notify> {
+    /// that stops it. `None` if this run is already registered: a review
+    /// started by hand twice before the worker claimed it arrives twice.
+    fn start(&self, run: &QueuedRun) -> Option<Arc<Notify>> {
+        let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        if active
+            .get(&run.request.key)
+            .is_some_and(|a| a.run_id == run.id)
+        {
+            return None;
+        }
         let cancel = Arc::new(Notify::new());
-        self.active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                run.request.key.clone(),
-                Active {
-                    run_id: run.id,
-                    head_sha: run.request.head_sha.clone(),
-                    cancel: Arc::clone(&cancel),
-                },
-            );
-        cancel
+        active.insert(
+            run.request.key.clone(),
+            Active {
+                run_id: run.id,
+                head_sha: run.request.head_sha.clone(),
+                cancel: Arc::clone(&cancel),
+            },
+        );
+        Some(cancel)
     }
 
     fn finish(&self, run: &QueuedRun) {
@@ -178,7 +183,10 @@ impl Worker {
         // Registered before claiming: a newer head queued after the claim
         // then always finds this run to stop, and one queued before it has
         // already superseded the run in the store, so the claim fails.
-        let cancel = self.start(&run);
+        let Some(cancel) = self.start(&run) else {
+            debug!("already started");
+            return;
+        };
         // Bound first so the store guard is dropped before the review awaits.
         let claimed = self.store().claim_run(run.id);
         let outcome = match claimed {
@@ -507,6 +515,21 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_newer_head_stops_the_running_review_of_an_older_one() {
+        newer_head_stops_older(1, 1).await;
+    }
+
+    /// A held review started by hand twice reaches the worker twice. With a
+    /// free slot for the second copy, it must not take over the first's
+    /// registration, or the newer head couldn't stop the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_sent_twice_can_still_be_stopped() {
+        newer_head_stops_older(2, 2).await;
+    }
+
+    /// Sends the review of the first head `sends` times, then queues the
+    /// second head once the first is under way, and checks it stopped the
+    /// first.
+    async fn newer_head_stops_older(sends: usize, max_concurrent: usize) {
         let dir = tempfile::TempDir::new().unwrap();
         let (base, first, second) = pushed_twice(&dir.path().join("github"));
         // Hangs until killed when briefed on the first head; answers on any
@@ -536,7 +559,7 @@ mod tests {
         let config = Config::parse(
             &format!(
                 "[github]\ngit_url = \"{}\"\n\
-                 [runner]\nclaude = \"{}\"\nmax_concurrent = 1\n\
+                 [runner]\nclaude = \"{}\"\nmax_concurrent = {max_concurrent}\n\
                  [profile.p]\nrepos = [{{ github = \"org\" }}]\n",
                 dir.path().join("github").display(),
                 script.display()
@@ -590,7 +613,9 @@ mod tests {
         let (runs, runs_rx) = mpsc::unbounded_channel();
         let working = tokio::spawn(Arc::clone(&worker).work(runs_rx));
         let old = queue(&first);
-        runs.send(old.clone()).unwrap();
+        for _ in 0..sends {
+            runs.send(old.clone()).unwrap();
+        }
         while !fake.join("started").exists() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
