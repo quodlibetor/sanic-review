@@ -311,6 +311,7 @@ impl Store {
             "SELECT author FROM reviews
              WHERE repo = ?1 AND number = ?2 AND commit_sha = ?3 AND NOT by_bot
                    AND state IN ('APPROVED', 'CHANGES_REQUESTED', 'COMMENTED')
+             -- One row per login, as `is_login` compares them.
              GROUP BY lower(author) ORDER BY min(submitted_at), min(rowid)",
         )?;
         let reviewers = stmt

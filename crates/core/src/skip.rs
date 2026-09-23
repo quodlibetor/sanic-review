@@ -6,6 +6,8 @@ use std::{collections::HashMap, fmt};
 use color_eyre::eyre::{Result, WrapErr};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
+use crate::pr::is_login;
+
 /// Case-insensitive globs over PR titles. Only glob syntax is special, so
 /// `build(deps)*` matches its parentheses literally.
 #[derive(Debug, Clone, Default)]
@@ -111,13 +113,13 @@ impl ReviewedBy {
             return None;
         }
         let mut others: Vec<String> = Vec::new();
-        for login in reviewers.iter().filter(|l| !l.eq_ignore_ascii_case(me)) {
-            if !others.iter().any(|o| o.eq_ignore_ascii_case(login)) {
+        for login in reviewers.iter().filter(|l| !is_login(l, me)) {
+            if !others.iter().any(|o| is_login(o, login)) {
                 others.push(login.clone());
             }
         }
         Some(Self {
-            you: reviewers.iter().any(|l| l.eq_ignore_ascii_case(me)),
+            you: reviewers.iter().any(|l| is_login(l, me)),
             others,
         })
     }

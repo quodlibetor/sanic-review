@@ -103,6 +103,7 @@ impl Store {
                  SELECT id FROM runs r
                  WHERE r.repo = p.repo AND r.number = p.number
                  ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
+             -- lower() on both sides is `is_login`'s rule.
              WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
                    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",
@@ -143,6 +144,7 @@ impl Store {
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
+             -- lower() on both sides is `is_login`'s rule.
              WHERE p.open AND lower(p.author) = lower(?1)
                    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",

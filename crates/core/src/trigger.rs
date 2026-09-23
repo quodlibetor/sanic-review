@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
-use crate::pr::{PrSnapshot, ReviewState};
+use crate::pr::{PrSnapshot, ReviewState, is_login};
 
 /// What the store remembers about a PR from the previous poll.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl Trigger {
 /// Returns the triggers `snapshot` raises for the user `me`.
 #[must_use]
 pub fn detect(me: &str, known: Option<&Known>, snapshot: &PrSnapshot) -> Vec<Trigger> {
-    let is_me = |login: &str| login.eq_ignore_ascii_case(me);
+    let is_me = |login: &str| is_login(login, me);
     if snapshot.is_authored_by(me) {
         return known
             .map(|known| {
