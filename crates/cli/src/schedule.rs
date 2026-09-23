@@ -20,7 +20,7 @@ use color_eyre::eyre::Result;
 use sanic_core::{
     pr::PrKey,
     run::{QueuedRun, ReviewRequest, ReviewTrigger},
-    skip::{Skip, SkipRules},
+    skip::{PrFacts, Skip, SkipRules},
     trigger::Trigger,
 };
 use sanic_store::Store;
@@ -183,6 +183,7 @@ pub async fn schedule(
     due: watch::Sender<DueTimes>,
     skips: watch::Receiver<SkipRules>,
     manual: bool,
+    me: String,
 ) -> Result<()> {
     let mut debouncer = Debouncer::default();
     loop {
@@ -208,7 +209,7 @@ pub async fn schedule(
                     let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
                     // Checked now rather than when the trigger arrived, so a
                     // title edit or config reload in the meantime counts.
-                    match skip(&store, &skips.borrow(), &request.key) {
+                    match skip(&store, &skips.borrow(), &request.key, &me) {
                         Ok(Some(skip)) => {
                             info!(url = %request.key.url(), "review skipped: {skip}");
                             continue;
@@ -288,13 +289,17 @@ fn drop_settled_review(update: &mut Update, store: &mut Store) -> bool {
 }
 
 /// Why `key` isn't reviewed automatically, if it isn't.
-fn skip(store: &Store, rules: &SkipRules, key: &PrKey) -> Result<Option<Skip>> {
+fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Option<Skip>> {
     Ok(store.pr_summary(key)?.and_then(|pr| {
-        if pr.archived {
-            Some(Skip::Archived)
-        } else {
-            rules.check(&pr.profile, &pr.title, pr.is_draft)
-        }
+        rules.decide(&PrFacts {
+            profile: &pr.profile,
+            title: &pr.title,
+            is_draft: pr.is_draft,
+            archived: pr.archived,
+            head_sha: &pr.head_sha,
+            head_reviewers: &pr.head_reviewers,
+            me,
+        })
     }))
 }
 
@@ -471,7 +476,15 @@ mod tests {
         let (runs_tx, mut runs) = mpsc::unbounded_channel();
         let (due_tx, due) = watch::channel(DueTimes::new());
         let (_skips_tx, skips) = watch::channel(SkipRules::default());
-        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips, false));
+        let task = tokio::spawn(schedule(
+            rx,
+            store(),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+            "me".into(),
+        ));
         let start = Instant::now();
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -515,7 +528,15 @@ mod tests {
             config.skip_rules()
         };
         let (skips_tx, skips) = watch::channel(skipping("t*"));
-        let task = tokio::spawn(schedule(rx, store(), runs_tx, due_tx, skips, false));
+        let task = tokio::spawn(schedule(
+            rx,
+            store(),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+            "me".into(),
+        ));
 
         // The stored title is "t".
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -551,6 +572,7 @@ mod tests {
             due_tx,
             skips,
             false,
+            "me".into(),
         ));
 
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -581,7 +603,15 @@ mod tests {
         let (_skips_tx, skips) = watch::channel(SkipRules::default());
         let store = store();
         store.lock().unwrap().set_archived(&key(1), true).unwrap();
-        let task = tokio::spawn(schedule(rx, store, runs_tx, due_tx, skips, false));
+        let task = tokio::spawn(schedule(
+            rx,
+            store,
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+            "me".into(),
+        ));
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(QUIET * 2).await;
         drop(tx);
@@ -616,6 +646,7 @@ mod tests {
             due_tx,
             skips,
             false,
+            "me".into(),
         ));
 
         // The restart's standing request for the same head.
@@ -663,6 +694,7 @@ mod tests {
             due_tx,
             skips,
             false,
+            "me".into(),
         ));
 
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
@@ -674,6 +706,60 @@ mod tests {
         assert!(due.borrow().is_empty(), "h2 is no longer the head");
         tokio::time::sleep(QUIET * 2).await;
         assert!(runs.try_recv().is_err());
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_someone_reviewed_isnt_reviewed_again() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        let review = |id: &str, author: &str, commit: &str, by_bot: bool| sanic_core::pr::Review {
+            id: id.into(),
+            author: author.into(),
+            state: sanic_core::pr::ReviewState::Approved,
+            body: String::new(),
+            submitted_at: "2026-01-01T00:00:00Z".into(),
+            commit: Some(commit.into()),
+            by_bot,
+        };
+        let mut snap = snapshot("alice", true);
+        // A bot's review of the head, and a person's of an older commit,
+        // don't count.
+        snap.reviews = vec![
+            review("r1", "renovate[bot]", "h1", true),
+            review("r2", "bob", "h0", false),
+        ];
+        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        let task = tokio::spawn(schedule(
+            rx,
+            Arc::clone(&store),
+            runs_tx,
+            due_tx,
+            skips,
+            false,
+            "me".into(),
+        ));
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        let run = runs.recv().await.unwrap();
+        store.lock().unwrap().claim_run(run.id).unwrap();
+        store.lock().unwrap().fail_run(run.id, "x").unwrap();
+
+        // Now bob reviews the head: nothing more is queued for it.
+        snap.reviews.push(review("r3", "bob", "h1", false));
+        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(runs.try_recv().is_err());
+
+        // A push makes it eligible again.
+        snap.head_sha = "h2".into();
+        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        assert_eq!(runs.recv().await.unwrap().request.head_sha, "h2");
         drop(tx);
         task.await.unwrap().unwrap();
     }

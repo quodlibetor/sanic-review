@@ -29,7 +29,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
       reviews(last: 100) {
         pageInfo { hasPreviousPage }
-        nodes { id author { login } state body submittedAt }
+        nodes { id author { __typename login } state body submittedAt commit { oid } }
       }
       comments(last: 100) {
         pageInfo { hasPreviousPage }
@@ -413,10 +413,25 @@ struct RawReviewer {
 #[serde(rename_all = "camelCase")]
 struct RawReview {
     id: String,
-    author: Option<Login>,
+    author: Option<RawAuthor>,
     state: String,
     body: String,
     submitted_at: Option<String>,
+    // Always asked for; hand-written mocks may omit it.
+    #[serde(default)]
+    commit: Option<RawCommit>,
+}
+
+#[derive(Deserialize)]
+struct RawAuthor {
+    #[serde(rename = "__typename", default)]
+    kind: Option<String>,
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct RawCommit {
+    oid: String,
 }
 
 #[derive(Deserialize)]
@@ -483,12 +498,21 @@ impl RawPr {
             .reviews
             .into_nodes("reviews", &key)
             .into_iter()
-            .map(|r| Review {
-                state: review_state(&r.state),
-                id: r.id,
-                author: login(r.author),
-                body: r.body,
-                submitted_at: r.submitted_at.unwrap_or_default(),
+            .map(|r| {
+                // GitHub Apps are `Bot`s; `[bot]` also catches accounts
+                // whose type isn't sent, as in hand-written mocks.
+                let by_bot = r.author.as_ref().is_some_and(|a| {
+                    a.kind.as_deref() == Some("Bot") || a.login.ends_with("[bot]")
+                });
+                Review {
+                    state: review_state(&r.state),
+                    id: r.id,
+                    author: r.author.map_or_else(|| "ghost".into(), |a| a.login),
+                    body: r.body,
+                    submitted_at: r.submitted_at.unwrap_or_default(),
+                    commit: r.commit.map(|c| c.oid),
+                    by_bot,
+                }
             })
             .collect();
         let mut threads: Vec<Thread> = vec![Thread {

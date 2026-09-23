@@ -34,7 +34,7 @@ use ratatui::{
 use sanic_core::{
     clock::{Clock, window_start},
     pr::PrKey,
-    skip::{Skip, SkipRules},
+    skip::{PrFacts, Skip, SkipRules},
 };
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -256,10 +256,16 @@ impl Overview {
         let skipped = owed
             .iter()
             .filter_map(|pr| {
-                Some((
-                    pr.key.clone(),
-                    skips.check(&pr.profile, &pr.title, pr.is_draft)?,
-                ))
+                let facts = PrFacts {
+                    profile: &pr.profile,
+                    title: &pr.title,
+                    is_draft: pr.is_draft,
+                    archived: pr.archived,
+                    head_sha: &pr.head_sha,
+                    head_reviewers: &pr.head_reviewers,
+                    me: &shared.me,
+                };
+                Some((pr.key.clone(), skips.decide(&facts)?))
             })
             .collect();
         let profiles = skips.profile_names().to_vec();
@@ -341,14 +347,14 @@ enum Overlay {
 }
 
 /// Why a review may be started by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Why {
     /// The latest run failed or crashed.
     Failed,
     /// `--manual-reviews` is holding its queued review.
     Held,
-    /// It isn't reviewed automatically, for this [`Skip::label`].
-    Skipped(&'static str),
+    /// It isn't reviewed automatically, for this reason.
+    Skipped(Skip),
 }
 
 /// What the loop does after a key.
@@ -534,14 +540,10 @@ impl App {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
-        let skipped = if pr.archived {
-            Some(Skip::Archived.label())
-        } else {
-            self.overview.skipped.get(&pr.key).map(Skip::label)
-        };
+        let skipped = self.overview.skipped.get(&pr.key).cloned();
         let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
         let why = match (skipped, status) {
-            (Some(label), _) => Why::Skipped(label),
+            (Some(skip), _) => Why::Skipped(skip),
             (None, Some("failed" | "crashed")) => Why::Failed,
             (None, Some("queued")) if self.manual_reviews => Why::Held,
             _ => {
@@ -716,7 +718,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     match overlay {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
-        Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, *why),
+        Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, why),
         Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
         None => {}
     }
@@ -781,9 +783,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -
     // period is newer news than the last run.
     let (label, color) = match (waiting, latest.map(|run| run.status.as_str())) {
         _ if pr.archived => ("archived".into(), Color::DarkGray),
-        _ if let Some(skip) = overview.skipped.get(&pr.key) => {
-            (format!("skipped: {}", skip.label()), Color::DarkGray)
-        }
+        _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), Color::DarkGray),
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
         (None, None) => ("waiting".into(), Color::DarkGray),
         (None, Some("queued")) if manual_reviews => ("held".into(), Color::Yellow),
@@ -967,10 +967,14 @@ fn render_help(frame: &mut Frame<'_>) {
     render_popup(frame, " Keys ", lines);
 }
 
-fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: Why) {
+fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: &Why) {
     let (head, tail) = match why {
-        Why::Skipped(reason) => (
-            format!(" Review this {reason}-skipped PR anyway,"),
+        Why::Skipped(Skip::Reviewed { by, .. }) => (
+            format!(" Already reviewed by {by}. Review"),
+            " anyway, at its current head? This spends tokens.",
+        ),
+        Why::Skipped(skip) => (
+            format!(" Review this {}-skipped PR anyway,", skip.label()),
             " at its current head? This spends tokens.",
         ),
         Why::Failed => (
@@ -1055,6 +1059,8 @@ mod tests {
             profile: "default".into(),
             is_draft: false,
             archived: false,
+            head_sha: "h1".into(),
+            head_reviewers: vec![],
             latest_run: None,
             pending_drafts: 0,
         }
@@ -1418,6 +1424,42 @@ mod tests {
     }
 
     #[test]
+    fn a_reviewed_head_says_who_and_r_still_reviews_it() {
+        let mut app = App::new(false);
+        let mut overview = Overview::default();
+        overview
+            .owed
+            .push(owed("org/web", 82, "Tidy the logs", "erin"));
+        let reviewed = Skip::Reviewed {
+            by: sanic_core::skip::ReviewedBy::new("me", &["alice".into(), "me".into()]).unwrap(),
+            head: "h1".into(),
+        };
+        overview.skipped.insert(pr("org/web", 82), reviewed.clone());
+        app.set_overview(overview);
+        let screen = draw(&mut app, 80, 16).backend().to_string();
+        assert!(screen.contains("reviewed by you, alice"), "{screen}");
+
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 82),
+                why: Why::Skipped(reviewed),
+            })
+        );
+        let screen = draw(&mut app, 80, 16).backend().to_string();
+        assert!(
+            screen.contains("Already reviewed by you, alice. Review"),
+            "{screen}"
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Flow::Request(Request::Rerun(pr("org/web", 82)))
+        );
+    }
+
+    #[test]
     fn countdowns_are_minutes_and_seconds_or_hours() {
         assert_eq!(countdown(Duration::from_secs(100)), "1:40");
         assert_eq!(countdown(Duration::from_secs(5)), "0:05");
@@ -1473,7 +1515,9 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/api", 490),
-                why: Why::Skipped("title"),
+                why: Why::Skipped(Skip::Title {
+                    pattern: "build(deps)*".into(),
+                }),
             })
         );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());

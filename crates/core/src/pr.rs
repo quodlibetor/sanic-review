@@ -106,6 +106,10 @@ pub struct Review {
     pub state: ReviewState,
     pub body: String,
     pub submitted_at: String,
+    /// The commit it was left on, if GitHub said.
+    pub commit: Option<String>,
+    /// Left by a bot account, which never counts as a reviewer.
+    pub by_bot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

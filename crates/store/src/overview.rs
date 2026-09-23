@@ -22,6 +22,9 @@ pub struct OwedReview {
     pub is_draft: bool,
     /// Set by you; it stops automatic reviews.
     pub archived: bool,
+    pub head_sha: String,
+    /// See [`Store::head_reviewers`].
+    pub head_reviewers: Vec<String>,
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
@@ -89,7 +92,7 @@ impl Store {
                     latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending'),
-                    p.body
+                    p.body, p.head_sha
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -99,7 +102,7 @@ impl Store {
                    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",
         )?;
-        let owed = stmt
+        let mut owed = stmt
             .query_map(params![me, since], |row| {
                 let status: Option<String> = row.get(7)?;
                 let error: Option<String> = row.get(8)?;
@@ -113,9 +116,14 @@ impl Store {
                     latest_run: status.map(|status| LatestRun { status, error }),
                     pending_drafts: row.get(9)?,
                     body: row.get(10)?,
+                    head_sha: row.get(11)?,
+                    head_reviewers: Vec::new(),
                 })
             })?
-            .collect::<rusqlite::Result<_>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for pr in &mut owed {
+            pr.head_reviewers = self.head_reviewers(&pr.key, &pr.head_sha)?;
+        }
         Ok(owed)
     }
 
@@ -289,6 +297,8 @@ mod tests {
             state,
             body: String::new(),
             submitted_at: at.into(),
+            commit: None,
+            by_bot: false,
         }
     }
 
@@ -338,6 +348,8 @@ mod tests {
                 profile: "default".into(),
                 is_draft: false,
                 archived: false,
+                head_sha: "h1".into(),
+                head_reviewers: vec![],
                 latest_run: None,
                 pending_drafts: 0,
             }]

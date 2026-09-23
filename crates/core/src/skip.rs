@@ -61,20 +61,97 @@ pub enum Skip {
     Archived,
     /// The PR is a draft, and `skip_drafts` is on.
     Draft,
+    /// Someone already reviewed the PR's current head.
+    Reviewed { by: ReviewedBy, head: String },
     /// The title matches `review_requests.skip_titles` or the profile's.
     Title { pattern: String },
 }
 
 impl Skip {
-    /// A one-word reason, for the TUI's status column.
+    /// A one-word reason.
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Archived => "archived",
             Self::Draft => "draft",
+            Self::Reviewed { .. } => "reviewed",
             Self::Title { .. } => "title",
         }
     }
+
+    /// The status to show for a PR skipped for this reason, as the TUI and
+    /// the dashboard show it: `archived`, `skipped: draft`, `reviewed by
+    /// you, alice` or `skipped: title`.
+    #[must_use]
+    pub fn status(&self) -> String {
+        match self {
+            Self::Archived => "archived".into(),
+            Self::Reviewed { by, .. } => format!("reviewed by {by}"),
+            Self::Draft | Self::Title { .. } => format!("skipped: {}", self.label()),
+        }
+    }
+}
+
+/// Who already reviewed a PR's current head, bots aside. You come first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewedBy {
+    pub you: bool,
+    /// Other reviewers' logins, in the order they reviewed.
+    pub others: Vec<String>,
+}
+
+impl ReviewedBy {
+    /// Names shown before the rest are counted as `+N`.
+    const SHOWN: usize = 2;
+
+    /// From the logins of people who reviewed the head. `None` for nobody.
+    #[must_use]
+    pub fn new(me: &str, reviewers: &[String]) -> Option<Self> {
+        if reviewers.is_empty() {
+            return None;
+        }
+        let mut others: Vec<String> = Vec::new();
+        for login in reviewers.iter().filter(|l| !l.eq_ignore_ascii_case(me)) {
+            if !others.iter().any(|o| o.eq_ignore_ascii_case(login)) {
+                others.push(login.clone());
+            }
+        }
+        Some(Self {
+            you: reviewers.iter().any(|l| l.eq_ignore_ascii_case(me)),
+            others,
+        })
+    }
+}
+
+impl fmt::Display for ReviewedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self
+            .you
+            .then_some("you")
+            .into_iter()
+            .chain(self.others.iter().map(String::as_str))
+            .collect();
+        let shown = names.len().min(Self::SHOWN);
+        write!(f, "{}", names[..shown].join(", "))?;
+        if names.len() > shown {
+            write!(f, " +{}", names.len() - shown)?;
+        }
+        Ok(())
+    }
+}
+
+/// What decides whether one PR is reviewed automatically.
+#[derive(Debug, Clone, Copy)]
+pub struct PrFacts<'a> {
+    pub profile: &'a str,
+    pub title: &'a str,
+    pub is_draft: bool,
+    pub archived: bool,
+    pub head_sha: &'a str,
+    /// People (not bots) whose submitted review is on `head_sha`.
+    pub head_reviewers: &'a [String],
+    /// The current user.
+    pub me: &'a str,
 }
 
 impl fmt::Display for Skip {
@@ -82,6 +159,10 @@ impl fmt::Display for Skip {
         match self {
             Self::Archived => write!(f, "it's archived"),
             Self::Draft => write!(f, "it's a draft"),
+            Self::Reviewed { by, head } => {
+                let short: String = head.chars().take(8).collect();
+                write!(f, "already reviewed by {by} at {short}")
+            }
             Self::Title { pattern } => write!(f, "title matches `{pattern}`"),
         }
     }
@@ -125,14 +206,42 @@ impl SkipRules {
         &self.profile_names
     }
 
+    /// Why `pr` isn't reviewed automatically, if it isn't. When several
+    /// reasons apply, the first of these wins: archived, draft, already
+    /// reviewed, title.
+    #[must_use]
+    pub fn decide(&self, pr: &PrFacts<'_>) -> Option<Skip> {
+        if pr.archived {
+            return Some(Skip::Archived);
+        }
+        if let Some(skip) = self.draft(pr.profile, pr.is_draft) {
+            return Some(skip);
+        }
+        if let Some(by) = ReviewedBy::new(pr.me, pr.head_reviewers) {
+            return Some(Skip::Reviewed {
+                by,
+                head: pr.head_sha.to_owned(),
+            });
+        }
+        self.title(pr.profile, pr.title)
+    }
+
     /// Why a PR matched to `profile` isn't reviewed automatically, if it
-    /// isn't.
+    /// isn't, by its draft state and title alone. [`SkipRules::decide`]
+    /// covers every reason.
     #[must_use]
     pub fn check(&self, profile: &str, title: &str, is_draft: bool) -> Option<Skip> {
+        self.draft(profile, is_draft)
+            .or_else(|| self.title(profile, title))
+    }
+
+    fn draft(&self, profile: &str, is_draft: bool) -> Option<Skip> {
         let own = self.profiles.get(profile);
-        if is_draft && own.and_then(|p| p.drafts).unwrap_or(self.drafts) {
-            return Some(Skip::Draft);
-        }
+        (is_draft && own.and_then(|p| p.drafts).unwrap_or(self.drafts)).then_some(Skip::Draft)
+    }
+
+    fn title(&self, profile: &str, title: &str) -> Option<Skip> {
+        let own = self.profiles.get(profile);
         let pattern = self
             .titles
             .first_match(title)
@@ -230,6 +339,89 @@ mod tests {
             assert!(filter.first_match(&format!("{title}x")).is_none(), "{glob}");
         }
         assert_eq!(escape_title("build(deps): x*"), "build(deps): x[*]");
+    }
+
+    fn facts(reviewers: &[String]) -> PrFacts<'_> {
+        PrFacts {
+            profile: "p",
+            title: "wip: x",
+            is_draft: false,
+            archived: false,
+            head_sha: "0123456789abcdef",
+            head_reviewers: reviewers,
+            me: "Me",
+        }
+    }
+
+    fn logins(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    #[test]
+    fn reviewers_of_the_head_are_listed_you_first() {
+        let rules = rules(&[], &[]);
+        let reviewed = |names: &[&str]| {
+            let names = logins(names);
+            rules.decide(&facts(&names)).map(|s| s.status())
+        };
+        assert_eq!(reviewed(&[]), None);
+        assert_eq!(reviewed(&["me"]).as_deref(), Some("reviewed by you"));
+        assert_eq!(
+            reviewed(&["alice", "ME", "alice"]).as_deref(),
+            Some("reviewed by you, alice")
+        );
+        assert_eq!(
+            reviewed(&["alice", "Alice"]).as_deref(),
+            Some("reviewed by alice")
+        );
+        assert_eq!(
+            reviewed(&["alice", "bob", "carol", "dave"]).as_deref(),
+            Some("reviewed by alice, bob +2")
+        );
+        let names = logins(&["alice"]);
+        assert_eq!(
+            rules.decide(&facts(&names)).unwrap().to_string(),
+            "already reviewed by alice at 01234567"
+        );
+    }
+
+    #[test]
+    fn archived_then_draft_then_reviewed_then_title() {
+        let rules = rules(&["wip*"], &[]);
+        let names = logins(&["alice"]);
+        let base = facts(&names);
+        let label = |pr: PrFacts<'_>| rules.decide(&pr).map(|s| s.label());
+        assert_eq!(
+            label(PrFacts {
+                archived: true,
+                is_draft: true,
+                ..base
+            }),
+            Some("archived")
+        );
+        assert_eq!(
+            label(PrFacts {
+                is_draft: true,
+                ..base
+            }),
+            Some("draft")
+        );
+        assert_eq!(label(base), Some("reviewed"));
+        assert_eq!(
+            label(PrFacts {
+                head_reviewers: &[],
+                ..base
+            }),
+            Some("title")
+        );
+        assert_eq!(
+            label(PrFacts {
+                head_reviewers: &[],
+                title: "fix",
+                ..base
+            }),
+            None
+        );
     }
 
     #[test]
