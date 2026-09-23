@@ -897,6 +897,13 @@ async fn without_sec_fetch_site_a_foreign_referer_counts_as_elsewhere() {
         .send(referred("http://127.0.0.1:7117/pr/org/repo/7"))
         .await;
     assert!(reply.body.contains(r#"id="confirm""#), "{}", reply.body);
+    // Whatever case `Host` came in.
+    let upper = Request::get(&preview)
+        .header(header::HOST, "LOCALHOST:7117")
+        .header(header::REFERER, "http://localhost:7117/pr/org/repo/7")
+        .body(Body::empty())
+        .unwrap();
+    assert!(f.send(upper).await.body.contains(r#"id="confirm""#));
     // A lookalike host isn't this one, nor is another port.
     for referer in [
         "http://127.0.0.1:7117.evil.example/",
@@ -1003,8 +1010,8 @@ async fn ignore_preview(f: &Fixture, pattern: &str, profile: &str) -> String {
         .body
 }
 
-/// Exactly what Firefox sent for the dashboard's own "Review now" form,
-/// which set `Referrer-Policy: no-referrer` back then.
+/// Exactly what Firefox sends for the dashboard's own "Review now" form
+/// under `Referrer-Policy: no-referrer`.
 #[tokio::test]
 async fn firefoxs_same_origin_form_post_with_a_null_origin_is_accepted() {
     let f = fixture(false).await;
@@ -1038,11 +1045,26 @@ async fn firefoxs_same_origin_form_post_with_a_null_origin_is_accepted() {
         let reply = f.send(req.body(body()).unwrap()).await;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{site}");
     }
+    // Vouched for, it still needs the token, and only `null` is excused.
+    let tokenless = Request::post("/pr/org/repo/8/review-now")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, "null")
+        .header("sec-fetch-site", "same-origin")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    let reply = f.send(tokenless.body(Body::empty()).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let foreign = Request::post("/pr/org/repo/8/review-now")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, "https://evil.example")
+        .header("sec-fetch-site", "same-origin")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    let reply = f.send(foreign.body(body()).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(f.serve.started.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn links_out_carry_no_referrer_but_the_dashboards_own_requests_do() {
+async fn pages_set_a_same_origin_referrer_policy() {
     let f = fixture(false).await;
     let reply = f.get("/").await;
     assert_eq!(reply.headers[header::REFERRER_POLICY], "same-origin");
