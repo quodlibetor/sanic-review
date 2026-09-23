@@ -26,7 +26,7 @@ expression: "readable(&f, &page.body)"
 <section class="pane" id="owed">
 <h2>Reviews you owe (3)</h2>
 <ol class="rows">
-<li class="row" data-href="/pr/org/repo/7">
+<li class="row" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore">
 <span class="status ok">drafted</span>
 <span class="drafts">3 drafts</span>
 <span class="unseen" title="a review you haven't looked at yet">new</span>
@@ -34,6 +34,7 @@ expression: "readable(&f, &page.body)"
 <a class="title" href="/pr/org/repo/7">Add the thing</a>
 <span class="author dim">(alice)</span>
 <span class="actions">
+<a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -42,7 +43,7 @@ expression: "readable(&f, &page.body)"
 </form>
 </span>
 </li>
-<li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now">
+<li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now" data-ignore="/pr/org/repo/8/ignore">
 <span class="status bad">failed</span>
 <span class="drafts">
 </span>
@@ -51,6 +52,7 @@ expression: "readable(&f, &page.body)"
 <span class="author dim">(bob)</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/8/review-now">Review now</a>
+<a class="button" href="/pr/org/repo/8/ignore">Ignore by title</a>
 <form class="archive" method="post" action="/pr/org/repo/8/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -60,7 +62,7 @@ expression: "readable(&f, &page.body)"
 </span>
 <div class="error">claude exited with 1</div>
 </li>
-<li class="row" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now">
+<li class="row" data-href="/pr/org/repo/10" data-review-now="/pr/org/repo/10/review-now" data-ignore="/pr/org/repo/10/ignore">
 <span class="status dim">skipped: draft</span>
 <span class="drafts">
 </span>
@@ -69,6 +71,7 @@ expression: "readable(&f, &page.body)"
 <span class="author dim">(carol)</span>
 <span class="actions">
 <a class="button" href="/pr/org/repo/10/review-now">Review now</a>
+<a class="button" href="/pr/org/repo/10/ignore">Ignore by title</a>
 <form class="archive" method="post" action="/pr/org/repo/10/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -160,7 +163,7 @@ expression: "readable(&f, &page.body)"
 <th>
 <kbd>i</kbd>
 </th>
-<td>skip PRs by title: use i in the TUI for now</td>
+<td>skip PRs with titles like the selected one</td>
 </tr>
 <tr>
 <th>

@@ -183,9 +183,13 @@
         go("/?archived=" + !shown);
         break;
       }
-      case "i":
-        say("Skipping by title isn't in the dashboard yet: use i in the TUI (serve --ui tui).");
+      case "i": {
+        const target = subject();
+        const href = target && target.dataset.ignore;
+        if (href) go(href);
+        else say("i skips reviews you owe by title");
         break;
+      }
       default:
         return;
     }
@@ -203,6 +207,16 @@
   // A confirm is sent once: a second click or `y` would replace the result
   // page with "Not posted", or post a second empty approval.
   const confirmForm = page === "confirm" && document.getElementById("confirm");
+  // A form marked data-resend is safe to send again, so coming back to it
+  // (say, to fix what was refused) takes it afresh.
+  if (confirmForm && "resend" in confirmForm.dataset) {
+    window.addEventListener("pageshow", function () {
+      delete confirmForm.dataset.sent;
+      confirmForm.querySelectorAll("button").forEach(function (b) {
+        b.disabled = false;
+      });
+    });
+  }
   if (confirmForm) {
     confirmForm.addEventListener("submit", function (e) {
       if (confirmForm.dataset.sent) {

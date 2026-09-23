@@ -42,7 +42,7 @@ const KEYS: &[(&str, &str)] = &[
     ("r", "review now: failed, held or skipped (asks first)"),
     ("a", "archive or unarchive the selected PR"),
     ("A", "show or hide archived PRs"),
-    ("i", "skip PRs by title: use i in the TUI for now"),
+    ("i", "skip PRs with titles like the selected one"),
     ("?, Esc", "show, close this help"),
 ];
 

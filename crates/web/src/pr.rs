@@ -104,9 +104,13 @@ fn pr_header(app: &App, pr: &PrPage, overview: &Overview) -> Markup {
             @if pr.archived { " · " span.dim { "archived" } }
             @if let Some((label, class)) = &status { " · " span.status.(class) { (label) } }
         }
-        div.actions #pr-actions data-review-now=[why.map(|_| format!("{href}/review-now"))] {
+        div.actions #pr-actions data-review-now=[why.map(|_| format!("{href}/review-now"))]
+            data-ignore=[owed.map(|_| format!("{href}/ignore"))] {
             @if why.is_some() {
                 a.button href={ (href) "/review-now" } { "Review now" }
+            }
+            @if owed.is_some() {
+                a.button href={ (href) "/ignore" } { "Ignore by title" }
             }
             (archive_form(app, &pr.key, pr.archived, "pr"))
         }

@@ -11,6 +11,7 @@
 mod assets;
 mod diff;
 mod guard;
+mod ignore;
 mod index;
 mod page;
 mod pr;
@@ -49,6 +50,12 @@ pub trait Control: Send + Sync {
     /// Start a review of `key` now: its held run, or a full review of its
     /// head as last polled.
     fn review_now(&self, key: PrKey);
+
+    /// Adds `pattern` to `skip_titles` in the config file, in
+    /// `[review_requests]` for `None` or else that profile's table, as the
+    /// TUI's ignore editor does; `serve` picks it up by reloading. `false`
+    /// if it's already there.
+    fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool>;
 }
 
 /// Everything the dashboard reads and acts through.
@@ -146,6 +153,14 @@ impl Dashboard {
                 get(pr::confirm_review_now).post(pr::review_now),
             )
             .route("/pr/{owner}/{name}/{number}/archive", post(pr::archive))
+            .route(
+                "/pr/{owner}/{name}/{number}/ignore",
+                get(ignore::editor).post(ignore::save),
+            )
+            .route(
+                "/pr/{owner}/{name}/{number}/ignore/preview",
+                get(ignore::preview),
+            )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/preview",
                 get(submit::preview),

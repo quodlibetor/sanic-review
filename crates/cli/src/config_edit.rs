@@ -1,7 +1,11 @@
 //! Editing the config file in place, keeping its comments and layout.
-//! `setup` and the TUI's ignore editor both write through here.
+//! `setup` and the TUI's and the dashboard's ignore editors write through
+//! here.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, PoisonError},
+};
 
 use color_eyre::eyre::{Result, WrapErr, bail};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
@@ -76,8 +80,12 @@ pub fn add_skip_title(doc: &mut DocumentMut, profile: Option<&str>, pattern: &st
     Ok(true)
 }
 
-/// [`add_skip_title`] on the config file at `path`.
+/// [`add_skip_title`] on the config file at `path`. The TUI and the
+/// dashboard's handlers call this concurrently, so edits take turns: each
+/// rereads the file, and none writes over another's temporary file.
 pub fn add_skip_title_to_file(path: &Path, profile: Option<&str>, pattern: &str) -> Result<bool> {
+    static EDITING: Mutex<()> = Mutex::new(());
+    let _turn = EDITING.lock().unwrap_or_else(PoisonError::into_inner);
     let text = std::fs::read_to_string(path)
         .wrap_err_with(|| format!("reading config {}", path.display()))?;
     let mut doc: DocumentMut = text
@@ -127,6 +135,27 @@ skip_titles = ["wip*"]
         );
         let err = add_skip_title_to_file(&path, Some("nope"), "x").unwrap_err();
         assert!(err.to_string().contains("`[profile.nope]`"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_additions_all_land() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, CONFIG).unwrap();
+        let patterns: Vec<String> = (0..8).map(|i| format!("p{i}*")).collect();
+        std::thread::scope(|scope| {
+            for pattern in &patterns {
+                let path = &path;
+                scope.spawn(move || add_skip_title_to_file(path, None, pattern).unwrap());
+            }
+        });
+        let text = std::fs::read_to_string(&path).unwrap();
+        for pattern in &patterns {
+            assert!(
+                text.contains(&format!("\"{pattern}\"")),
+                "{pattern} lost:\n{text}"
+            );
+        }
     }
 
     #[test]

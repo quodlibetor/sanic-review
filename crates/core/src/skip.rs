@@ -36,6 +36,16 @@ impl TitleFilter {
         Self::new(vec![pattern.to_owned()]).map(|_| ())
     }
 
+    /// A filter of just `pattern`, as an ignore editor previews it. The
+    /// error is the glob crate's own message, without our context line, or
+    /// says the pattern is empty.
+    pub fn single(pattern: &str) -> Result<Self, String> {
+        if pattern.is_empty() {
+            return Err("empty".into());
+        }
+        Self::new(vec![pattern.to_owned()]).map_err(|err| err.root_cause().to_string())
+    }
+
     /// The first pattern `title` matches.
     #[must_use]
     pub fn first_match(&self, title: &str) -> Option<&str> {

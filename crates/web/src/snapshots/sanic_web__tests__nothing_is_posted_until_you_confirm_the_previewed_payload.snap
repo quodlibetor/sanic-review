@@ -120,7 +120,7 @@ This file isn't in the diff.</pre>
 <th>
 <kbd>i</kbd>
 </th>
-<td>skip PRs by title: use i in the TUI for now</td>
+<td>skip PRs with titles like the selected one</td>
 </tr>
 <tr>
 <th>
