@@ -151,6 +151,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         ) => result,
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
+            args.manual_reviews,
         ) => result,
         () = handle_requests(requests_rx, run_store, Starter {
             manual: args.manual_reviews,
@@ -441,6 +442,7 @@ async fn run_reviews(
         while let Some(run) = runs.recv().await {
             info!(
                 url = %run.request.key.url(),
+                run = run.id,
                 head = %run.request.head_sha,
                 "review held (--manual-reviews)"
             );
