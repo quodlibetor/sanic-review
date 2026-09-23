@@ -91,6 +91,11 @@ impl<G: GithubApi> Poller<G> {
         &self.store
     }
 
+    /// The GitHub login everything is judged relative to.
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }

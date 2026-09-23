@@ -170,8 +170,12 @@ Rules:
   fires the run is `queued`; queueing another review of the PR marks a run
   that hasn't started `superseded`. A run that has started is left to
   finish. Reviews still waiting out the quiet interval are held in memory
-  only, so a restart during that window drops them. A reloaded
-  `quiet_secs` applies from the next trigger on.
+  only. To cover a restart during that window, the first time `serve`
+  refreshes each PR after starting (the first reconcile covers every open
+  one), a standing review request on someone else's PR that matches a
+  profile goes to the scheduler like a new one. The idempotency rule then
+  skips any head that already has a queued, running or succeeded run. A
+  reloaded `quiet_secs` applies from the next trigger on.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
   already has a queued, running or succeeded run is skipped; one whose run
   failed or was superseded is queued again. A reply or respond

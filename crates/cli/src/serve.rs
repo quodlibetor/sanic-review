@@ -7,7 +7,7 @@
 //! debounces them into queued runs for the worker.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -34,7 +34,7 @@ use tracing::{Instrument, info, info_span, warn};
 use crate::{
     ServeArgs, Ui,
     poll::{GithubApi, Poller, Refreshed},
-    schedule::{Update, schedule},
+    schedule::{Update, schedule, standing_request},
     watch::ConfigWatcher,
     work::Worker,
 };
@@ -107,6 +107,9 @@ async fn poll_forever<G: GithubApi>(
     let mut next_notifications = Instant::now();
     // Survives across cycles so a rate limit doesn't drop queued PRs.
     let mut pending: BTreeSet<PrKey> = BTreeSet::new();
+    // PRs refreshed since startup; the first refresh of each checks for a
+    // standing review request.
+    let mut seen: HashSet<PrKey> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -160,11 +163,17 @@ async fn poll_forever<G: GithubApi>(
                 Ok(Some(refreshed)) => {
                     triggered += refreshed.triggers.len();
                     log_triggers(&refreshed);
-                    if !refreshed.triggers.is_empty() {
+                    let quiet = poller.config().poll.quiet_period;
+                    let mut update = Update::new(&refreshed, quiet);
+                    if seen.insert(key.clone())
+                        && let Some(standing) = standing_request(&refreshed, poller.me())
+                    {
+                        update.triggers.push(standing);
+                    }
+                    if !update.triggers.is_empty() {
                         // Only fails once the scheduler has stopped, which
                         // ends `serve` anyway.
-                        let quiet = poller.config().poll.quiet_period;
-                        let _ = updates.send(Update::new(&refreshed, quiet));
+                        let _ = updates.send(update);
                     }
                 }
                 Ok(None) => {}
