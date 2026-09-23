@@ -575,15 +575,20 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   request must carry a random token generated at startup, in a form field
   or an htmx header; a page on another site can't read it. When a request
   says where it came from, through `Origin` or `Sec-Fetch-Site`, it must be
-  the dashboard itself. A page another site sends you to, by a link or
-  `window.open`, shows only a link to itself, so that site can't open a
-  confirm page and catch a key you're typing. Browsers that send
-  `Sec-Fetch-Site` say where a navigation came from. Without it, any
-  `Referer` counts, since the dashboard's own pages send none, and no
-  `Referer` doesn't, since typed URLs and bookmarks send none either. Keys also do nothing just after a
-  page opens or comes to the front, or while held down. Responses forbid framing, so
-  another page can't trick you into clicking Confirm, and the CSP allows
-  only the dashboard's own scripts.
+  the dashboard itself. Firefox can send `Origin: null` for the
+  dashboard's own form posts; that passes only beside `Sec-Fetch-Site:
+  same-origin`, which only the browser sets.
+- A page another site sends you to, by a link or `window.open`, shows only
+  a link to itself, so that site can't open a confirm page and catch a key
+  you're typing. Browsers that send `Sec-Fetch-Site` say where a
+  navigation came from. Without it, a `Referer` from anywhere but the
+  dashboard counts, and no `Referer` doesn't, since typed URLs and
+  bookmarks send none. Keys also do nothing just after a page opens or
+  comes to the front, or while held down.
+- Responses forbid framing, so another page can't trick you into clicking
+  Confirm, and the CSP allows only the dashboard's own scripts. The
+  referrer policy is `same-origin`: links out to GitHub carry no
+  referrer, and the dashboard's own requests keep theirs.
 - Worktrees come from untrusted code. The agent never builds or runs that code
   unless a profile explicitly allows it (the default is off).
 - The agent can read your configured checkouts and `runner.read_paths`,
