@@ -6,6 +6,7 @@
 //! rerun a failed or crashed review; nothing in it edits drafts.
 
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{
         Arc,
@@ -31,10 +32,10 @@ use ratatui::{
 };
 use sanic_core::pr::PrKey;
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCounts, Store};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
-use crate::logging::LogLines;
+use crate::{logging::LogLines, schedule::DueTimes};
 
 /// How often the store is reread.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -50,15 +51,8 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// Takes over the terminal. `db` must already be migrated. Confirmed
-    /// reruns go to `reruns`.
-    pub fn start(
-        db: &Path,
-        me: String,
-        no_reviews: bool,
-        logs: LogLines,
-        reruns: mpsc::UnboundedSender<PrKey>,
-    ) -> Result<Self> {
+    /// Takes over the terminal. `db` must already be migrated.
+    pub fn start(db: &Path, shared: Shared) -> Result<Self> {
         let store = Store::open_read_only(db)?;
         let mut terminal = init_terminal().wrap_err("starting the terminal UI")?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -66,15 +60,8 @@ impl Tui {
         let thread = std::thread::Builder::new().name("tui".into()).spawn({
             let stop = Arc::clone(&stop);
             move || {
-                let mut app = App::new(no_reviews);
-                let io = Io {
-                    store: &store,
-                    me: &me,
-                    logs: &logs,
-                    reruns: &reruns,
-                    stop: &stop,
-                };
-                let result = run(&mut terminal, &mut app, &io);
+                let mut app = App::new(shared.no_reviews);
+                let result = run(&mut terminal, &mut app, &store, &shared, &stop);
                 ratatui::restore();
                 let _ = tx.send(result);
             }
@@ -133,23 +120,26 @@ impl Drop for Tui {
     }
 }
 
-/// What the UI thread reads from and reports to.
-struct Io<'a> {
-    store: &'a Store,
-    me: &'a str,
-    logs: &'a LogLines,
-    reruns: &'a mpsc::UnboundedSender<PrKey>,
-    stop: &'a AtomicBool,
+/// What the rest of `serve` shares with the UI, besides the store.
+pub struct Shared {
+    /// The GitHub login everything is judged relative to.
+    pub me: String,
+    /// `serve --no-reviews`.
+    pub no_reviews: bool,
+    pub logs: LogLines,
+    /// When the scheduler will queue each debounced review.
+    pub due: watch::Receiver<DueTimes>,
+    /// Confirmed reruns.
+    pub reruns: mpsc::UnboundedSender<PrKey>,
 }
 
-fn run(terminal: &mut DefaultTerminal, app: &mut App, io: &Io<'_>) -> Result<()> {
-    let Io {
-        store,
-        me,
-        logs,
-        reruns,
-        stop,
-    } = io;
+fn run(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    store: &Store,
+    shared: &Shared,
+    stop: &AtomicBool,
+) -> Result<()> {
     let mut loaded_at: Option<Instant> = None;
     let mut load_failed = false;
     while !stop.load(Ordering::Relaxed) {
@@ -157,7 +147,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, io: &Io<'_>) -> Result<()>
             loaded_at = Some(Instant::now());
             // A failed read keeps the last data; warn once per failure spell
             // rather than every refresh.
-            match Overview::load(store, me) {
+            match Overview::load(store, shared) {
                 Ok(overview) => {
                     app.set_overview(overview);
                     load_failed = false;
@@ -169,7 +159,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, io: &Io<'_>) -> Result<()>
                 Err(_) => {}
             }
         }
-        let (lines, dropped) = logs.snapshot();
+        let (lines, dropped) = shared.logs.snapshot();
         app.set_logs(lines, dropped);
         terminal
             .draw(|frame| render(frame, app))
@@ -182,7 +172,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, io: &Io<'_>) -> Result<()>
                 Flow::Quit => break,
                 // Only fails once `serve` is stopping.
                 Flow::Rerun(pr) => {
-                    let _ = reruns.send(pr);
+                    let _ = shared.reruns.send(pr);
                 }
             }
         }
@@ -198,15 +188,25 @@ pub struct Overview {
     /// Newest first.
     pub activity: Vec<Activity>,
     pub counts: RunCounts,
+    /// How long until each debounced review is queued.
+    pub waiting: HashMap<PrKey, Duration>,
 }
 
 impl Overview {
-    fn load(store: &Store, me: &str) -> Result<Self> {
+    fn load(store: &Store, shared: &Shared) -> Result<Self> {
+        let now = Instant::now();
+        let waiting = shared
+            .due
+            .borrow()
+            .iter()
+            .map(|(key, due)| (key.clone(), due.saturating_duration_since(now)))
+            .collect();
         Ok(Self {
-            owed: store.owed_reviews(me)?,
-            mine: store.my_prs(me)?,
+            owed: store.owed_reviews(&shared.me)?,
+            mine: store.my_prs(&shared.me)?,
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
+            waiting,
         })
     }
 }
@@ -425,7 +425,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let rows: Vec<_> = overview
         .owed
         .iter()
-        .map(|pr| owed_row(pr, *no_reviews))
+        .map(|pr| owed_row(pr, overview.waiting.get(&pr.key).copied(), *no_reviews))
         .collect();
     let pane = Pane::Owed.frame(*focus, &format!("Reviews you owe ({})", rows.len()));
     pane.render(frame, owed, rows, owed_state, "No reviews requested.");
@@ -500,20 +500,28 @@ impl PaneFrame<'_> {
     }
 }
 
-fn owed_row(pr: &OwedReview, no_reviews: bool) -> ListItem<'_> {
+/// Width of the status column in both PR panes, including the space that
+/// keeps a label as long as the column off what follows it.
+const STATUS_WIDTH: usize = 15;
+
+fn owed_row(pr: &OwedReview, waiting: Option<Duration>, no_reviews: bool) -> ListItem<'_> {
     let latest = pr.latest_run.as_ref();
-    let (label, color) = match latest.map(|run| run.status.as_str()) {
-        None => ("no run", Color::DarkGray),
-        Some("queued") if no_reviews => ("held", Color::Yellow),
-        Some("queued") => ("queued", Color::Yellow),
-        Some("running") => ("running", Color::Cyan),
-        Some("succeeded") => ("drafted", Color::Green),
-        Some("failed") => ("failed", Color::Red),
-        Some("crashed") => ("crashed", Color::Red),
-        Some(other) => (other, Color::DarkGray),
+    // A review waiting out the quiet period is newer news than the last run.
+    let (label, color) = match (waiting, latest.map(|run| run.status.as_str())) {
+        (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
+        (None, None) => ("waiting".into(), Color::DarkGray),
+        (None, Some("queued")) if no_reviews => ("held".into(), Color::Yellow),
+        (None, Some("queued")) => ("queued".into(), Color::Yellow),
+        (None, Some("running")) => ("running".into(), Color::Cyan),
+        (None, Some("succeeded")) => ("drafted".into(), Color::Green),
+        (None, Some(status @ ("failed" | "crashed"))) => (status.into(), Color::Red),
+        (None, Some(other)) => (other.into(), Color::DarkGray),
     };
     let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{label:<10}"), Style::new().fg(color)),
+        Span::styled(
+            format!("{label:<w$} ", w = STATUS_WIDTH - 1),
+            Style::new().fg(color),
+        ),
         drafts(pr.pending_drafts),
         Span::raw(pr.key.url()),
         Span::raw("  "),
@@ -524,11 +532,22 @@ fn owed_row(pr: &OwedReview, no_reviews: bool) -> ListItem<'_> {
     // doesn't need attention.
     if let Some(error) = latest.and_then(|run| run.error.as_deref()) {
         lines.push(Line::from(vec![
-            Span::raw(" ".repeat(10)),
+            Span::raw(" ".repeat(STATUS_WIDTH)),
             Span::styled(first_line(error), Style::new().fg(Color::Red)),
         ]));
     }
     ListItem::new(lines)
+}
+
+/// `m:ss`, or `h:mm:ss` from an hour up.
+fn countdown(left: Duration) -> String {
+    let secs = left.as_secs();
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 fn first_line(text: &str) -> &str {
@@ -542,7 +561,10 @@ fn my_row(pr: &MyPr) -> ListItem<'_> {
         ReviewState::Waiting => ("waiting", Color::DarkGray),
     };
     let mut spans = vec![
-        Span::styled(format!("{label:<10}"), Style::new().fg(color)),
+        Span::styled(
+            format!("{label:<w$} ", w = STATUS_WIDTH - 1),
+            Style::new().fg(color),
+        ),
         drafts(pr.pending_drafts),
         Span::raw(pr.key.url()),
         Span::raw("  "),
@@ -561,7 +583,7 @@ fn drafts(n: u32) -> Span<'static> {
         1 => "1 draft".into(),
         n => format!("{n} drafts"),
     };
-    Span::styled(format!("{text:<10}"), Style::new().fg(Color::Magenta))
+    Span::styled(format!("{text:<8} "), Style::new().fg(Color::Magenta))
 }
 
 fn activity_row(activity: &Activity) -> ListItem<'_> {
@@ -712,6 +734,13 @@ mod tests {
                     pending_drafts: 0,
                 },
                 OwedReview {
+                    key: pr("org/web", 78),
+                    title: "Bump serde".into(),
+                    author: "dana".into(),
+                    latest_run: None,
+                    pending_drafts: 0,
+                },
+                OwedReview {
                     key: pr("org/web", 79),
                     title: "Cache avatars".into(),
                     author: "carol".into(),
@@ -771,6 +800,7 @@ mod tests {
                 running: 0,
                 pending_drafts: 3,
             },
+            waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
         }
     }
 
@@ -804,7 +834,7 @@ mod tests {
 
     #[test]
     fn renders_at_80_columns() {
-        insta::assert_snapshot!(draw(&mut app(false), 80, 24).backend());
+        insta::assert_snapshot!(draw(&mut app(false), 80, 30).backend());
     }
 
     #[test]
@@ -828,10 +858,11 @@ mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
         // Stops at the last row.
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(2));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(3));
         press(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(1));
+        assert_eq!(app.lists[Pane::Owed.index()].selected(), Some(2));
 
         press(&mut app, KeyCode::BackTab);
         assert_eq!(app.focus, Pane::Log);
@@ -900,6 +931,13 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.confirm_rerun, None);
+    }
+
+    #[test]
+    fn countdowns_are_minutes_and_seconds_or_hours() {
+        assert_eq!(countdown(Duration::from_secs(100)), "1:40");
+        assert_eq!(countdown(Duration::from_secs(5)), "0:05");
+        assert_eq!(countdown(Duration::from_secs(3725)), "1:02:05");
     }
 
     #[test]
