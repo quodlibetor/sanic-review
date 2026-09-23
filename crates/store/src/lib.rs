@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_closed_prs.sql"),
     include_str!("migrations/0010_review_commit.sql"),
     include_str!("migrations/0011_pr_state.sql"),
+    include_str!("migrations/0012_regenerate.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -40,7 +41,7 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 pub use dashboard::{DraftRow, DraftStatus, PrPage, ReviewRun};
 pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview};
-pub use runs::{Draft, RunCounts, RunRecord, SessionRun};
+pub use runs::{Draft, Refusal, Regeneration, RunCounts, RunRecord, SessionRun};
 
 /// A connection to the database. The poller and the runner each open their
 /// own, so file databases use WAL and a busy timeout.

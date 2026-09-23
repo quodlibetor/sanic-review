@@ -16,7 +16,7 @@ use sanic_core::{
     pr::PrKey,
 };
 use sanic_runner::{
-    chat::{ChatCommand, worktree_path},
+    chat::ChatCommand,
     mirror::Worktree,
     review::{AgentProfile, ReviewRunner, RunSettings},
     vcs::VcsResolver,
@@ -124,7 +124,8 @@ impl Chat {
         let config = Config::load(&paths.config, &VcsResolver)?;
         let session = find(paths, target)?;
         let run = &session.run;
-        let dir = worktree_path(&paths.data_dir, run.id);
+        let runner = ReviewRunner::new(&paths.data_dir);
+        let dir = runner.worktree_path(run);
         if dir.exists() {
             return Err(eyre!(
                 "{} exists: another chat of run {} may be open",
@@ -152,7 +153,6 @@ impl Chat {
             &config.github.git_url,
             config.reference_dirs(),
         );
-        let runner = ReviewRunner::new(&paths.data_dir);
         let worktree = runner
             .chat_worktree(run, &settings.git_url)
             .await
@@ -204,10 +204,9 @@ fn find(paths: &Paths, target: &Target) -> Result<SessionRun> {
 /// Removes the worktree a printed chat command left. Returns its path.
 pub async fn cleanup(paths: &Paths, target: &Target) -> Result<PathBuf> {
     let session = find(paths, target)?;
-    let dir = worktree_path(&paths.data_dir, session.run.id);
-    ReviewRunner::new(&paths.data_dir)
-        .discard_worktree(&session.run)
-        .await;
+    let runner = ReviewRunner::new(&paths.data_dir);
+    let dir = runner.worktree_path(&session.run);
+    runner.discard_worktree(&session.run).await;
     if dir.exists() {
         bail!("couldn't remove {}", dir.display());
     }

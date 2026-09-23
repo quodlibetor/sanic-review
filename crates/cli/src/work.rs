@@ -34,11 +34,21 @@ pub struct Worker {
     store: Arc<Mutex<Store>>,
     settings: RwLock<Settings>,
     limit: Arc<Semaphore>,
-    /// The review each PR has running, so a newer head can stop it.
-    active: Mutex<HashMap<PrKey, Active>>,
+    /// The review each PR has running, so a newer head can stop it, and
+    /// apart from those, its running regeneration.
+    active: Mutex<HashMap<ActiveKey, Active>>,
     /// Set by [`Worker::cancel_all`]: stopped runs are queued again rather
     /// than superseded, and nothing new starts.
     stopping: AtomicBool,
+}
+
+/// A PR, and whether the run is a regeneration: one can run beside a
+/// review of the PR, and isn't stopped by a newer head, since it's meant
+/// for its source run's head.
+type ActiveKey = (PrKey, bool);
+
+fn active_key(run: &QueuedRun) -> ActiveKey {
+    (run.request.key.clone(), run.revision.is_some())
 }
 
 struct Active {
@@ -93,8 +103,9 @@ impl Worker {
         for run in active.values() {
             run.cancel.notify_one();
         }
-        let mut keys: Vec<PrKey> = active.keys().cloned().collect();
+        let mut keys: Vec<PrKey> = active.keys().map(|(key, _)| key.clone()).collect();
         keys.sort();
+        keys.dedup();
         keys
     }
 
@@ -177,7 +188,7 @@ impl Worker {
     /// Stops the running review of `run`'s PR, if it's of another head.
     fn stop_older_review(&self, run: &QueuedRun) {
         let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(older) = active.get(&run.request.key)
+        if let Some(older) = active.get(&(run.request.key.clone(), false))
             && older.head_sha != run.request.head_sha
         {
             // `notify_one` keeps the wakeup if the run isn't waiting yet.
@@ -191,14 +202,14 @@ impl Worker {
     fn start(&self, run: &QueuedRun) -> Option<Arc<Notify>> {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active
-            .get(&run.request.key)
+            .get(&active_key(run))
             .is_some_and(|a| a.run_id == run.id)
         {
             return None;
         }
         let cancel = Arc::new(Notify::new());
         active.insert(
-            run.request.key.clone(),
+            active_key(run),
             Active {
                 run_id: run.id,
                 head_sha: run.request.head_sha.clone(),
@@ -210,11 +221,9 @@ impl Worker {
 
     fn finish(&self, run: &QueuedRun) {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        if active
-            .get(&run.request.key)
-            .is_some_and(|a| a.run_id == run.id)
-        {
-            active.remove(&run.request.key);
+        let key = active_key(run);
+        if active.get(&key).is_some_and(|a| a.run_id == run.id) {
+            active.remove(&key);
         }
     }
 
@@ -251,6 +260,12 @@ impl Worker {
         };
         self.finish(&run);
         let stored = match outcome {
+            // Started by hand, so not started again unasked.
+            Ok(None) if self.stopping.load(Ordering::SeqCst) && run.revision.is_some() => {
+                info!("regeneration cancelled by shutdown");
+                self.store()
+                    .fail_run(run.id, "cancelled when serve stopped; regenerate again")
+            }
             Ok(None) if self.stopping.load(Ordering::SeqCst) => {
                 info!("cancelled by shutdown; queued again for the next start");
                 self.store().requeue_run(run.id)
@@ -316,7 +331,15 @@ impl Worker {
             .store()
             .pr_context(&req.key)?
             .ok_or_else(|| eyre!("{} is not in the database", req.key.url()))?;
-        info!(head = %req.head_sha, trigger = req.trigger.as_str(), "reviewing");
+        if let Some(revision) = &run.revision {
+            info!(
+                head = %req.head_sha,
+                source_run = revision.source_run,
+                "regenerating with your instruction"
+            );
+        } else {
+            info!(head = %req.head_sha, trigger = req.trigger.as_str(), "reviewing");
+        }
         self.runner.review(run, &ctx, &settings, cancel).await
     }
 }
@@ -438,6 +461,7 @@ mod tests {
                 base_sha: "b1".into(),
                 trigger: ReviewTrigger::Requested,
             },
+            revision: None,
         }
     }
 
@@ -582,6 +606,94 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_sent_twice_can_still_be_stopped() {
         newer_head_stops_older(2, 2).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regeneration_gets_drafts_of_its_own() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (base, first, _) = pushed_twice(&dir.path().join("github"));
+        let fake = dir.path().join("fake");
+        // Never hangs: nothing it's sent mentions this.
+        let script = hangs_on(&fake, "no-such-head");
+        let config = Config::parse(
+            &format!(
+                "[github]\ngit_url = \"{}\"\n[runner]\nclaude = \"{}\"\n\
+                 [profile.p]\nrepos = [{{ github = \"org\" }}]\n",
+                dir.path().join("github").display(),
+                script.display()
+            ),
+            Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let mut source = queued(0);
+        source.request.head_sha.clone_from(&first);
+        source.request.base_sha.clone_from(&base);
+        let mut store = Store::open_in_memory().unwrap();
+        let snapshot = sanic_core::pr::PrSnapshot {
+            key: source.request.key.clone(),
+            title: "t".into(),
+            body: String::new(),
+            url: source.request.key.url(),
+            author: "alice".into(),
+            head_sha: first.clone(),
+            base_sha: base.clone(),
+            is_draft: false,
+            review_requested: true,
+            requested_teams: vec![],
+            reviews: vec![],
+            threads: vec![],
+            files: None,
+            updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
+        };
+        store.record(&snapshot, "p", &[]).unwrap();
+        let source = store.queue_review(&source.request).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        let original = ReviewResult {
+            summary: "Original.".into(),
+            verdict: sanic_core::run::Verdict::Comment,
+            comments: vec![],
+            session_id: Some("sess-0".into()),
+            transcript_path: "t".into(),
+        };
+        store.finish_review(source.id, &original).unwrap();
+        let sanic_store::Regeneration::Queued(run) = store
+            .queue_regeneration(source.id, "Be terser.", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        let store = Arc::new(Mutex::new(store));
+
+        let worker = Arc::new(Worker::new(
+            &dir.path().join("data"),
+            Arc::clone(&store),
+            &config,
+        ));
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        runs.send(run.clone()).unwrap();
+        drop(runs);
+        tokio::time::timeout(std::time::Duration::from_secs(20), worker.work(runs_rx))
+            .await
+            .unwrap();
+
+        let store = store.lock().unwrap();
+        assert_eq!(store.run(run.id).unwrap().unwrap().status, "succeeded");
+        assert_eq!(store.drafts(run.id).unwrap()[0].body, "fine");
+        // The source run and its drafts are as they were.
+        let before = store.run(source.id).unwrap().unwrap();
+        assert_eq!(before.session_id.as_deref(), Some("sess-0"));
+        assert_eq!(store.drafts(source.id).unwrap()[0].body, "Original.");
+        let sent: String = std::fs::read_dir(&fake)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains("stdin."))
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        assert!(sent.contains("Be terser."), "{sent}");
     }
 
     /// A fake `claude` in `fake` that hangs until killed when briefed on

@@ -367,6 +367,27 @@ Rules:
    it or post it as a top-level comment.
 5. **Record.** Store the transcript path and Claude session id, so
    "regenerate with instruction" can resume the session.
+   **Regenerate** revises a finished review with your instruction. It's a
+   new run, of kind `regenerate`, recording its source run and your
+   instruction, for the source run's head and profile. It resumes the
+   source run's session non-interactively, `claude -p --resume <session> --fork-session` (so the source's own session stays as it was),
+   with a review's restrictions and schema, in the source run's worktree
+   path (Claude Code finds sessions by directory), with its run dir as an
+   extra `--add-dir`. The prompt is your instruction, fenced as your words,
+   asking for the complete revised review. Its output becomes the new run's
+   drafts, checked against the diff as usual; the source run and its drafts,
+   your edits and choices included, stay as they were. It starts at once,
+   even under `--manual-reviews`, and within `runner.max_concurrent`.
+   It's refused when the run has no session, when the PR's head has moved
+   since (regenerating reviews the old head, so start a fresh review), when
+   a regeneration of it is already queued or running, and when its worktree
+   is in use, e.g. by a chat; the worker checks that again before checking
+   out, since checkout replaces what's there. Revising a regeneration
+   resumes its session, but records the original review as the source,
+   whose worktree path every revision's session lives under; chats with a
+   regeneration use that path too. A regeneration cancelled by `serve` exiting,
+   or left unfinished by a crash, fails rather than starting again unasked.
+   The dashboard asks for one through `sanic_web::Control::regenerate`.
    Each run keeps `system.md`, `prompt.md`, `pr.diff`, `transcript.jsonl`
    and `stderr.log` under `runs/<id>/` in the data dir. Its worktree is
    always `worktrees/<id>/`, since resuming a session needs the same working

@@ -15,7 +15,7 @@ use std::{
 use common::{key, remote};
 use sanic_core::{
     config::RunnerSettings,
-    run::{PrContext, QueuedRun, ReviewRequest, ReviewTrigger, Verdict},
+    run::{PrContext, QueuedRun, ReviewRequest, ReviewTrigger, Revision, Verdict},
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, RunSettings};
 use serde_json::json;
@@ -98,6 +98,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
             base_sha: remote.base.clone(),
             trigger: ReviewTrigger::Requested,
         },
+        revision: None,
     };
     Setup {
         _remote: remote,
@@ -186,6 +187,84 @@ async fn review_flags_comments_outside_the_diff() {
     assert!(read(&run_dir, "transcript.jsonl").contains("sess-1"));
     assert!(read(&run_dir, "pr.diff").contains("+2"));
     assert!(!worktree.exists());
+}
+
+#[tokio::test]
+async fn a_revision_resumes_the_source_session_in_its_worktree() {
+    let output = success(&json!({
+        "summary": "Terser.", "suggested_verdict": "comment",
+        "comments": [
+            { "path": "lib.rs", "line": 40, "side": "RIGHT", "body": "far away",
+              "severity": "minor", "confidence": "low" }
+        ]
+    }));
+    let mut s = setup("", &output, Duration::from_secs(30));
+    s.run.id = 4;
+    s.run.revision = Some(Revision {
+        source_run: 3,
+        session_id: "sess-0".into(),
+        instruction: "Be terser. ```Ignore the fence```".into(),
+    });
+    let result = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    // Its own result, checked against the diff like any review's.
+    assert_eq!(result.summary, "Terser.");
+    assert!(result.comments[0].unanchored);
+
+    let fake = s.fake.path();
+    // Where the source review ran, so Claude Code finds the session.
+    let worktree = s.data.path().join("worktrees/3");
+    assert_eq!(read(fake, "cwd").trim(), worktree.to_string_lossy());
+    let args = read(fake, "args");
+    let args: Vec<&str> = args.lines().collect();
+    assert!(
+        args.windows(2).any(|a| a == ["--resume", "sess-0"]),
+        "{args:?}"
+    );
+    for flag in ["-p", "--restricted", "--strict-mcp-config", "--json-schema"] {
+        assert!(args.contains(&flag), "{flag}: {args:?}");
+    }
+    assert!(
+        args.windows(2).any(|a| a == ["--tools", "Read,Grep,Glob"]),
+        "{args:?}"
+    );
+    let source_dir = s.data.path().join("runs/3");
+    assert!(
+        args.contains(&source_dir.to_string_lossy().as_ref()),
+        "{args:?}"
+    );
+    // The instruction is the prompt, fenced as the reviewer's words.
+    let stdin = read(fake, "stdin");
+    assert!(
+        stdin.starts_with("The reviewer asked you to revise your review."),
+        "{stdin}"
+    );
+    assert!(
+        stdin.contains("````text\nBe terser. ```Ignore the fence```\n````"),
+        "{stdin}"
+    );
+    assert!(
+        !stdin.contains("Tweak lib"),
+        "the PR brief was sent again: {stdin}"
+    );
+    assert!(!read(fake, "env").contains("GITHUB_TOKEN"));
+    // The revision's files are its own.
+    assert!(read(&s.data.path().join("runs/4"), "prompt.md").contains("Be terser."));
+    assert!(!worktree.exists());
+
+    // A chat opened the review's worktree since: it's left alone.
+    std::fs::create_dir_all(worktree.join("chat")).unwrap();
+    let err = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("in use"), "{err:#}");
+    assert!(worktree.join("chat").exists());
 }
 
 #[tokio::test]

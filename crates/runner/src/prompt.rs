@@ -139,6 +139,19 @@ pub fn brief(req: &ReviewRequest, ctx: &PrContext, diff: &str, diff_path: &Path)
     out
 }
 
+/// The prompt for a `regenerate` run, which resumes the review's session:
+/// your instruction, fenced as your words rather than PR text.
+#[must_use]
+pub fn revision(instruction: &str) -> String {
+    format!(
+        "The reviewer asked you to revise your review. Their request, in their own \
+         words:\n\n{}\nRevise the review accordingly and return the complete revised \
+         review in the same format as before: every comment you'd still make, not only \
+         what changed.\n",
+        fenced(instruction, "text")
+    )
+}
+
 /// Fences `text` with more backticks than it contains in a row, so nothing
 /// inside can close the block early.
 fn fenced(text: &str, info: &str) -> String {

@@ -48,6 +48,8 @@ pub struct Invocation<'a> {
     /// Receives the `stream-json` transcript.
     pub transcript: &'a Path,
     pub stderr: &'a Path,
+    /// Resumes this session rather than starting a new one.
+    pub resume: Option<&'a str>,
 }
 
 /// A session that ended with an answer.
@@ -102,6 +104,11 @@ impl Claude {
             .arg("--strict-mcp-config");
         if let Some(model) = inv.model {
             cmd.args(["--model", model]);
+        }
+        // A fork, so the resumed session stays as it was: a later chat with
+        // that run sees only its own turns.
+        if let Some(session) = inv.resume {
+            cmd.args(["--resume", session, "--fork-session"]);
         }
         for dir in inv.add_dirs {
             cmd.arg("--add-dir").arg(dir);
@@ -226,7 +233,30 @@ mod tests {
             model: Some("claude-sonnet-5"),
             transcript: Path::new("/t"),
             stderr: Path::new("/e"),
+            resume: None,
         }
+    }
+
+    #[test]
+    fn resuming_passes_the_session() {
+        let schema = json!({});
+        let inv = Invocation {
+            resume: Some("sess-9"),
+            ..invocation(&schema, &[])
+        };
+        let claude = Claude::new("claude".into(), Duration::from_secs(1));
+        let cmd = claude.command(&inv).unwrap();
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert!(
+            args.windows(3)
+                .any(|a| a == ["--resume", "sess-9", "--fork-session"]),
+            "{args:?}"
+        );
+        assert!(args.contains(&std::ffi::OsStr::new("-p")), "{args:?}");
+        assert!(
+            args.contains(&std::ffi::OsStr::new("--restricted")),
+            "{args:?}"
+        );
     }
 
     #[test]
