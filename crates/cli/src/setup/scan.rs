@@ -21,8 +21,9 @@ pub struct Skipped {
 }
 
 /// Checkouts under `root`, at most `depth` directories down, split into
-/// ones with a GitHub remote and ones without. A checkout's own
-/// subdirectories (including nested workspaces) aren't searched.
+/// ones with a GitHub remote, sorted by repo name ignoring case and then by
+/// path, and ones without, sorted by path. A checkout's own subdirectories
+/// (including nested workspaces) aren't searched.
 pub fn scan(
     root: &Path,
     depth: usize,
@@ -42,6 +43,13 @@ pub fn scan(
             }),
         }
     }
+    found.sort_by_cached_key(|f| {
+        (
+            f.repo.owner.to_lowercase(),
+            f.repo.name.to_lowercase(),
+            f.path.clone(),
+        )
+    });
     (found, skipped)
 }
 
@@ -84,7 +92,15 @@ mod tests {
         fn resolve(&self, path: &Path, _: Option<&str>) -> Result<(Vcs, RepoName)> {
             let name = path.file_name().unwrap().to_string_lossy();
             match name.strip_suffix("-gh") {
-                Some(repo) => Ok((Vcs::Git, RepoName::new("org", repo))),
+                // Built directly, since `new` lowercases, so sorting can be
+                // tested on mixed case. `z-` names a checkout of `zed`.
+                Some(repo) => Ok((
+                    Vcs::Git,
+                    RepoName {
+                        owner: "org".into(),
+                        name: repo.strip_prefix("z-").map_or(repo, |_| "zed").into(),
+                    },
+                )),
                 None => Err(eyre!("no github.com remote found")),
             }
         }
@@ -114,5 +130,28 @@ mod tests {
         assert_eq!(found, [PathBuf::from("a-gh"), PathBuf::from("group/b-gh")]);
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].path.ends_with("group/local"));
+    }
+
+    #[test]
+    fn found_checkouts_are_sorted_by_repo_then_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        for path in ["a/B-gh", "b/a-gh", "c/z-2-gh", "d/z-1-gh"] {
+            std::fs::create_dir_all(root.join(path).join(".git")).unwrap();
+        }
+        let (found, _) = scan(root, 2, &ByName);
+        let found: Vec<_> = found
+            .iter()
+            .map(|f| f.path.strip_prefix(root).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                PathBuf::from("b/a-gh"),
+                PathBuf::from("a/B-gh"),
+                PathBuf::from("c/z-2-gh"),
+                PathBuf::from("d/z-1-gh"),
+            ]
+        );
     }
 }
