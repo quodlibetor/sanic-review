@@ -193,6 +193,15 @@ impl Store {
             .wrap_err_with(|| format!("storing drafts for run {id}"))
     }
 
+    /// Marks a run that was stopped for a newer head as superseded.
+    pub fn supersede_run(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            &format!("UPDATE runs SET status = 'superseded', finished_at = {NOW} WHERE id = ?1"),
+            [id],
+        )?;
+        Ok(())
+    }
+
     pub fn fail_run(&self, id: i64, error: &str) -> Result<()> {
         self.conn.execute(
             &format!(
