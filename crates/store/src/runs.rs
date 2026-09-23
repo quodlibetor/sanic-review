@@ -45,6 +45,27 @@ pub struct RunCounts {
 }
 
 impl Store {
+    /// Whether `req`'s head already has a queued, running or succeeded
+    /// review, so [`Store::queue_review`] would skip it.
+    pub fn has_review(&self, req: &ReviewRequest) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM runs
+                 WHERE repo = ?1 AND number = ?2 AND kind = ?3 AND idem_key = ?4
+                       AND status IN ('queued', 'running', 'succeeded')",
+                params![
+                    req.key.repo.to_string(),
+                    req.key.number,
+                    REVIEW,
+                    req.idempotency_key()
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Queues a review of `req`'s head, superseding any other review of the
     /// PR that hasn't started. `None` if this head is already queued,
     /// running or reviewed; a failed or superseded run of it is requeued.
@@ -594,6 +615,18 @@ mod tests {
         });
         assert!(store.queue_review(&request("h1")).unwrap().is_some());
         commit.join().unwrap();
+    }
+
+    #[test]
+    fn a_head_has_a_review_while_queued_running_or_done() {
+        let mut store = store();
+        assert!(!store.has_review(&request("h1")).unwrap());
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert!(store.has_review(&request("h1")).unwrap());
+        assert!(!store.has_review(&request("h2")).unwrap());
+        store.claim_run(run.id).unwrap();
+        store.fail_run(run.id, "boom").unwrap();
+        assert!(!store.has_review(&request("h1")).unwrap());
     }
 
     #[test]

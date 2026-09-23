@@ -138,6 +138,11 @@ impl Debouncer {
         }
     }
 
+    /// Drops `key`'s pending request, if any.
+    pub fn forget(&mut self, key: &PrKey) {
+        self.pending.remove(key);
+    }
+
     #[must_use]
     pub fn due_times(&self) -> DueTimes {
         self.pending
@@ -183,7 +188,17 @@ pub async fn schedule(
         let next = debouncer.next_due();
         tokio::select! {
             update = updates.recv() => match update {
-                Some(update) => debouncer.offer(&update, Instant::now()),
+                Some(mut update) => {
+                    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                    let settled = drop_settled_review(&mut update, &mut store);
+                    drop(store);
+                    if settled {
+                        // A request pending for an earlier head is stale:
+                        // the PR is back on one that's already reviewed.
+                        debouncer.forget(&update.key);
+                    }
+                    debouncer.offer(&update, Instant::now());
+                }
                 None => return Ok(()),
             },
             () = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
@@ -224,6 +239,44 @@ pub async fn schedule(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Drops `update`'s review triggers when their head already has a
+/// queued, running or succeeded review: debouncing it would only end in
+/// the store skipping it, and meanwhile the PR would look like it's
+/// waiting. That's how a restart's standing requests arrive for reviews
+/// that are already queued. Other triggers still count as activity.
+/// `true` if it dropped them.
+fn drop_settled_review(update: &mut Update, store: &mut Store) -> bool {
+    let Some(request) = update.review() else {
+        return false;
+    };
+    match store.has_review(&request) {
+        Ok(true) => {
+            debug!(
+                url = %request.key.url(),
+                head = %request.head_sha,
+                "already has a review; not debounced"
+            );
+            update.triggers.retain(|t| {
+                !matches!(
+                    t,
+                    Trigger::ReviewRequested { .. }
+                        | Trigger::Push { .. }
+                        | Trigger::ReadyForReview { .. }
+                )
+            });
+            true
+        }
+        Ok(false) => false,
+        Err(err) => {
+            warn!(
+                url = %request.key.url(),
+                "checking for an existing review failed: {err:?}"
+            );
+            false
         }
     }
 }
@@ -521,6 +574,81 @@ mod tests {
         drop(tx);
         task.await.unwrap().unwrap();
         assert!(runs.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_with_a_queued_review_isnt_debounced_again() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        // Held from before a restart.
+        let held = store
+            .lock()
+            .unwrap()
+            .queue_review(&ReviewRequest {
+                key: key(1),
+                profile: "default".into(),
+                head_sha: "h1".into(),
+                base_sha: "b".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap();
+        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+
+        // The restart's standing request for the same head.
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::task::yield_now().await;
+        assert!(due.borrow().is_empty(), "the PR would show as waiting");
+
+        // A new head is still debounced, and replaces the held one.
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(due.borrow().len(), 1);
+        let run = runs.recv().await.unwrap();
+        assert_eq!(run.request.head_sha, "h2");
+        assert_eq!(
+            store.lock().unwrap().run(held.id).unwrap().unwrap().status,
+            "superseded"
+        );
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pushing_back_to_a_queued_head_drops_the_pending_one() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        store
+            .lock()
+            .unwrap()
+            .queue_review(&ReviewRequest {
+                key: key(1),
+                profile: "default".into(),
+                head_sha: "h1".into(),
+                base_sha: "b".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap();
+        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(due.borrow().len(), 1);
+        // Force-pushed back before h2 was queued.
+        tx.send(update(1, "h1", vec![push("h2", "h1")])).unwrap();
+        tokio::task::yield_now().await;
+        assert!(due.borrow().is_empty(), "h2 is no longer the head");
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(runs.try_recv().is_err());
+        drop(tx);
+        task.await.unwrap().unwrap();
     }
 
     struct NoCheckouts;
