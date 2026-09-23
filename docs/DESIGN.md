@@ -46,7 +46,10 @@ shared SQLite database, which `serve` checks every couple of seconds and
 empties as it goes. There's no network listener. A request made while
 `serve` isn't running is handled when it next starts.
 
-`serve` watches its config file. A valid edit applies between poll cycles and
+`serve` watches its config file, and when it's a symlink, say into a
+dotfiles repo, the file it points to as well. Edits from `setup`, the TUI
+and the dashboard replace that file, so the link stays a link. A valid
+edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
 Profiles, `[runner]` (including `read_paths`), `github.git_url` and the
