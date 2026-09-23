@@ -2,8 +2,9 @@
 //! the log.
 //!
 //! It runs on its own thread with its own read-only store connection, and
-//! rereads the store on an interval. Its one action is asking `serve` to
-//! rerun a failed or crashed review; nothing in it edits drafts.
+//! rereads the store on an interval. Its only actions are asking `serve`
+//! to rerun a review and to archive or unarchive a PR; nothing in it edits
+//! drafts.
 
 use std::{
     collections::HashMap,
@@ -134,8 +135,8 @@ pub struct Shared {
     pub due: watch::Receiver<DueTimes>,
     /// Which PRs aren't reviewed automatically; follows config reloads.
     pub skips: watch::Receiver<SkipRules>,
-    /// Confirmed reruns.
-    pub reruns: mpsc::UnboundedSender<PrKey>,
+    /// What you ask `serve` to do.
+    pub requests: mpsc::UnboundedSender<Request>,
 }
 
 fn run(
@@ -176,8 +177,8 @@ fn run(
                 Flow::Continue => {}
                 Flow::Quit => break,
                 // Only fails once `serve` is stopping.
-                Flow::Rerun(pr) => {
-                    let _ = shared.reruns.send(pr);
+                Flow::Request(request) => {
+                    let _ = shared.requests.send(request);
                 }
             }
         }
@@ -186,7 +187,7 @@ fn run(
 }
 
 /// Everything the panes show from the store.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Overview {
     pub owed: Vec<OwedReview>,
     pub mine: Vec<MyPr>,
@@ -259,6 +260,9 @@ impl Pane {
 }
 
 pub struct App {
+    /// Everything last read from the store.
+    loaded: Overview,
+    /// What the panes show: `loaded` without archived PRs, unless shown.
     overview: Overview,
     logs: Vec<String>,
     /// Log lines dropped from the front of `logs` so far.
@@ -270,11 +274,18 @@ pub struct App {
     lists: [ListState; 4],
     /// The log pane shows the newest lines until you move up in it.
     follow_log: bool,
-    help: bool,
-    /// Waiting for a yes before asking for a rerun of this PR's review.
-    confirm_rerun: Option<PrKey>,
+    show_archived: bool,
+    overlay: Option<Overlay>,
     /// Shown in the status bar until the next key.
-    notice: Option<&'static str>,
+    notice: Option<String>,
+}
+
+/// A popup over the panes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Overlay {
+    Help,
+    /// Waiting for a yes before asking for a rerun of this PR's review.
+    ConfirmRerun(PrKey),
 }
 
 /// What the loop does after a key.
@@ -283,14 +294,26 @@ pub struct App {
 pub enum Flow {
     Continue,
     Quit,
+    /// Something for `serve` to do.
+    Request(Request),
+}
+
+/// What the UI asks `serve` to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
     /// You confirmed a rerun of this PR's review.
     Rerun(PrKey),
+    Archive {
+        key: PrKey,
+        archived: bool,
+    },
 }
 
 impl App {
     #[must_use]
     pub fn new(no_reviews: bool) -> Self {
         Self {
+            loaded: Overview::default(),
             overview: Overview::default(),
             logs: Vec::new(),
             logs_dropped: 0,
@@ -298,13 +321,23 @@ impl App {
             focus: Pane::Owed,
             lists: Default::default(),
             follow_log: true,
-            help: false,
-            confirm_rerun: None,
+            show_archived: false,
+            overlay: None,
             notice: None,
         }
     }
 
     pub fn set_overview(&mut self, overview: Overview) {
+        self.loaded = overview;
+        self.refilter();
+    }
+
+    fn refilter(&mut self) {
+        let mut overview = self.loaded.clone();
+        if !self.show_archived {
+            overview.owed.retain(|pr| !pr.archived);
+            overview.mine.retain(|pr| !pr.archived);
+        }
         self.overview = overview;
         self.clamp();
     }
@@ -356,10 +389,12 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.notice = None;
-        if let Some(pr) = self.confirm_rerun.take() {
+        if let Some(Overlay::ConfirmRerun(pr)) = &self.overlay {
+            let pr = pr.clone();
+            self.overlay = None;
             return match key.code {
                 KeyCode::Char('c') if ctrl => Flow::Quit,
-                KeyCode::Char('y') => Flow::Rerun(pr),
+                KeyCode::Char('y') => Flow::Request(Request::Rerun(pr)),
                 // Anything else is a no, so a stray key can't spend tokens.
                 _ => Flow::Continue,
             };
@@ -368,8 +403,20 @@ impl App {
             KeyCode::Char('q') => return Flow::Quit,
             KeyCode::Char('c') if ctrl => return Flow::Quit,
             KeyCode::Char('r') => self.ask_rerun(),
-            KeyCode::Char('?') => self.help = !self.help,
-            KeyCode::Esc => self.help = false,
+            KeyCode::Char('a') => return self.toggle_archive(),
+            KeyCode::Char('A') => {
+                self.show_archived = !self.show_archived;
+                self.notice = Some(if self.show_archived {
+                    "showing archived PRs".into()
+                } else {
+                    "hiding archived PRs".into()
+                });
+                self.refilter();
+            }
+            KeyCode::Char('?') => {
+                self.overlay = (self.overlay != Some(Overlay::Help)).then_some(Overlay::Help);
+            }
+            KeyCode::Esc => self.overlay = None,
             KeyCode::Tab => self.focus = self.focus.step(true),
             KeyCode::BackTab => self.focus = self.focus.step(false),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
@@ -393,9 +440,44 @@ impl App {
                 .is_some_and(|run| matches!(run.status.as_str(), "failed" | "crashed"))
         };
         match selected.filter(rerunnable) {
-            Some(pr) if self.focus == Pane::Owed => self.confirm_rerun = Some(pr.key.clone()),
-            _ => self.notice = Some("r reruns a failed or crashed review you owe"),
+            Some(pr) if self.focus == Pane::Owed => {
+                self.overlay = Some(Overlay::ConfirmRerun(pr.key.clone()));
+            }
+            _ => self.notice = Some("r reruns a failed or crashed review you owe".into()),
         }
+    }
+
+    /// Archives the selected PR in either PR pane, or unarchives it.
+    fn toggle_archive(&mut self) -> Flow {
+        let selected = self.lists[self.focus.index()].selected();
+        let target = match self.focus {
+            Pane::Owed => selected
+                .and_then(|i| self.overview.owed.get(i))
+                .map(|pr| (pr.key.clone(), pr.archived)),
+            Pane::Mine => selected
+                .and_then(|i| self.overview.mine.get(i))
+                .map(|pr| (pr.key.clone(), pr.archived)),
+            Pane::Activity | Pane::Log => None,
+        };
+        let Some((key, was)) = target else {
+            self.notice = Some("a archives the selected PR".into());
+            return Flow::Continue;
+        };
+        let archived = !was;
+        // Shown right away; the next read of the store agrees.
+        for pr in self.loaded.owed.iter_mut().filter(|pr| pr.key == key) {
+            pr.archived = archived;
+        }
+        for pr in self.loaded.mine.iter_mut().filter(|pr| pr.key == key) {
+            pr.archived = archived;
+        }
+        self.notice = Some(if archived {
+            format!("archived {} · A shows archived PRs", key.url())
+        } else {
+            format!("unarchived {}", key.url())
+        });
+        self.refilter();
+        Flow::Request(Request::Archive { key, archived })
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -436,11 +518,20 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         focus,
         lists,
         follow_log,
-        help,
-        confirm_rerun,
+        show_archived,
+        overlay,
         notice,
+        loaded,
         ..
     } = app;
+    // How many archived PRs a pane is hiding, for its title.
+    let title = |name: &str, shown: usize, archived: usize| {
+        if *show_archived || archived == 0 {
+            format!("{name} ({shown})")
+        } else {
+            format!("{name} ({shown} · {archived} archived)")
+        }
+    };
     let [owed_state, mine_state, activity_state, log_state] = lists;
 
     let rows: Vec<_> = overview
@@ -448,11 +539,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .iter()
         .map(|pr| owed_row(pr, overview, *no_reviews))
         .collect();
-    let pane = Pane::Owed.frame(*focus, &format!("Reviews you owe ({})", rows.len()));
+    let archived = loaded.owed.iter().filter(|pr| pr.archived).count();
+    let pane = Pane::Owed.frame(*focus, &title("Reviews you owe", rows.len(), archived));
     pane.render(frame, owed, rows, owed_state, "No reviews requested.");
 
     let rows: Vec<_> = overview.mine.iter().map(my_row).collect();
-    let pane = Pane::Mine.frame(*focus, &format!("Your PRs ({})", rows.len()));
+    let archived = loaded.mine.iter().filter(|pr| pr.archived).count();
+    let pane = Pane::Mine.frame(*focus, &title("Your PRs", rows.len(), archived));
     pane.render(frame, mine, rows, mine_state, "No open PRs of yours.");
 
     let rows: Vec<_> = overview.activity.iter().map(activity_row).collect();
@@ -466,12 +559,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     pane.highlight &= !*follow_log;
     pane.render(frame, log, rows, log_state, "");
 
-    render_status(frame, status, &overview.counts, *no_reviews, *notice);
-    if *help {
-        render_help(frame);
-    }
-    if let Some(pr) = confirm_rerun {
-        render_confirm(frame, pr);
+    render_status(
+        frame,
+        status,
+        &overview.counts,
+        *no_reviews,
+        notice.as_deref(),
+    );
+    match overlay {
+        Some(Overlay::Help) => render_help(frame),
+        Some(Overlay::ConfirmRerun(pr)) => render_confirm(frame, pr),
+        None => {}
     }
 }
 
@@ -531,6 +629,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, no_reviews: bool) -> Li
     // A skip says why nothing will happen; a review waiting out the quiet
     // period is newer news than the last run.
     let (label, color) = match (waiting, latest.map(|run| run.status.as_str())) {
+        _ if pr.archived => ("archived".into(), Color::DarkGray),
         _ if let Some(skip) = overview.skipped.get(&pr.key) => {
             (format!("skipped: {}", skip.label()), Color::DarkGray)
         }
@@ -562,7 +661,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, no_reviews: bool) -> Li
             Span::styled(first_line(error), Style::new().fg(Color::Red)),
         ]));
     }
-    ListItem::new(lines)
+    dim_if_archived(ListItem::new(lines), pr.archived)
 }
 
 /// `m:ss`, or `h:mm:ss` from an hour up.
@@ -582,6 +681,7 @@ fn first_line(text: &str) -> &str {
 
 fn my_row(pr: &MyPr) -> ListItem<'_> {
     let (label, color) = match pr.review_state {
+        _ if pr.archived => ("archived", Color::DarkGray),
         ReviewState::Approved => ("approved", Color::Green),
         ReviewState::ChangesRequested => ("changes", Color::Red),
         ReviewState::Waiting => ("waiting", Color::DarkGray),
@@ -599,7 +699,15 @@ fn my_row(pr: &MyPr) -> ListItem<'_> {
         spans.push("[draft] ".dim());
     }
     spans.push(Span::raw(pr.title.as_str()));
-    ListItem::new(Line::from(spans))
+    dim_if_archived(ListItem::new(Line::from(spans)), pr.archived)
+}
+
+fn dim_if_archived(item: ListItem<'_>, archived: bool) -> ListItem<'_> {
+    if archived {
+        item.style(Style::new().add_modifier(Modifier::DIM))
+    } else {
+        item
+    }
 }
 
 /// A fixed-width pending draft count; blank when there are none.
@@ -676,6 +784,8 @@ const HELP: &[(&str, &str)] = &[
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
     ("r", "rerun a failed or crashed review"),
+    ("a", "archive or unarchive the selected PR"),
+    ("A", "show or hide archived PRs"),
     ("?, Esc", "close this help"),
 ];
 
@@ -750,6 +860,7 @@ mod tests {
             author: author.into(),
             profile: "default".into(),
             is_draft: false,
+            archived: false,
             latest_run: None,
             pending_drafts: 0,
         }
@@ -782,6 +893,7 @@ mod tests {
                     key: pr("org/api", 470),
                     title: "Speed up search".into(),
                     is_draft: false,
+                    archived: false,
                     review_state: ReviewState::ChangesRequested,
                     pending_drafts: 0,
                 },
@@ -789,6 +901,15 @@ mod tests {
                     key: pr("org/web", 80),
                     title: "New settings page".into(),
                     is_draft: true,
+                    archived: false,
+                    review_state: ReviewState::Waiting,
+                    pending_drafts: 0,
+                },
+                MyPr {
+                    key: pr("org/web", 60),
+                    title: "Abandoned experiment".into(),
+                    is_draft: false,
+                    archived: true,
                     review_state: ReviewState::Waiting,
                     pending_drafts: 0,
                 },
@@ -924,9 +1045,9 @@ mod tests {
         assert_eq!(app.lists[Pane::Owed.index()].selected(), None);
 
         press(&mut app, KeyCode::Char('?'));
-        assert!(app.help);
+        assert_eq!(app.overlay, Some(Overlay::Help));
         press(&mut app, KeyCode::Esc);
-        assert!(!app.help);
+        assert_eq!(app.overlay, None);
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -941,29 +1062,29 @@ mod tests {
         // The first row's latest run succeeded.
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.confirm_rerun, None);
+        assert_eq!(app.overlay, None);
         assert!(app.notice.is_some());
 
         press(&mut app, KeyCode::End);
         assert_eq!(app.notice, None);
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.confirm_rerun, Some(pr("org/web", 79)));
+        assert_eq!(app.overlay, Some(Overlay::ConfirmRerun(pr("org/web", 79))));
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
         // Anything but `y` cancels.
         press(&mut app, KeyCode::Char('q'));
-        assert_eq!(app.confirm_rerun, None);
+        assert_eq!(app.overlay, None);
 
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('y'))),
-            Flow::Rerun(pr("org/web", 79))
+            Flow::Request(Request::Rerun(pr("org/web", 79)))
         );
-        assert_eq!(app.confirm_rerun, None);
+        assert_eq!(app.overlay, None);
 
         // Only from the pane of reviews you owe.
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.confirm_rerun, None);
+        assert_eq!(app.overlay, None);
     }
 
     #[test]
@@ -992,6 +1113,44 @@ mod tests {
         assert_eq!(countdown(Duration::from_secs(100)), "1:40");
         assert_eq!(countdown(Duration::from_secs(5)), "0:05");
         assert_eq!(countdown(Duration::from_secs(3725)), "1:02:05");
+    }
+
+    #[test]
+    fn a_archives_and_capital_a_shows_archived_prs() {
+        let mut app = app(false);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.overview.mine.len(), 2, "the archived one is hidden");
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Flow::Request(Request::Archive {
+                key: pr("org/api", 470),
+                archived: true,
+            })
+        );
+        assert_eq!(app.overview.mine.len(), 1);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap()
+                .starts_with("archived https://")
+        );
+
+        press(&mut app, KeyCode::Char('A'));
+        assert_eq!(app.overview.mine.len(), 3);
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+        press(&mut app, KeyCode::End);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Flow::Request(Request::Archive {
+                key: pr("org/web", 60),
+                archived: false,
+            })
+        );
+
+        // Nothing to archive in the other panes.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.handle_key(key(KeyCode::Char('a'))), Flow::Continue);
     }
 
     #[test]

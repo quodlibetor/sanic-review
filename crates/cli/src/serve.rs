@@ -37,7 +37,7 @@ use crate::{
     ServeArgs, Ui, logging,
     poll::{GithubApi, Poller, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
-    tui::{Shared, Tui},
+    tui::{Request, Shared, Tui},
     watch::ConfigWatcher,
     work::Worker,
 };
@@ -100,7 +100,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
-    let (reruns, reruns_rx) = mpsc::unbounded_channel();
+    let (requests, requests_rx) = mpsc::unbounded_channel();
     let (due_tx, due) = watch::channel(DueTimes::new());
     let (skips_tx, skips) = watch::channel(config.skip_rules());
     let mut ui = match logs {
@@ -112,7 +112,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 logs,
                 due,
                 skips,
-                reruns,
+                requests,
             },
         )?),
         None => None,
@@ -138,7 +138,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, skips_tx.subscribe(),
         ) => result,
-        () = rerun(reruns_rx, run_store, runs) => Ok(()),
+        () = handle_requests(requests_rx, run_store, runs) => Ok(()),
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
@@ -147,37 +147,57 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
 }
 
-/// Queues a review of each requested PR's current head, as the scheduler
-/// would, so `--no-reviews` holds it and a head that already has a queued,
-/// running or succeeded review is left alone. Never returns: without the
-/// TUI nothing sends requests.
-async fn rerun(
-    mut requests: mpsc::UnboundedReceiver<PrKey>,
+/// Carries out what the TUI asks for. Never returns: without the TUI
+/// nothing sends requests.
+async fn handle_requests(
+    mut requests: mpsc::UnboundedReceiver<Request>,
     store: Arc<Mutex<Store>>,
     runs: mpsc::UnboundedSender<QueuedRun>,
 ) {
-    while let Some(key) = requests.recv().await {
-        let _span = info_span!("rerun", url = %key.url()).entered();
-        let queued = {
-            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-            store.review_request(&key).and_then(|req| match req {
-                Some(req) => store.queue_review(&req),
-                None => Ok(None),
-            })
-        };
-        match queued {
-            Ok(Some(run)) => {
-                info!(head = %run.request.head_sha, "review queued again by hand");
-                let _ = runs.send(run);
+    while let Some(request) = requests.recv().await {
+        match request {
+            Request::Rerun(key) => rerun(&key, &store, &runs),
+            Request::Archive { key, archived } => {
+                let set = store
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .set_archived(&key, archived);
+                let url = key.url();
+                match set {
+                    Ok(true) if archived => info!(url = %url, "archived"),
+                    Ok(true) => info!(url = %url, "unarchived"),
+                    Ok(false) => warn!(url = %url, "not archived: the PR isn't tracked"),
+                    Err(err) => warn!(url = %url, "archiving failed: {err:?}"),
+                }
             }
-            Ok(None) => info!(
-                "not rerun: the PR isn't tracked, or its head already has a queued, \
-                 running or finished review"
-            ),
-            Err(err) => warn!(url = %key.url(), "rerunning the review failed: {err:?}"),
         }
     }
     std::future::pending::<()>().await;
+}
+
+/// Queues a review of `key`'s current head, as the scheduler would, so
+/// `--no-reviews` holds it and a head that already has a queued, running
+/// or succeeded review is left alone.
+fn rerun(key: &PrKey, store: &Mutex<Store>, runs: &mpsc::UnboundedSender<QueuedRun>) {
+    let _span = info_span!("rerun", url = %key.url()).entered();
+    let queued = {
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.review_request(key).and_then(|req| match req {
+            Some(req) => store.queue_review(&req),
+            None => Ok(None),
+        })
+    };
+    match queued {
+        Ok(Some(run)) => {
+            info!(head = %run.request.head_sha, "review queued again by hand");
+            let _ = runs.send(run);
+        }
+        Ok(None) => info!(
+            "not rerun: the PR isn't tracked, or its head already has a queued, \
+             running or finished review"
+        ),
+        Err(err) => warn!(url = %key.url(), "rerunning the review failed: {err:?}"),
+    }
 }
 
 /// Runs queued reviews, or with `--no-reviews` only logs them; they stay
@@ -408,7 +428,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn a_rerun_requeues_a_failed_review_once() {
+    async fn requests_rerun_once_and_archive() {
         let key = PrKey {
             repo: RepoName::new("org", "repo"),
             number: 7,
@@ -441,24 +461,26 @@ mod tests {
         let (requests, requests_rx) = mpsc::unbounded_channel();
         let (runs, mut runs_rx) = mpsc::unbounded_channel();
         // The second request finds the first one's run queued.
-        requests.send(key.clone()).unwrap();
-        requests.send(key).unwrap();
+        requests.send(Request::Rerun(key.clone())).unwrap();
+        requests.send(Request::Rerun(key.clone())).unwrap();
+        requests
+            .send(Request::Archive {
+                key: key.clone(),
+                archived: true,
+            })
+            .unwrap();
         let handled = tokio::time::timeout(
             Duration::from_secs(1),
-            rerun(requests_rx, Arc::clone(&store), runs),
+            handle_requests(requests_rx, Arc::clone(&store), runs),
         );
         assert!(handled.await.is_err(), "rerun never returns");
 
         assert_eq!(runs_rx.try_recv().unwrap(), failed);
         assert!(runs_rx.try_recv().is_err());
-        let status = store
-            .lock()
-            .unwrap()
-            .run(failed.id)
-            .unwrap()
-            .unwrap()
-            .status;
-        assert_eq!(status, "queued");
+        // Archiving then superseded the requeued run.
+        let store = store.lock().unwrap();
+        assert_eq!(store.run(failed.id).unwrap().unwrap().status, "superseded");
+        assert!(store.pr_summary(&key).unwrap().unwrap().archived);
     }
 
     #[test]

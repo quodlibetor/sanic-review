@@ -219,15 +219,24 @@ Rules:
   profile goes to the scheduler like a new one. The idempotency rule then
   skips any head that already has a queued, running or succeeded run. A
   reloaded `quiet_secs` applies from the next trigger on.
-- **Skips.** A draft PR, while `skip_drafts` is on (the default; a
-  profile's own `skip_drafts` overrides `[review_requests]`), and a PR
-  whose title matches a `skip_titles` glob, from `[review_requests]` or
-  from its profile, are never reviewed automatically. Globs match the whole title, ignoring case, and only glob
-  syntax is special, so `(` and `)` match themselves. The check runs when a
-  review comes due, against the title, draft state and config at that
-  moment, so edits and config reloads count. A skipped review is logged on the PR,
-  e.g. "review skipped: title matches `build(deps)*`". The PR is still
-  tracked and shown everywhere.
+- **Skips.** These PRs are never reviewed automatically:
+  - archived ones (see Archive);
+  - drafts, while `skip_drafts` is on (the default; a profile's own
+    `skip_drafts` overrides `[review_requests]`);
+  - ones whose title matches a `skip_titles` glob, from `[review_requests]`
+    or from the PR's profile. Globs match the whole title, ignoring case,
+    and only glob syntax is special, so `(` and `)` match themselves.
+
+  The check runs when a review comes due, against the PR and config at
+  that moment, so edits, archiving and config reloads in the meantime
+  count. A skipped review is logged on the PR, e.g. "review skipped: title
+  matches `build(deps)*`". The PR is still tracked and shown everywhere.
+- **Archive.** Archiving a PR is yours alone to set and clear: new pushes
+  and comments don't clear it. An archived PR is silent: it gets no
+  automatic runs of any kind, and archiving supersedes every run of it
+  that's queued but not started; a running one finishes. Use the TUI's `a` key,
+  or `sanic-review archive <PR url>` and `sanic-review unarchive <PR url>`,
+  which write the store directly and work while `serve` runs.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
   already has a queued, running or succeeded run is skipped; one whose run
   failed, crashed or was superseded is queued again. A reply or respond
@@ -331,7 +340,7 @@ invited to draft replies or fixes on someone else's PR.
 | Table | Contents |
 |-------|----------|
 | `repos` | owner, name, mirror path |
-| `prs` | repo, number, title, description, author, is_mine, open, matched profile |
+| `prs` | repo, number, title, description, author, is_mine, open, archived, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |
@@ -375,7 +384,7 @@ available when tuning instruction files.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
-  TUI. Its only action is rerunning a failed or crashed review.
+  TUI. Its only actions are rerunning a review and archiving a PR.
   - **Reviews you owe:** open PRs by others that request your review, with the
     latest run's status (queued, held by `--no-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A review still waiting
@@ -401,6 +410,9 @@ available when tuning instruction files.
   appended to `serve.log` in the data dir.
   Keys: `q` or Ctrl-C quits `serve`, Tab and Shift-Tab switch pane, `j`/`k`
   or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
+  `a` archives or unarchives the selected PR in either PR pane. Archived
+  PRs are hidden, and each pane's title counts them; `A` shows them,
+  dimmed and marked `archived`.
   `r` on a review you owe whose latest run failed or crashed asks for
   confirmation, since it spends tokens, then queues a full review of the
   PR's head as last polled. It goes through the store like any queued
