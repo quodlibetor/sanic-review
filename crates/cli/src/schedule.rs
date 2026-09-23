@@ -174,15 +174,22 @@ pub async fn schedule(
                         .queue_review(&request);
                     match queued {
                         Ok(Some(run)) => {
-                            info!(pr = %request.key, run = run.id, "review queued");
+                            info!(url = %request.key.url(), run = run.id, "review queued");
                             if runs.send(run).is_err() {
                                 return Ok(());
                             }
                         }
                         Ok(None) => {
-                            debug!(pr = %request.key, head = %request.head_sha, "already reviewed");
+                            debug!(
+                                url = %request.key.url(),
+                                head = %request.head_sha,
+                                "already reviewed"
+                            );
                         }
-                        Err(err) => warn!(pr = %request.key, "queueing review failed: {err:?}"),
+                        Err(err) => warn!(
+                            url = %request.key.url(),
+                            "queueing review failed: {err:?}"
+                        ),
                     }
                 }
             }

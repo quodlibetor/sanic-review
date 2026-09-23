@@ -110,7 +110,7 @@ impl Worker {
             tokio::select! {
                 run = runs.recv() => match run {
                     Some(run) => {
-                        let span = info_span!("run", id = run.id, pr = %run.request.key);
+                        let span = info_span!("run", id = run.id, url = %run.request.key.url());
                         tasks.spawn(Arc::clone(&self).execute(run).instrument(span));
                     }
                     None => break,
@@ -139,7 +139,7 @@ impl Worker {
             Ok(result) => {
                 let stored = self.store().finish_review(run.id, &result);
                 if stored.is_ok() {
-                    log_result(&run, &result);
+                    log_result(&result);
                 }
                 stored
             }
@@ -169,21 +169,20 @@ impl Worker {
         let ctx = self
             .store()
             .pr_context(&req.key)?
-            .ok_or_else(|| eyre!("{} is not in the database", req.key))?;
+            .ok_or_else(|| eyre!("{} is not in the database", req.key.url()))?;
         info!(head = %req.head_sha, trigger = req.trigger.as_str(), "reviewing");
         self.runner.review(run, &ctx, &settings).await
     }
 }
 
-fn log_result(run: &QueuedRun, result: &ReviewResult) {
+fn log_result(result: &ReviewResult) {
     let unanchored = result.comments.iter().filter(|c| c.unanchored).count();
     let headline = result.summary.lines().next().unwrap_or_default();
     info!(
         verdict = result.verdict.as_str(),
         comments = result.comments.len(),
         unanchored,
-        "review of {} drafted: {headline}",
-        run.request.key
+        "review drafted: {headline}"
     );
 }
 

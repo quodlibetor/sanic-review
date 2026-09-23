@@ -122,7 +122,7 @@ impl Store {
             tx.last_insert_rowid()
         };
         tx.commit()
-            .wrap_err_with(|| format!("queueing a review of {}", req.key))?;
+            .wrap_err_with(|| format!("queueing a review of {}", req.key.url()))?;
         Ok(Some(QueuedRun {
             id,
             request: req.clone(),

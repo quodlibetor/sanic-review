@@ -141,7 +141,11 @@ async fn serve_logs_a_review_request_and_reloads_config() {
 
     let result = tokio::task::spawn_blocking(move || {
         let line = output.wait_for("review requested at aaaabbbb");
-        assert!(line.contains("org/repo#7"), "{line}");
+        assert!(
+            line.contains("url=https://github.com/org/repo/pull/7"),
+            "{line}"
+        );
+        assert!(!line.contains("pr=") && !line.contains("#7"), "{line}");
 
         std::fs::write(&config, "[profile.p]\nrepos = []\n").unwrap();
         output.wait_for("config change not applied");

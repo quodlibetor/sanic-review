@@ -160,7 +160,7 @@ impl<G: GithubApi> Poller<G> {
     pub async fn refresh(&mut self, key: &PrKey) -> Result<Option<Refreshed>, ApiError> {
         let with_files = self.config.needs_files(&key.repo);
         let Some(mut snapshot) = self.github.pull_request(key, &self.me, with_files).await? else {
-            tracing::debug!(pr = %key, "not open or not visible; skipping");
+            tracing::debug!("not open or not visible; skipping");
             return Ok(None);
         };
         let filter = &self.config.review_requests.teams;
@@ -170,7 +170,7 @@ impl<G: GithubApi> Poller<G> {
             .any(|t| self.teams.contains(t) && filter.allows(t));
         let files = snapshot.files.as_deref().unwrap_or_default();
         let Some(matched) = self.config.match_pr(&key.repo, files) else {
-            tracing::debug!(pr = %key, "matches no profile; skipping");
+            tracing::debug!("matches no profile; skipping");
             return Ok(None);
         };
         let profile = matched.profile.name.clone();
@@ -289,7 +289,7 @@ mod tests {
             key: key.clone(),
             title: "t".into(),
             body: String::new(),
-            url: format!("https://github.com/{}/pull/{}", key.repo, key.number),
+            url: key.url(),
             author: author.into(),
             head_sha: "h1".into(),
             base_sha: "b".into(),
