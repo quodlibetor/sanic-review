@@ -1,0 +1,33 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, card_of(&ask.body))"
+---
+<div class="cf">
+<p class="kind">Agent</p>
+<h1>Revise this review?</h1>
+<div class="who">
+<div class="t">Add the thing</div>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a> · alice · run 1, reviewed <code>head7</code>
+</div>
+<ul class="explain">
+<li>It resumes run 1's agent session, not interactively, with your instruction.</li>
+<li>The result is a new run with a fresh set of drafts for the same reviewed commit, <code>head7</code>.</li>
+<li>This run and its drafts, your edits included, stay as they are. The agent sees them, and keeps your accepted and edited drafts unless you ask otherwise; ones it keeps word for word stay accepted.</li>
+<li>It's refused if the PR has moved on since this review: start a fresh review instead.</li>
+</ul>
+<label class="instruction" for="instruction">Your instruction</label>
+<textarea id="instruction" form="confirm" name="instruction" rows="4" required autofocus placeholder="e.g. Drop the nits, and say more about the error handling.">
+</textarea>
+</div>
+<p class="cost">Spends tokens: the agent works again, with your instruction.</p>
+<div class="btns">
+<form id="confirm" method="post" action="/pr/org/repo/7/runs/1/regenerate">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn go" type="submit">Revise the review<span class="k">y</span>
+</button>
+</form>
+<a class="btn" id="cancel" href="/pr/org/repo/7?run=1">Cancel<span class="k">Esc</span>
+</a>
+</div>
+</div>

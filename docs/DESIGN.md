@@ -503,23 +503,44 @@ embedded in the binary, so nothing is fetched at runtime.
   not either list has it, and leaves out `—`.
 - **Top bar.** Every page's: home, where the page is, and the queued,
   running and pending draft counts.
-- **PR page.** The PR's description, its review runs, and the drafts of the
-  latest one that succeeded (or of any run you pick). Each comment draft
-  shows the lines around its anchor from the run's `pr.diff`. A draft that
-  isn't on a line of the diff is flagged. For each draft: inline edit
-  (htmx save on change, or a Save button), accept, reject, and undo back to
-  pending. "Regenerate with an extra instruction" is shown disabled until
-  the runner can resume a session. The PR's own actions are the TUI's: a
-  review now, with a confirm, and archive or unarchive, which writes
-  the store as `sanic-review archive` does.
+- **PR page.** Drafts first. A header with the PR, its state and actions;
+  under it the description and the review runs folded away, the runs'
+  summary saying which one's drafts are shown ("Run 2 of 3", when it
+  finished and the commit it reviewed). The list numbers the runs the same
+  way, and a regeneration says which run it revises, linked, and your
+  instruction's first line (all of it on hover). Then a bar that stays in
+  view: the tally of accepted, pending and rejected drafts, the verdict
+  and Preview. Then the drafts of the latest run that succeeded (or of any
+  run you pick). Each comment draft shows the lines around its anchor from
+  the run's `pr.diff`; one that isn't on a line of the diff is flagged as
+  going in the body, and one a regeneration kept links the draft it
+  revises. For each draft: edit in place (click its text or `e`; htmx
+  saves on change, or a Save button without the script; a box you leave
+  by clicking another draft folds, and its save swaps in, only after that
+  click, so the drafts don't move under it), accept (`y`),
+  reject (`n`), and undo back to pending (`u`). The PR's own actions are
+  the TUI's: a review now, with a confirm, ignore by title, chat, and
+  archive or unarchive, which writes the store as `sanic-review archive`
+  does.
+- **Agent.** For a run that succeeded with an agent session, "Agent…"
+  opens a confirm card with a box for your instruction. It says what
+  happens: the run's session is resumed, not interactively; the result is
+  a new run with fresh drafts for the same commit; this run, its drafts
+  and your edits stay as they are; it spends tokens; and it's refused if
+  the PR's head has moved, when you start a fresh review instead. Its
+  submit, a POST, has `serve` queue it through
+  `sanic_web::Control::regenerate`, then shows the new run, saying it's
+  queued or running until it has drafts, or the card again with why it
+  was refused.
 - **Confirms.** Asking before acting, and saying how a submit went, use one
   card: what it is, the question or outcome, the PR by title with its
   `owner/name#N`, author and head, why (a failed run's whole error, who
   already reviewed it, the `--manual-reviews` hold), what it costs, and
   the buttons with their keys. A posted review's card is green and links
   to it on GitHub; a failed post's is red. Each is its own page, and from
-  the index or a PR page, `r` or the Review now link opens that page's card
-  as a dialog over the page instead, so you keep your place; see Security.
+  the index or a PR page, `r`, the Review now link or Agent… opens that
+  page's card as a dialog over the page instead, so you keep your place;
+  see Security.
 - **Chat with the reviewer.** A PR page with a review that has an agent
   session ends with a compact card for the run whose drafts it shows, or,
   if that one has no session, the latest that does:
@@ -751,7 +772,9 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   way to open it, and its form posts exactly as the page's does, with the
   token and the same-origin checks. Keys and clicks settle again when it
   opens, keys are ignored while held, and it opens with focus on the card,
-  not its Confirm, so a stray `Enter` or `Space` presses nothing. The
+  not its Confirm, so a stray `Enter` or `Space` presses nothing; the
+  Agent card's focus is in its text box, where `y` is only a letter, so
+  keys typed there neither settle nor are ignored while held. The
   page behind is inert while it's open, and only the latest ask opens.
   Without the script, the link goes to the confirm page itself.
 - Responses forbid framing, so another page can't trick you into clicking

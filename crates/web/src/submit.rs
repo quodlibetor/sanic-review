@@ -27,11 +27,11 @@ pub struct RunPath {
     owner: String,
     name: String,
     number: u32,
-    run: i64,
+    pub run: i64,
 }
 
 impl RunPath {
-    fn pr(&self) -> crate::PrPath {
+    pub fn pr(&self) -> crate::PrPath {
         crate::PrPath {
             owner: self.owner.clone(),
             name: self.name.clone(),

@@ -19,7 +19,7 @@ use sanic_core::{
     pr::{Comment, PrKey, PrSnapshot, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
-        Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
+        Basis, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
         Severity, Side, Verdict,
     },
     skip::SkipRules,
@@ -45,6 +45,10 @@ struct FakeServe {
     started: Mutex<Vec<PrKey>>,
     /// `skip_titles` patterns added, with the profile each went to.
     skipped: Mutex<Vec<(String, Option<String>)>>,
+    /// The runs asked to be revised, with their instructions.
+    revised: Mutex<Vec<(i64, String)>>,
+    /// The run a revision starts; without one, it's refused.
+    revision: Mutex<Option<i64>>,
 }
 
 impl Control for FakeServe {
@@ -64,10 +68,18 @@ impl Control for FakeServe {
 
     fn regenerate(
         &self,
-        _run_id: i64,
-        _instruction: &str,
+        run_id: i64,
+        instruction: &str,
     ) -> color_eyre::Result<Result<i64, sanic_store::Refusal>> {
-        Ok(Err(sanic_store::Refusal::NoSession))
+        self.revised
+            .lock()
+            .unwrap()
+            .push((run_id, instruction.to_owned()));
+        Ok(self
+            .revision
+            .lock()
+            .unwrap()
+            .ok_or(sanic_store::Refusal::NoSession))
     }
 
     fn run_settings(&self, profile: &str) -> color_eyre::Result<RunSettings> {
@@ -433,15 +445,15 @@ fn hidden_value(html: &str, name: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// `html` with a line per tag and the random token, data dir and extra
-/// unset token variables masked, for snapshots.
+/// `html` with a line per tag and the random token, data dir, times and
+/// extra unset token variables masked, for snapshots.
 fn readable(fixture: &Fixture, html: &str) -> String {
     // The chat commands also unset any other token variable the test's
     // environment has, such as CI's.
     let html = sanic_runner::chat::unset_vars()
         .iter()
         .skip(sanic_runner::claude::TOKEN_VARS.len())
-        .fold(html.to_owned(), |html, var| {
+        .fold(without_times(html), |html, var| {
             // Trailing space, so `X` doesn't eat the head of `X_FILE`.
             html.replace(&format!(" -u {} ", sanic_runner::chat::quote(var)), " ")
         });
@@ -1490,4 +1502,133 @@ async fn the_chat_card_is_for_the_run_whose_drafts_the_page_shows() {
     assert!(latest.contains(&format!("chat {newer} ")), "{latest}");
     let older = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await.body;
     assert!(older.contains(&format!("chat {} ", f.run)), "{older}");
+}
+
+#[tokio::test]
+async fn agent_asks_for_an_instruction_and_then_asks_serve_to_revise() {
+    let f = fixture(false).await;
+    let uri = format!("/pr/org/repo/7/runs/{}/regenerate", f.run);
+    // The PR page offers it for a finished run with a session only.
+    assert!(f.get("/pr/org/repo/7").await.body.contains(&uri));
+    assert!(!f.get("/pr/org/repo/8").await.body.contains("/regenerate"));
+
+    let ask = f.get(&uri).await;
+    assert_eq!(ask.status, StatusCode::OK);
+    insta::assert_snapshot!("agent_card", readable(&f, card_of(&ask.body)));
+
+    // A post without the token starts nothing.
+    let reply = f
+        .send(
+            form(&uri)
+                .body(encode(&[("instruction", "be terser")]))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    // Nor does an empty instruction.
+    let reply = f.post(&uri, &[("instruction", " \r\n")]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(f.serve.revised.lock().unwrap().is_empty());
+
+    // serve's refusal is shown.
+    let reply = f.post(&uri, &[("instruction", "be\r\nterser")]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(
+        reply
+            .body
+            .contains("Not started: the run has no agent session to resume."),
+        "{}",
+        reply.body
+    );
+    *f.serve.revision.lock().unwrap() = Some(42);
+    let reply = f.post(&uri, &[("instruction", "be terser")]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.headers[header::LOCATION], "/pr/org/repo/7?run=42");
+    assert_eq!(
+        *f.serve.revised.lock().unwrap(),
+        [
+            (f.run, "be\nterser".to_owned()),
+            (f.run, "be terser".to_owned())
+        ]
+    );
+    // Only runs of that PR.
+    let other = format!("/pr/org/repo/8/runs/{}/regenerate", f.run);
+    assert_eq!(f.get(&other).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_run_list_says_what_each_revision_revises_and_how() {
+    let f = fixture(false).await;
+    let regeneration = {
+        let mut store = f.dashboard.app.store();
+        match store
+            .queue_regeneration(f.run, "Drop the nits.\nAnd more.", |_| false)
+            .unwrap()
+        {
+            sanic_store::Regeneration::Queued(run) => run,
+            sanic_store::Regeneration::Refused(why) => panic!("{why}"),
+        }
+    };
+    let revision = regeneration.id;
+    let page = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await.body;
+    // Until it finishes, the page shows the run it revises.
+    assert!(page.contains("Run 1 of 2"), "{page}");
+    let runs = &page[page.find("<ol").unwrap()..page.find("</ol>").unwrap()];
+    // Numbered as the summary numbers them, linking by id.
+    assert!(runs.contains(&format!(
+        r#"<a href="/pr/org/repo/7?run={revision}">run 2</a>"#
+    )));
+    insta::assert_snapshot!("run_list", readable(&f, runs));
+    // Where Revise lands, before the new run has drafts or a diff.
+    let queued = f.get(&format!("/pr/org/repo/7?run={revision}")).await.body;
+    assert!(queued.contains("This run is queued"), "{queued}");
+    assert!(!queued.contains("diff is gone"), "{queued}");
+
+    // Its drafts say which of the first run's they revise.
+    {
+        let mut store = f.dashboard.app.store();
+        store.claim_run(revision).unwrap();
+        let result = ReviewResult {
+            summary: "Fine.".into(),
+            verdict: Verdict::Comment,
+            comments: vec![comment("src/lib.rs", 3, Side::Right, "Why?", false)],
+            session_id: Some("sess-7".into()),
+            transcript_path: "t".into(),
+        };
+        let basis = Basis {
+            summary: None,
+            comments: vec![Some(f.drafts[1])],
+        };
+        store
+            .finish_revision(
+                revision,
+                &result,
+                regeneration.revision.as_ref().unwrap(),
+                &basis,
+            )
+            .unwrap();
+    }
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(page.contains("Run 2 of 2"), "{page}");
+    assert!(
+        page.contains(&format!(
+            r##"<a class="edited" href="#draft-{0}">revised from #{0}</a>"##,
+            f.drafts[1]
+        )),
+        "{page}"
+    );
+}
+
+/// `html` with each `<time>`, which says when the test ran, reduced to
+/// `<time>`.
+fn without_times(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<time ") {
+        let end = start + rest[start..].find("</time>").unwrap() + "</time>".len();
+        out.push_str(&rest[..start]);
+        out.push_str("<time>");
+        rest = &rest[end..];
+    }
+    out + rest
 }

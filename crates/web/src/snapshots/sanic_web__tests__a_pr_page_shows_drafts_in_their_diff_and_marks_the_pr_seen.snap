@@ -18,16 +18,22 @@ expression: "readable(&f, &page.body)"
 <body data-page="pr" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
 <header class="topbar">
 <a class="home" href="/">sanic-review</a>
+<span class="crumb">/ <a href="/pr/org/repo/7">org/repo#7</a>
+</span>
 <span class="counts" id="counts">
 <b>0</b> queued · <b>0</b> running · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <span class="k">?</span> keys</span>
 </header>
 <main>
+<div class="prh">
 <h1>Add the thing</h1>
-<p class="meta">
-<a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="state act">1 unanswered</span> · <span class="status ok">drafted</span>
-</p>
-<div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
+<div class="meta">
+<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a>
+<span> · alice</span> · <span class="chip ok">drafted</span> · <span class="state act">1 unanswered</span>
+<span class="sp" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
+<a class="btn" href="/pr/org/repo/7/runs/1/regenerate" data-dialog title="Revise this review with the agent, from your instruction">Agent…</a>
 <a class="btn" href="/pr/org/repo/7/ignore">Ignore by title<span class="k">i</span>
+</a>
+<a class="btn" href="#chat">Chat<span class="k">c</span>
 </a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
@@ -36,41 +42,78 @@ expression: "readable(&f, &page.body)"
 <button class="btn" type="submit">Archive<span class="k">a</span>
 </button>
 </form>
+</span>
 </div>
+<div class="subnav">
 <details class="description">
 <summary>Description</summary>
 <pre>Add the thing, in detail.</pre>
 </details>
 <details class="runs">
-<summary>Reviews (1)</summary>
-<ol>
+<summary>Run 1 of 1 · <time> · reviewed <code>head7</code>
+</summary>
+<ol reversed>
 <li class="current">
-<a href="/pr/org/repo/7?run=1">run 1 at <code>head7</code>
-</a> <span class="status">succeeded</span>
+<a href="/pr/org/repo/7?run=1">run 1</a> at <code>head7</code> · <time> · <span class="ok">succeeded</span>
 </li>
 </ol>
 </details>
+</div>
+</div>
+<form class="rbar" id="review-bar" method="get" action="/pr/org/repo/7/runs/1/preview">
+<span class="tally">
+<b data-count="pending">3</b> pending · <b class="ok" data-count="accepted">0</b> accepted · <b data-count="rejected">0</b> rejected</span>
+<span class="sp">
+<span class="seg">
+<label>
+<input type="radio" name="event" value="COMMENT">Comment</label>
+<label>
+<input type="radio" name="event" value="REQUEST_CHANGES" checked>Request changes<span class="sugg" title="The agent's suggestion. It never suggests approving.">suggested</span>
+</label>
+<label>
+<input type="radio" name="event" value="APPROVE:<pick>">Approve</label>
+</span>
+<button class="btn go" id="preview" type="submit">Preview the review<span class="k">p</span>
+</button>
+</span>
+</form>
 <section id="drafts">
-<article class="draft pending" id="draft-1">
-<header>
-<strong>Summary</strong> <span class="badge">pending</span>
-</header>
+<article class="draft dc pending summary" id="draft-1">
+<div class="h">
+<span class="anc">Summary</span>
+<span class="tag-sum">the review body</span>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/1/status" hx-post="/drafts/1/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<div class="body" data-edit title="click or e to edit">Mostly fine.</div>
 <form class="edit" method="post" action="/drafts/1/edit" hx-post="/drafts/1/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Mostly fine.</textarea>
-<button class="save" type="submit">Save</button>
-</form>
-<form class="decide" method="post" action="/drafts/1/status" hx-post="/drafts/1/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
-<input type="hidden" name="csrf" value="<token>">
-<button name="status" value="accepted">Accept</button>
-<button name="status" value="rejected">Reject</button>
-<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+<button class="btn save" type="submit">Save</button>
 </form>
 </article>
-<article class="draft pending" id="draft-2">
-<header>
-<code>src/lib.rs:3</code> <span class="severity">major</span> <span class="dim">high confidence</span> <span class="badge">pending</span>
-</header>
+<article class="draft dc pending" id="draft-2">
+<div class="h">
+<span class="anc">src/lib.rs:3</span>
+<span class="sev major">major</span>
+<span class="dim conf">high conf.</span>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
 <table class="diff">
 <tr class="ctx">
 <td class="num">1</td>
@@ -112,49 +155,37 @@ expression: "readable(&f, &page.body)"
 <span class="sign"> </span>}</td>
 </tr>
 </table>
+<div class="body" data-edit title="click or e to edit">Why `m`?</div>
 <form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Why `m`?</textarea>
-<button class="save" type="submit">Save</button>
-</form>
-<form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
-<input type="hidden" name="csrf" value="<token>">
-<button name="status" value="accepted">Accept</button>
-<button name="status" value="rejected">Reject</button>
-<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+<button class="btn save" type="submit">Save</button>
 </form>
 </article>
-<article class="draft pending" id="draft-3">
-<header>
-<code>src/gone.rs:40</code> <span class="severity">major</span> <span class="dim">high confidence</span> <span class="badge">pending</span>
-</header>
-<p class="warn">Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body.</p>
+<article class="draft dc pending" id="draft-3">
+<div class="h">
+<span class="anc">src/gone.rs:40</span>
+<span class="sev major">major</span>
+<span class="dim conf">high conf.</span>
+<span class="tag-body" title="Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body.">not in the diff → goes in the body</span>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/3/status" hx-post="/drafts/3/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<div class="body" data-edit title="click or e to edit">This file isn't in the diff.</div>
 <form class="edit" method="post" action="/drafts/3/edit" hx-post="/drafts/3/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">This file isn't in the diff.</textarea>
-<button class="save" type="submit">Save</button>
-</form>
-<form class="decide" method="post" action="/drafts/3/status" hx-post="/drafts/3/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
-<input type="hidden" name="csrf" value="<token>">
-<button name="status" value="accepted">Accept</button>
-<button name="status" value="rejected">Reject</button>
-<button type="button" disabled title="Coming later: the runner can't resume an agent session yet.">Regenerate with instruction</button>
+<button class="btn save" type="submit">Save</button>
 </form>
 </article>
 </section>
-<form class="submit" method="get" action="/pr/org/repo/7/runs/1/preview">
-<fieldset>
-<legend>Verdict</legend>
-<label>
-<input type="radio" name="event" value="COMMENT"> Comment</label>
-<label>
-<input type="radio" name="event" value="REQUEST_CHANGES" checked> Request changes</label>
-<label>
-<input type="radio" name="event" value="APPROVE:<pick>"> Approve</label>
-<p class="dim">The agent suggests request changes. It never suggests approving; that's only ever your pick.</p>
-</fieldset>
-<button type="submit">Preview the review</button> <span class="dim">Nothing is posted until you confirm on the next page.</span>
-</form>
 <section class="chat" id="chat">
 <h2>Chat with the reviewer <span class="dim">run 1 · paste into a terminal</span>
 </h2>
@@ -190,6 +221,12 @@ expression: "readable(&f, &page.body)"
 </ol>
 </details>
 </section>
+<p class="help-foot">
+<span class="k">j</span>
+<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">p</span> preview · <span class="k">r</span>
+<span class="k">a</span>
+<span class="k">i</span>
+<span class="k">c</span> act on the PR · <span class="k">q</span> index</p>
 </main>
 <div class="overlay" id="help" hidden>
 <div class="popup">

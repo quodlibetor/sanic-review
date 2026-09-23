@@ -3,6 +3,10 @@
 (function () {
   "use strict";
 
+  // Pages style themselves for the script being here: a draft's body shows
+  // as text to click, not as a box to type in.
+  document.documentElement.classList.add("js");
+
   const page = document.body.dataset.page;
   const help = document.getElementById("help");
   const notice = document.getElementById("notice");
@@ -173,9 +177,11 @@
         shown = Date.now();
         sendOnce(dialog.querySelector("#confirm"));
         // Focus is on the card, not a button, so a stray Enter or Space
-        // presses nothing: y confirms, or Tab to a button.
+        // presses nothing: y confirms, or Tab to a button. A card that asks
+        // for text starts in its text box; y there is only a letter.
         popup.tabIndex = -1;
-        popup.focus();
+        const field = popup.querySelector("[autofocus]");
+        (field || popup).focus();
       })
       .catch(function (err) {
         if (ask === asked) say("That failed (" + err.message + "); reload the page to see why.");
@@ -191,17 +197,19 @@
   }
 
   function onKey(e) {
+    // Keys typed into a box act on nothing, so they needn't settle: the
+    // Agent card's box, focused as it opens, keeps its first letters.
+    if (typing(e.target)) {
+      // Esc leaves a draft's text box, which saves it.
+      if (e.key === "Escape" && !e.repeat) e.target.blur();
+      return;
+    }
     // Not even the browser's own handling, like Space ticking a box.
     if (e.repeat || Date.now() - shown < SETTLE_MS) {
       e.preventDefault();
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (typing(e.target)) {
-      // Esc leaves a draft's text box, which saves it.
-      if (e.key === "Escape") e.target.blur();
-      return;
-    }
     if (!help.hidden) {
       if (e.key === "?" || e.key === "Escape" || e.key === "q") {
         help.hidden = true;
@@ -275,10 +283,29 @@
         const row = currentRow();
         if (!row || e.target !== document.body) return;
         if (page === "index") go(row.dataset.href);
-        else {
-          const box = row.querySelector("textarea");
-          if (box) box.focus();
-        }
+        else editDraft(row);
+        break;
+      }
+      case "e": {
+        const row = page === "pr" && currentRow();
+        if (!row || !editDraft(row)) return;
+        break;
+      }
+      case "y":
+      case "n":
+      case "u": {
+        // Accept, reject or undo the selected draft, as its buttons do.
+        const row = page === "pr" && currentRow();
+        const status = { y: "accepted", n: "rejected", u: "pending" }[e.key];
+        const button = row && row.querySelector('button[name="status"][value="' + status + '"]');
+        if (!button) return;
+        button.click();
+        break;
+      }
+      case "p": {
+        const preview = page === "pr" && document.getElementById("preview");
+        if (!preview) return;
+        preview.click();
         break;
       }
       case "r": {
@@ -327,6 +354,103 @@
     }
     e.preventDefault();
   }
+
+  // A draft's body turns into its box, which saves as you leave it.
+  function editDraft(card) {
+    const box = card.querySelector(".edit textarea");
+    if (!box) return false;
+    card.classList.add("editing");
+    box.focus();
+    return true;
+  }
+
+  document.addEventListener("click", function (e) {
+    const body = e.target.closest(".dc .body[data-edit]");
+    if (body) editDraft(body.closest(".dc"));
+  });
+  document.addEventListener("focusout", function (e) {
+    const box = e.target.matches(".edit textarea") && e.target;
+    if (!box) return;
+    whenReleased(function () {
+      if (document.activeElement !== box) box.closest(".dc").classList.remove("editing");
+    });
+  });
+
+  // A click goes where the pointer went down and came up; if the drafts
+  // move in between, as when the box you leave folds or its save swaps in,
+  // it lands on neither. So while a pointer is down those wait, until just
+  // after its click. Leaving by keyboard folds at once.
+  let pressed = false;
+  let held = [];
+  // Saved drafts waiting to swap in, by the card they replace.
+  const heldSwaps = new Map();
+  function whenReleased(f) {
+    if (pressed) held.push(f);
+    else f();
+  }
+  function release() {
+    if (!pressed) return;
+    pressed = false;
+    // After the click, which comes right after the pointer's up.
+    setTimeout(function () {
+      const run = held;
+      held = [];
+      run.forEach(function (f) {
+        f();
+      });
+      heldSwaps.forEach(function (swap) {
+        swap();
+      });
+      heldSwaps.clear();
+    });
+  }
+  document.addEventListener(
+    "pointerdown",
+    function () {
+      pressed = true;
+    },
+    true
+  );
+  document.addEventListener("pointerup", release, true);
+  document.addEventListener("pointercancel", release, true);
+  window.addEventListener("blur", release);
+  document.body.addEventListener("htmx:beforeSwap", function (e) {
+    const target = e.detail.target;
+    if (!pressed || !target.matches(".dc") || !e.detail.shouldSwap) return;
+    e.detail.shouldSwap = false;
+    const content = e.detail.serverResponse;
+    heldSwaps.set(target, function () {
+      if (target.isConnected) htmx.swap(target, content, { swapStyle: "outerHTML" });
+    });
+  });
+  // A newer request for the card answers with it as it is then, so a
+  // save still waiting would only swap in something older.
+  document.body.addEventListener("htmx:beforeRequest", function (e) {
+    heldSwaps.delete(e.detail.target);
+  });
+
+  // Run times in your own time zone: "today 10:42", else the date.
+  function localTimes(root) {
+    const now = new Date();
+    const dayOf = function (d) {
+      return d.toDateString();
+    };
+    const yesterday = new Date(now.getTime() - 86400000);
+    root.querySelectorAll("time[datetime]").forEach(function (t) {
+      const at = new Date(t.dateTime);
+      if (isNaN(at.getTime())) return;
+      const clock = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const day =
+        dayOf(at) === dayOf(now)
+          ? "today"
+          : dayOf(at) === dayOf(yesterday)
+            ? "yesterday"
+            : at.toLocaleDateString();
+      t.title = at.toString();
+      t.textContent = day + " " + clock;
+    });
+  }
+  localTimes(document);
 
   document.addEventListener("keydown", onKey);
   // A link to a confirm page opens its card over this page instead; a
@@ -438,7 +562,15 @@
     });
   });
   // The index rereads its lists every few seconds; keep the selection.
+  // A PR page's draft card comes back alone, so its tally is recounted.
   document.body.addEventListener("htmx:afterSettle", function () {
     draw(false);
+    retally();
   });
+
+  function retally() {
+    document.querySelectorAll("#review-bar [data-count]").forEach(function (b) {
+      b.textContent = document.querySelectorAll("#drafts .draft." + b.dataset.count).length;
+    });
+  }
 })();

@@ -473,10 +473,6 @@ details.grp[open] > summary .group-h::before {
   margin-right: 0.2rem;
 }
 
-.draft.selected {
-  background: var(--select);
-}
-
 form {
   display: inline;
 }
@@ -497,44 +493,6 @@ button,
 button:disabled {
   cursor: not-allowed;
   color: var(--dim);
-}
-
-.draft {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin: 1rem 0;
-  padding: 0.5rem 0.75rem;
-}
-
-.draft.accepted {
-  border-color: var(--ok);
-}
-
-.draft.rejected,
-.draft.posted {
-  opacity: 0.6;
-}
-
-.draft form {
-  display: block;
-  margin-top: 0.4rem;
-}
-
-.draft textarea {
-  width: 100%;
-  box-sizing: border-box;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
-.badge,
-.severity {
-  font-size: 12px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 0 0.3rem;
 }
 
 table.diff {
@@ -594,6 +552,8 @@ fieldset label {
 .overlay {
   position: fixed;
   inset: 0;
+  /* Over the PR page's sticky bar. */
+  z-index: 10;
   background: rgb(0 0 0 / 40%);
   display: flex;
   align-items: center;
@@ -979,4 +939,351 @@ form.foot .dim {
 
 .copyrow .btn {
   align-items: center;
+}
+
+/* The PR page: a short header, a review bar that stays in view, and quiet
+   draft cards. */
+main:has(> .prh) {
+  max-width: 64rem;
+}
+
+.prh {
+  margin: 0.9rem 0 0.4rem;
+}
+
+.prh h1 {
+  font-size: 1.45rem;
+  margin: 0 0 0.2rem;
+  line-height: 1.25;
+}
+
+.prh .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  align-items: baseline;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.prh .meta .sp {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.subnav {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 13px;
+  margin: 0.35rem 0 0;
+  flex-wrap: wrap;
+}
+
+.subnav details[open] {
+  flex-basis: 100%;
+}
+
+.subnav summary {
+  color: var(--accent);
+}
+
+.subnav pre {
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  border-left: 2px solid var(--line);
+  padding-left: 0.7rem;
+}
+
+.subnav ol {
+  margin: 0.3rem 0;
+  padding-left: 1.2rem;
+}
+
+.subnav li.current {
+  font-weight: 600;
+}
+
+.subnav .instruction {
+  font-style: italic;
+}
+
+.rbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 1rem;
+  padding: 0.45rem 0;
+  margin-top: 0.5rem;
+}
+
+.rbar .tally {
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.rbar .tally b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.rbar .tally b.ok {
+  color: var(--ok);
+}
+
+.rbar .sp {
+  margin-left: auto;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.seg label {
+  font-size: 13px;
+  padding: 0.12rem 0.6rem;
+  cursor: pointer;
+  border-left: 1px solid var(--line);
+  margin: 0;
+}
+
+.seg label:first-child {
+  border-left: 0;
+}
+
+.seg input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+}
+
+.seg label:has(input:checked) {
+  background: var(--select);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.seg label:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+}
+
+.seg .sugg {
+  font-size: 10px;
+  color: var(--dim);
+  font-weight: normal;
+  margin-left: 0.25rem;
+}
+
+.banner {
+  border: 1px solid var(--held);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  margin: 0.75rem 0;
+  font-size: 14px;
+}
+
+.dc {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 6px;
+  margin: 0.75rem 0;
+  padding: 0.45rem 0.75rem 0.55rem;
+}
+
+.dc.selected {
+  background: var(--select);
+}
+
+.dc.accepted {
+  border-left-color: var(--ok);
+}
+
+.dc.rejected,
+.dc.posted {
+  border-left-color: var(--dim);
+  color: var(--dim);
+}
+
+.dc.summary {
+  border-left-color: var(--accent);
+}
+
+.dc .h {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  align-items: baseline;
+}
+
+.dc .h .anc {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dc .h .sp {
+  margin-left: auto;
+}
+
+.dc .h .sp form {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.dc .conf {
+  font-size: 12px;
+}
+
+.dc .st {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dc .st.accepted {
+  color: var(--ok);
+}
+
+.sev {
+  font-size: 12px;
+}
+
+.sev.blocker,
+.sev.major {
+  color: var(--bad);
+}
+
+.sev.minor {
+  color: var(--held);
+}
+
+.sev.nit {
+  color: var(--dim);
+}
+
+.tag-body {
+  font-size: 12px;
+  color: var(--held);
+  border: 1px solid var(--held);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+}
+
+.tag-sum {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.edited {
+  font-size: 12px;
+  color: var(--dim);
+  font-style: italic;
+}
+
+.dc table.diff {
+  margin: 0.4rem 0 0;
+}
+
+.dc .body {
+  white-space: pre-wrap;
+  margin: 0.35rem 0 0 -0.3rem;
+  border-radius: 4px;
+  padding: 0.15rem 0.3rem;
+}
+
+.dc .body[data-edit] {
+  cursor: text;
+}
+
+.dc .body[data-edit]:hover {
+  background: var(--raise);
+}
+
+.dc.rejected .body {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dc form.edit {
+  display: block;
+  margin-top: 0.35rem;
+}
+
+.dc textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.3rem;
+}
+
+/* Without the script, a draft's box shows with its Save; with it, the body
+   shows as text until a click or e turns it into the box. */
+.dc:has(form.edit) .body {
+  display: none;
+}
+
+.js .dc:has(form.edit) .body {
+  display: block;
+}
+
+.js .dc form.edit {
+  display: none;
+}
+
+.js .dc.editing form.edit {
+  display: block;
+}
+
+/* `:has()` counts its argument, so this needs it too to beat the rule
+   above. */
+.js .dc.editing:has(form.edit) .body {
+  display: none;
+}
+
+.js .dc .save {
+  display: none;
+}
+
+.explain {
+  font-size: 14px;
+  padding-left: 1.1rem;
+  margin: 0.5rem 0 0;
+}
+
+.cf label.instruction {
+  display: block;
+  font-weight: 600;
+  font-size: 14px;
+  margin: 0.75rem 0 0.2rem;
+}
+
+.cf textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.3rem;
 }
