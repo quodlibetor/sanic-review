@@ -475,22 +475,31 @@ available when tuning instruction files.
 server with maud, and htmx handles in-place edits. Every script and style is
 embedded in the binary, so nothing is fetched at runtime.
 
-- **Index.** The same two lists as the TUI's PR panes, with the same
-  statuses, counts, archive toggle and `updated_within_days` window: "Reviews
-  you owe" and "Your PRs". It rereads them every few seconds. A PR whose
-  latest review finished since you last opened its page, or that you've
-  never opened, is marked `new`. Every row links to the PR on github.com
-  and to its dashboard page. Each shows its PR state, as the TUI defines
-  it: left of the run status in "Reviews you owe", and as the status in
-  "Your PRs". The lists keep their columns aligned, as the TUI does, and
-  a state too long for its column is shortened as the TUI shortens it,
-  keeping its most pressing words, with the whole of it on hover. The
-  lists need CSS subgrid: Firefox 71+, Chrome 117+, Safari 16+.
-  Short of room, a row cuts its GitHub link and wraps its actions before
-  it narrows the title.
-  Urgent states are highlighted, approved and mergeable ones green, the
-  rest muted. The PR page's header, which has room, shows it in full too,
-  for an open PR whether or not either list has it, and leaves out `—`.
+- **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
+  its statuses, archive toggle and `updated_within_days` window, grouped by
+  what they ask of you:
+  - reviews you owe: **Needs you** (pending drafts, a review you haven't
+    looked at, comments to answer, or a run that failed, crashed or is held
+    by `--manual-reviews`), **In flight** (waiting out the quiet period,
+    queued or running) and **Nothing to do now**, folded (skipped, archived,
+    or reviewed with nothing left);
+  - your PRs: **Needs you** (comments to answer, changes requested, or
+    drafts), **Ready** (approved or mergeable), **Waiting on reviewers**,
+    and, when shown, **Archived**.
+
+  Within a group, PRs with a review you haven't looked at come first, marked
+  with a dot. Each row leads with its one next thing (`3 drafts`, `failed`,
+  `held`, `2 unanswered`, `mergeable`) and has the title; under the title a
+  dim line has the PR as `owner/name#N ↗`, linking to GitHub, its author, its
+  other statuses and PR state words, and the first line of a failed run's
+  error. A row's actions show on hover and on the selected row. It rereads
+  the lists, and the counts in the top bar, every few seconds; selection
+  follows the PR, so a refresh that reorders rows keeps it. PR state is the
+  TUI's: urgent words highlighted, approved and mergeable ones green, the
+  rest muted. The PR page's header shows it too, for an open PR whether or
+  not either list has it, and leaves out `—`.
+- **Top bar.** Every page's: home, where the page is, and the queued,
+  running and pending draft counts.
 - **PR page.** The PR's description, its review runs, and the drafts of the
   latest one that succeeded (or of any run you pick). Each comment draft
   shows the lines around its anchor from the run's `pr.diff`. A draft that
@@ -540,7 +549,8 @@ embedded in the binary, so nothing is fetched at runtime.
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm page, `a` archives or unarchives, `A` shows
   archived PRs, `i` opens the ignore editor, `c` the chat commands.
-  `Enter` opens the selected PR. `q` closes the help, or else goes back to
+  `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
+  skip a folded group. `q` closes the help, or else goes back to
   the index. A confirm page takes `y`, and `Esc` or `q` cancels. Keys are
   ignored while you type in a draft; `Esc` leaves it.
 - **Settings.** The dashboard can edit settings such as

@@ -54,6 +54,18 @@ const KEYS: &[(&str, &str)] = &[
 ];
 
 pub fn layout(app: &App, kind: Kind, title: &str, content: &Markup) -> Markup {
+    layout_in(app, kind, title, &[], content)
+}
+
+/// [`layout`], with where the page is (e.g. the PR it's about) in the top
+/// bar after the home link.
+pub fn layout_in(
+    app: &App,
+    kind: Kind,
+    title: &str,
+    crumbs: &[Markup],
+    content: &Markup,
+) -> Markup {
     let headers = json!({ TOKEN_HEADER: app.csrf.token() }).to_string();
     html! {
         (DOCTYPE)
@@ -71,9 +83,10 @@ pub fn layout(app: &App, kind: Kind, title: &str, content: &Markup) -> Markup {
                 script src="/assets/app.js" defer {}
             }
             body data-page=(kind.as_str()) hx-headers=(headers) {
-                header.top {
+                header.topbar {
                     a.home href="/" { "sanic-review" }
-                    span.hint { "? keys" }
+                    @for crumb in crumbs { span.crumb { "/ " (crumb) } }
+                    (counts(app))
                 }
                 main { (content) }
                 (help())
@@ -81,6 +94,33 @@ pub fn layout(app: &App, kind: Kind, title: &str, content: &Markup) -> Markup {
             }
         }
     }
+}
+
+/// The run and draft counts the TUI's status line has, and the keys hint.
+/// The index refreshes it with its lists. Counts the store can't read are
+/// left out, and logged, rather than failing the page they head.
+pub fn counts(app: &App) -> Markup {
+    let counts = app
+        .store()
+        .run_counts()
+        .inspect_err(|err| tracing::warn!("reading the run counts failed: {err:?}"))
+        .ok();
+    html! {
+        span.counts #counts {
+            @if app.manual_reviews { span.held { "manual reviews" } " · " }
+            @if let Some(c) = counts {
+                b { (c.queued) } " queued · " b { (c.running) } " running · "
+                b.cnt { (c.pending_drafts) } " pending drafts"
+                " " span.muted-sep { "|" } " "
+            }
+            (keycap("?")) " keys"
+        }
+    }
+}
+
+/// A key, as buttons and hints show it.
+pub fn keycap(k: &str) -> Markup {
+    html! { span.k { (k) } }
 }
 
 fn help() -> Markup {
@@ -111,6 +151,13 @@ pub fn csrf_field(app: &App) -> Markup {
 pub fn github_link(key: &PrKey) -> Markup {
     let url = key.url();
     html! { a.gh href=(url) { (url) } }
+}
+
+/// A PR as `owner/name#N ↗`, linking to it on github.com; the whole URL is
+/// on hover.
+pub fn pr_ref(key: &PrKey) -> Markup {
+    let url = key.url();
+    html! { a.ref href=(url) title=(url) { (key) " ↗" } }
 }
 
 /// A standalone error page; it needs nothing from the app, so it works
@@ -188,21 +235,6 @@ pub fn elsewhere(target: &str) -> Markup {
 pub fn state_cell(state: PrState) -> Markup {
     let status = state.status();
     html! { span.state.(urgency_class(state)) { (status) } }
-}
-
-/// Characters of state the index's state column holds at most; the
-/// column, sized to its widest cell (see `style.css`), stays that narrow.
-const STATE_COLUMN: usize = 24;
-
-/// [`state_cell`] fitted to the index's column as the TUI fits its own, so
-/// the most pressing word is the one kept; the whole of it is on hover.
-pub fn fitted_state_cell(state: PrState) -> Markup {
-    let full = state.status();
-    html! {
-        span.state.(urgency_class(state)) title=(full) {
-            (state.fit(full.clone(), STATE_COLUMN))
-        }
-    }
 }
 
 fn urgency_class(state: PrState) -> &'static str {

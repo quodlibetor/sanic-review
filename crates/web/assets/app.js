@@ -8,35 +8,60 @@
   const notice = document.getElementById("notice");
   const RERUN_HINT = "r reviews a failed, held, skipped or archived PR you owe now";
 
-  // Lists you move in: the index's two panes, or a PR page's drafts.
+  // Lists you move in: the index's two lists, or a PR page's drafts.
   let focus = 0;
-  // The selected row in each list, by position; none until you move.
+  // The selected row in each list, by what it's about (a PR's key or a
+  // draft's id), so a refresh that reorders the rows keeps it; none until
+  // you move.
   const selected = [];
 
   function lists() {
-    if (page === "index") return Array.from(document.querySelectorAll(".pane"));
+    if (page === "index") return Array.from(document.querySelectorAll(".list"));
     const drafts = document.getElementById("drafts");
     return drafts ? [drafts] : [];
   }
 
+  // The rows you can move to: a folded group's are skipped.
   function rows(list) {
-    return Array.from(list.querySelectorAll(page === "index" ? ".row" : ".draft"));
+    const all = list.querySelectorAll(page === "index" ? "[data-row]" : ".draft");
+    return Array.from(all).filter(function (row) {
+      return row.offsetParent !== null;
+    });
+  }
+
+  function idOf(row) {
+    return row.dataset.key || row.id;
+  }
+
+  // Where list i's selected row is among its rows, or -1.
+  function indexIn(all, i) {
+    if (selected[i] === undefined) return -1;
+    return all.findIndex(function (row) {
+      return idOf(row) === selected[i];
+    });
+  }
+
+  function position(list, i) {
+    return indexIn(rows(list), i);
   }
 
   function currentRow() {
     const list = lists()[focus];
-    if (!list || selected[focus] === undefined) return null;
-    return rows(list)[selected[focus]] || null;
+    if (!list) return null;
+    return rows(list)[position(list, focus)] || null;
   }
 
   function draw(scroll) {
     lists().forEach(function (list, i) {
       list.classList.toggle("focused", i === focus && page === "index");
       const all = rows(list);
-      if (selected[i] !== undefined) selected[i] = Math.min(selected[i], all.length - 1);
-      all.forEach(function (row, j) {
-        row.classList.toggle("selected", i === focus && j === selected[i]);
+      const at = indexIn(all, i);
+      // A row that's gone, or folded away, leaves nothing selected.
+      if (at < 0) selected[i] = undefined;
+      list.querySelectorAll(".selected").forEach(function (row) {
+        row.classList.remove("selected");
       });
+      if (i === focus && at >= 0) all[at].classList.add("selected");
     });
     const row = currentRow();
     if (row && scroll) row.scrollIntoView({ block: "nearest" });
@@ -45,15 +70,17 @@
   function moveTo(target) {
     const list = lists()[focus];
     if (!list) return;
-    const last = rows(list).length - 1;
-    if (last < 0) return;
-    selected[focus] = Math.max(0, Math.min(target, last));
+    const all = rows(list);
+    if (all.length === 0) return;
+    selected[focus] = idOf(all[Math.max(0, Math.min(target, all.length - 1))]);
     draw(true);
   }
 
   function moveBy(delta) {
-    const now = selected[focus];
-    moveTo(now === undefined ? 0 : now + delta);
+    const list = lists()[focus];
+    if (!list) return;
+    const at = position(list, focus);
+    moveTo(at < 0 ? 0 : at + delta);
   }
 
   function say(text) {
@@ -204,6 +231,18 @@
   }
 
   document.addEventListener("keydown", onKey);
+  // Clicking a row, not one of its links, selects it.
+  document.addEventListener("click", function (e) {
+    const row = e.target.closest("[data-row], .draft");
+    if (!row || e.target.closest("a, button, textarea, input, summary")) return;
+    lists().forEach(function (list, i) {
+      if (list.contains(row)) {
+        focus = i;
+        selected[i] = idOf(row);
+      }
+    });
+    draw(false);
+  });
   // Copy buttons put their command on the clipboard.
   document.addEventListener("click", function (e) {
     const button = e.target.closest("button[data-copy]");
@@ -257,6 +296,25 @@
   // htmx doesn't swap in error pages, so say something went wrong.
   document.body.addEventListener("htmx:responseError", function (e) {
     say("That failed (" + e.detail.xhr.status + "); reload the page to see why.");
+  });
+  // The groups you've unfolded, by id: the index's refresh swaps in its
+  // lists folded, so they're unfolded again as you left them.
+  const unfolded = new Set();
+  document.addEventListener(
+    "toggle",
+    function (e) {
+      const group = e.target;
+      if (!(group instanceof HTMLDetailsElement) || !group.matches("details.grp[id]")) return;
+      if (group.open) unfolded.add(group.id);
+      else unfolded.delete(group.id);
+    },
+    true
+  );
+  document.body.addEventListener("htmx:afterSwap", function () {
+    unfolded.forEach(function (id) {
+      const group = document.getElementById(id);
+      if (group) group.open = true;
+    });
   });
   // The index rereads its lists every few seconds; keep the selection.
   document.body.addEventListener("htmx:afterSettle", function () {

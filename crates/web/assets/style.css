@@ -11,6 +11,9 @@
   --del: #fbe9eb;
   --mark: #fff3bf;
   --select: #e7f5ff;
+  --drafts: #ae3ec9;
+  --raise: #f4f5f5;
+  --line-soft: #ecedee;
   color-scheme: light dark;
 }
 
@@ -28,6 +31,9 @@
     --del: #3a2224;
     --mark: #3d3515;
     --select: #1c2e3d;
+    --drafts: #e599f7;
+    --raise: #1e2124;
+    --line-soft: #25282b;
   }
 }
 
@@ -104,133 +110,371 @@ header.top {
   padding-left: 0.6rem;
 }
 
-.pane {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin: 1rem 0;
-  padding: 0 0.75rem;
-}
-
-.pane.focused {
-  border-color: var(--accent);
-}
-
-.pane h2 {
-  font-size: 1rem;
-}
-
-/* Columns, as the TUI keeps its panes' columns: state, run status (for
-   reviews you owe), drafts, the new mark, the GitHub link, the title, and
-   the actions. The list holds the grid and each row takes its columns
-   (subgrid), so a column is as wide as its widest cell in the list: the
-   state column fits the longest state, which page.rs has already fitted
-   to `STATE_COLUMN` characters, so it's never cut. The title keeps room
-   to be read: the link is cut and the actions wrap first. Needs CSS
-   subgrid: Firefox 71+, Chrome 117+, Safari 16+. */
-.rows {
-  display: grid;
-  column-gap: 0.75rem;
-  list-style: none;
-  margin: 0;
-  padding: 0 0 0.5rem;
-}
-
-/* The run status wraps past 8rem: a skip names reviewers, and one long
-   login shouldn't widen every row's status. The title grows to its whole
-   length before the link does, since the link only takes what's left
-   (`1fr`), and the actions wrap past 12rem. */
-#owed .rows {
-  grid-template-columns:
-    max-content fit-content(8rem) max-content max-content
-    minmax(4rem, 1fr) minmax(8rem, max-content) fit-content(12rem);
-}
-
-#mine .rows {
-  grid-template-columns:
-    max-content max-content max-content minmax(4rem, max-content)
-    minmax(8rem, 1fr) auto;
-}
-
-.row {
-  display: grid;
-  grid-template-columns: subgrid;
-  grid-column: 1 / -1;
+/* The top bar: home, where you are, and the counts. */
+.topbar {
+  display: flex;
   align-items: baseline;
-  /* No side padding: the list's columns don't make room for it, so it
-     would push the actions past the pane. A selected row's background
-     reaches out with a shadow instead. */
-  padding: 0.2rem 0;
-  border-radius: 4px;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--line);
 }
 
-.row.selected {
-  box-shadow:
-    -0.3rem 0 0 var(--select),
-    0.3rem 0 0 var(--select);
+.topbar .crumb {
+  color: var(--dim);
 }
 
-.row.selected,
-.draft.selected {
-  background: var(--select);
+.topbar .crumb a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.topbar .crumb a:hover {
+  color: var(--accent);
+}
+
+.topbar .counts {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.topbar .counts b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.muted-sep {
+  color: var(--line);
+}
+
+/* A key, as buttons and hints show it. */
+.k {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  margin-left: 0.35rem;
+}
+
+/* A PR as owner/name#N, linking to GitHub. */
+.ref {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--dim);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ref:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.chip {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cnt {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--drafts);
+  white-space: nowrap;
+}
+
+/* A PR state's words, by urgency: act, good news, or quiet. */
+.u-act,
+.state.act {
+  color: var(--held);
+  font-weight: 600;
+}
+
+.u-good,
+.state.good {
+  color: var(--ok);
+}
+
+.u-quiet,
+.state.quiet {
+  color: var(--dim);
 }
 
 .state {
   font-size: 13px;
 }
 
-.state.act {
-  color: var(--held);
+.newdot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+.btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn.primary {
+  border-color: var(--accent);
+  color: var(--accent);
   font-weight: 600;
 }
 
-.state.good {
-  color: var(--ok);
+.btn.go {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
 }
 
-.state.quiet {
+.btn.go .k {
+  color: var(--bg);
+  border-color: color-mix(in srgb, var(--bg) 50%, transparent);
+}
+
+.linkbtn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.linkbtn:hover {
+  text-decoration: underline;
+}
+
+/* The index: two lists, each in groups by what they ask of you. */
+main:has(> #panes) {
+  max-width: 80rem;
+}
+
+.list {
+  margin: 1rem 0 1.75rem;
+}
+
+.list > h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.25rem;
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding-bottom: 0.3rem;
+  border-bottom: 2px solid var(--line);
+}
+
+.list.focused > h2 {
+  border-bottom-color: var(--accent);
+}
+
+.list > h2 .dim {
+  font-weight: normal;
+  font-size: 13px;
+}
+
+.list > h2 .sp {
+  margin-left: auto;
+  font-weight: normal;
+  font-size: 13px;
+}
+
+.group-h {
+  font-size: 12px;
+  font-weight: 600;
   color: var(--dim);
+  margin: 0.75rem 0 0.15rem;
+  letter-spacing: 0.02em;
 }
 
-.row .gh {
+.group-h.act {
+  color: var(--held);
+}
+
+.group-h .dim {
+  font-weight: normal;
+}
+
+details.grp > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+details.grp > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.grp > summary .group-h::before {
+  content: "▸ ";
+}
+
+details.grp[open] > summary .group-h::before {
+  content: "▾ ";
+}
+
+/* A row: the new mark, its lead (the one next thing), the title, and
+   under the title a dim line of the rest, then its actions. */
+.ib {
+  display: grid;
+  grid-template-columns: 0.9rem 8.5rem minmax(0, 1fr) auto;
+  grid-template-areas: "n x t t" "n . m a";
+  column-gap: 0.6rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  align-items: baseline;
+}
+
+.ib:hover {
+  background: var(--raise);
+}
+
+.ib.selected {
+  background: var(--select);
+}
+
+.ib > .n {
+  grid-area: n;
+}
+
+.ib > .x {
+  grid-area: x;
+  font-weight: 600;
+}
+
+.ib > .x .cnt,
+.ib > .x .chip {
+  font-size: 13px;
+}
+
+.ib > .t {
+  grid-area: t;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-/* An archived row is muted throughout, its state too, as in the TUI. */
-.row.archived .state {
+.ib > .t a {
+  color: var(--fg);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.ib > .t a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.ib > .m {
+  grid-area: m;
+  font-size: 12.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ib > .a {
+  grid-area: a;
+  display: flex;
+  gap: 0.8rem;
+  visibility: hidden;
+  font-size: 13px;
+}
+
+.ib:hover > .a,
+.ib.selected > .a,
+.ib:focus-within > .a {
+  visibility: visible;
+}
+
+.ib.archived > .t a {
   color: var(--dim);
 }
 
-.row .drafts {
-  color: #ae3ec9;
+/* Folded rows take one line. */
+.quiet .ib {
+  grid-template-areas: "n x t m";
+  padding: 0.12rem 0.5rem;
 }
 
-.row .title-cell {
-  overflow-wrap: anywhere;
+.quiet .ib > .t a {
+  font-weight: normal;
+  color: var(--dim);
 }
 
-/* Under the title, across the columns after the state and status. */
-.row .error {
-  grid-column: 3 / -1;
+.quiet .ib > .a {
+  display: none;
 }
 
-.row .actions {
+.quiet .ib.selected > .a {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.4rem;
-  justify-self: end;
-  white-space: nowrap;
+  grid-area: m;
 }
 
-.unseen {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--bg);
-  background: var(--accent);
-  border-radius: 3px;
-  padding: 0 0.3rem;
+.quiet .ib.selected > .m {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .ib {
+    grid-template-columns: 0.9rem 7rem minmax(0, 1fr);
+    grid-template-areas: "n x t" "n . m" "n . a";
+  }
+
+  .ib > .a {
+    display: none;
+  }
+
+  .ib.selected > .a {
+    display: flex;
+  }
+
+  /* Folded rows too: their one line has no room for the meta. */
+  .quiet .ib {
+    grid-template-areas: "n x t" "n . m";
+  }
+}
+
+.help-foot {
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: 2rem;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.4rem;
+}
+
+.help-foot .k {
+  margin-left: 0;
+  margin-right: 0.2rem;
+}
+
+.draft.selected {
+  background: var(--select);
 }
 
 form {
