@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
-use sanic_core::pr::PrKey;
+use sanic_core::{pr::PrKey, skip::Skip};
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, DraftStatus, PrPage, ReviewRun};
 use serde::Deserialize;
@@ -106,7 +106,7 @@ fn pr_header(app: &App, pr: &PrPage, overview: &Overview, chat: bool) -> Markup 
             @if pr.archived { " · " span.dim { "archived" } }
             @if let Some((label, class)) = &status { " · " span.status.(class) { (label) } }
         }
-        div.actions #pr-actions data-review-now=[why.map(|_| format!("{href}/review-now"))]
+        div.actions #pr-actions data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
             data-ignore=[owed.map(|_| format!("{href}/ignore"))]
             data-chat=[chat.then_some("#chat")] {
             @if why.is_some() {
@@ -374,14 +374,22 @@ pub async fn confirm_review_now(
                 p { a #cancel href=(href) { "Back" } }
             }
             Some(why) => {
+                // Worded as the TUI's confirm is.
                 p {
-                    @match why {
-                        Why::Skipped(reason) => { "Review this " (reason) "-skipped PR anyway, " }
-                        Why::Failed => { "Rerun the review of " }
-                        Why::Held => { "Start the held review of " }
+                    @match &why {
+                        Why::Skipped(Skip::Reviewed { by, .. }) => {
+                            "Already reviewed by " (by) ". Review " (github_link(&key))
+                            " anyway, at its current head?"
+                        }
+                        Why::Skipped(skip) => {
+                            "Review this " (skip.label()) "-skipped PR anyway, "
+                            (github_link(&key)) " at its current head?"
+                        }
+                        Why::Failed => {
+                            "Rerun the review of " (github_link(&key)) " at its current head?"
+                        }
+                        Why::Held => { "Start the held review of " (github_link(&key)) " now?" }
                     }
-                    (github_link(&key))
-                    @if why == Why::Held { " now?" } @else { " at its current head?" }
                     " This spends tokens."
                 }
                 form #confirm method="post" action={ (href) "/review-now" } {

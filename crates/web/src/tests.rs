@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use sanic_core::{
     clock::Clock,
     config::{CheckoutResolver, Config, Vcs},
-    pr::{PrKey, PrSnapshot},
+    pr::{PrKey, PrSnapshot, Review, ReviewState},
     repo::RepoName,
     run::{
         Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -1116,6 +1116,57 @@ async fn the_pr_page_shows_how_to_chat_with_the_reviewer() {
     assert!(!f.data.path().join("worktrees").exists());
     // PR 8's review failed before a session, so there's nothing to chat with.
     assert!(!f.get("/pr/org/repo/8").await.body.contains(r#"id="chat""#));
+}
+
+#[tokio::test]
+async fn reviewing_an_already_reviewed_head_again_says_by_whom() {
+    let f = fixture(false).await;
+    let review = |id: &str, author: &str| Review {
+        id: id.into(),
+        author: author.into(),
+        state: ReviewState::Commented,
+        body: String::new(),
+        submitted_at: format!("2026-09-2{}T00:00:00Z", id.len()),
+        commit: Some("head11".into()),
+        by_bot: false,
+    };
+    let snap = PrSnapshot {
+        reviews: vec![review("r", "me"), review("r2", "alice")],
+        ..snapshot(11, "dave", "Tidy things")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "default", &[])
+        .unwrap();
+
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(r#"data-review-now="/pr/org/repo/11/review-now""#),
+        "{index}"
+    );
+    let ask = f.get("/pr/org/repo/11/review-now").await.body;
+    let text = ask
+        .split("<p>")
+        .nth(1)
+        .and_then(|p| p.split("</p>").next())
+        .unwrap();
+    assert_eq!(
+        text,
+        "Already reviewed by you, alice. Review <a class=\"gh\" \
+         href=\"https://github.com/org/repo/pull/11\">https://github.com/org/repo/pull/11</a> \
+         anyway, at its current head? This spends tokens."
+    );
+    // The skipped-for-a-reason wording stays for the rest.
+    let draft = f.get("/pr/org/repo/10/review-now").await.body;
+    assert!(
+        draft.contains(
+            "Review this draft-skipped PR anyway, <a class=\"gh\" \
+             href=\"https://github.com/org/repo/pull/10\">https://github.com/org/repo/pull/10</a> \
+             at its current head? This spends tokens."
+        ),
+        "{draft}"
+    );
 }
 
 #[tokio::test]

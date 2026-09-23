@@ -111,28 +111,29 @@ pub fn owed_status(
 
 /// Why a review of a PR you owe may be started by hand, as the TUI's `r`
 /// decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
     /// The latest run failed or crashed.
     Failed,
     /// `--manual-reviews` is holding its queued review.
     Held,
-    /// It isn't reviewed automatically, for this [`Skip::label`].
-    Skipped(&'static str),
+    /// It isn't reviewed automatically, for this reason: who already
+    /// reviewed its head, say.
+    Skipped(Skip),
 }
 
 impl Why {
     pub fn of(pr: &OwedReview, skip: Option<&Skip>, manual_reviews: bool) -> Option<Self> {
         let skipped = if pr.archived {
-            Some(Skip::Archived.label())
+            Some(Skip::Archived)
         } else {
-            skip.map(Skip::label)
+            skip.cloned()
         };
         match (
             skipped,
             pr.latest_run.as_ref().map(|run| run.status.as_str()),
         ) {
-            (Some(label), _) => Some(Self::Skipped(label)),
+            (Some(skip), _) => Some(Self::Skipped(skip)),
             (None, Some("failed" | "crashed")) => Some(Self::Failed),
             (None, Some("queued")) if manual_reviews => Some(Self::Held),
             _ => None,
@@ -235,7 +236,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     let error = pr.latest_run.as_ref().and_then(|run| run.error.as_deref());
     html! {
         li.row.archived[pr.archived] data-href=(href)
-            data-review-now=[why.map(|_| format!("{href}/review-now"))]
+            data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
             data-ignore={ (href) "/ignore" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             span.status.(class) { (label) }
