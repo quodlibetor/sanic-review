@@ -12,6 +12,7 @@ use sanic_core::{
     clock::window_start,
     pr::PrKey,
     skip::{PrFacts, Skip},
+    start::Why,
 };
 use sanic_store::{MyPr, OwedReview, RunCounts};
 use serde::Deserialize;
@@ -109,36 +110,10 @@ pub fn owed_status(
     }
 }
 
-/// Why a review of a PR you owe may be started by hand, as the TUI's `r`
-/// decides.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Why {
-    /// The latest run failed or crashed.
-    Failed,
-    /// `--manual-reviews` is holding its queued review.
-    Held,
-    /// It isn't reviewed automatically, for this reason: who already
-    /// reviewed its head, say.
-    Skipped(Skip),
-}
-
-impl Why {
-    pub fn of(pr: &OwedReview, skip: Option<&Skip>, manual_reviews: bool) -> Option<Self> {
-        let skipped = if pr.archived {
-            Some(Skip::Archived)
-        } else {
-            skip.cloned()
-        };
-        match (
-            skipped,
-            pr.latest_run.as_ref().map(|run| run.status.as_str()),
-        ) {
-            (Some(skip), _) => Some(Self::Skipped(skip)),
-            (None, Some("failed" | "crashed")) => Some(Self::Failed),
-            (None, Some("queued")) if manual_reviews => Some(Self::Held),
-            _ => None,
-        }
-    }
+/// Why a review of `pr` may be started by hand, as the TUI's `r` decides.
+pub fn why(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Option<Why> {
+    let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
+    Why::of(overview.skipped.get(&pr.key), status, manual_reviews)
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +204,7 @@ fn panes(app: &App, overview: &Overview, show_archived: bool) -> Markup {
 
 fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     let (label, class) = owed_status(pr, overview, app.manual_reviews);
-    let why = Why::of(pr, overview.skipped.get(&pr.key), app.manual_reviews);
+    let why = why(pr, overview, app.manual_reviews);
     let href = pr_href(&pr.key);
     // Only the latest run's error: an older failure a later run replaced
     // doesn't need attention.
