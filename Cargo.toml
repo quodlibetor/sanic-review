@@ -15,6 +15,7 @@ sanic-store = { path = "crates/store" }
 sanic-web = { path = "crates/web" }
 
 axum = "0.8"
+apollo-compiler = "1.33"
 clap = { version = "4.6", features = ["derive"] }
 color-eyre = "0.6"
 getrandom = "0.4"

@@ -31,6 +31,9 @@ same task. `mise run coverage` is informational.
   may rely on the span when one covers the work.
 - Tests never touch the network or spend tokens: GitHub, `claude` and the
   clock go behind traits with fakes.
+- Every GraphQL document is a `*_QUERY` (or `*_MUTATION`) const listed in
+  `QUERIES` in `crates/github/src/graphql.rs`, so the tests check it
+  against GitHub's vendored schema (`crates/github/schema/`).
 
 ## VCS
 

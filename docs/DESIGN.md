@@ -729,7 +729,10 @@ downcast.
 - GitHub, the `claude` runner and the clock sit behind traits, so tests never
   use the network or spend tokens.
 - GitHub client integration tests run against `wiremock` with recorded JSON
-  fixtures.
+  fixtures. Since fixtures are hand-written, every GraphQL query is also
+  validated offline against GitHub's published schema, vendored in
+  `crates/github/schema/` with the command to refresh it, so a field or
+  argument GitHub doesn't have fails a test instead of every poll.
 - Runner tests use a fake `claude` executable that returns canned structured
   output.
 - Debounce and polling tests use `tokio::time::pause()`.
