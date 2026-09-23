@@ -518,15 +518,19 @@ embedded in the binary, so nothing is fetched at runtime.
   the index or a PR page, `r` or the Review now link opens that page's card
   as a dialog over the page instead, so you keep your place; see Security.
 - **Chat with the reviewer.** A PR page with a review that has an agent
-  session shows, for the latest such run, `sanic-review chat <run id>`,
-  with `serve`'s `--config` and `--data-dir`, to copy into a terminal,
-  and says it checks the review's worktree out again and removes it when
-  the chat ends. Under it, the `claude` line that chat runs, from
-  `ChatCommand::shell_line()`, for running it yourself after
-  `--print-command`, then `--cleanup`. The
-  dashboard runs neither. If the run's profile is no longer configured,
-  which `sanic-review chat` refuses, it says so instead. Index rows with
-  a session link there, as does `c`.
+  session ends with a compact card for the run whose drafts it shows, or,
+  if that one has no session, the latest that does:
+  `sanic-review chat <run id>`, with `serve`'s `--config` and
+  `--data-dir`, on one line with a Copy button, and a line saying it
+  checks the review's worktree out again, removes it when the chat ends,
+  and keeps the review's limits. "Run claude yourself instead" opens
+  numbered steps, each with its own Copy: `--print-command`, the `claude`
+  line that chat runs (from `ChatCommand::shell_line()`), and
+  `--cleanup`. Commands scroll sideways rather than wrap. The dashboard
+  runs none of them. If the run's profile is no longer configured, which
+  `sanic-review chat` refuses, it says so in one line instead. Index rows
+  with a session link there, as does `c`, which on the PR page scrolls to
+  the card and focuses Copy.
 - **Ignore by title.** The TUI's ignore editor, as a page, from `i` or a
   button on a review you owe: the PR's title and description, read-only,
   over a pattern prefilled with the title (glob syntax escaped) to edit

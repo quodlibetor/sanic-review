@@ -73,6 +73,10 @@
     const all = rows(list);
     if (all.length === 0) return;
     selected[focus] = idOf(all[Math.max(0, Math.min(target, all.length - 1))]);
+    // Moving on leaves a Copy that c focused, so Enter opens the draft
+    // rather than copying again.
+    const active = document.activeElement;
+    if (active && active.matches("button[data-copy]")) active.blur();
     draw(true);
   }
 
@@ -300,7 +304,14 @@
       case "c": {
         const target = subject();
         const href = target && target.dataset.chat;
-        if (href) go(href);
+        // On a PR page it names the card there, "#chat".
+        const here = href && href.charAt(0) === "#" && document.querySelector(href);
+        if (here) {
+          // Scroll to the card and ready its Copy.
+          here.scrollIntoView({ block: "nearest" });
+          const copy = here.querySelector("button[data-copy]");
+          if (copy) copy.focus();
+        } else if (href) go(href);
         else say("c chats with the agent that reviewed the selected PR");
         break;
       }
