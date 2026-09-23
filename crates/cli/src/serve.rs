@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashSet,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -36,7 +36,7 @@ use tokio::{
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
-    ServeArgs, Ui, logging,
+    ServeArgs, Ui, config_edit, logging,
     poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
     tui::{Request, Shared, Tui},
@@ -103,14 +103,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let (requests, requests_rx) = mpsc::unbounded_channel();
     let (due_tx, due) = watch::channel(DueTimes::new());
     let live = Live::new(&config);
-    let web = live.dashboard(
-        &me,
-        args.manual_reviews,
-        &data_dir,
-        &github,
-        &requests,
-        &due,
-    )?;
+    let control = DashboardControl {
+        requests: requests.clone(),
+        config_path: config_path.clone(),
+    };
+    let web = live.dashboard(&me, args.manual_reviews, &data_dir, &github, control, &due)?;
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
@@ -235,7 +232,7 @@ impl Live {
         manual_reviews: bool,
         data_dir: &Path,
         github: &Client,
-        requests: &mpsc::UnboundedSender<Request>,
+        control: DashboardControl,
         due: &watch::Receiver<DueTimes>,
     ) -> Result<Dashboard> {
         Dashboard::new(sanic_web::Context {
@@ -244,7 +241,7 @@ impl Live {
             data_dir: data_dir.to_owned(),
             store: Store::open(&data_dir.join("state.db"))?,
             github: github.clone(),
-            control: Arc::new(DashboardControl(requests.clone())),
+            control: Arc::new(control),
             due: due.clone(),
             skips: self.skips.subscribe(),
             window: self.window.subscribe(),
@@ -253,13 +250,22 @@ impl Live {
     }
 }
 
-/// The dashboard starts reviews the way the TUI's `r` does.
-struct DashboardControl(mpsc::UnboundedSender<Request>);
+/// The dashboard starts reviews the way the TUI's `r` does, and adds
+/// `skip_titles` patterns the way its ignore editor does.
+struct DashboardControl {
+    requests: mpsc::UnboundedSender<Request>,
+    /// Edited in place; the watcher reloads it.
+    config_path: PathBuf,
+}
 
 impl sanic_web::Control for DashboardControl {
     fn review_now(&self, key: PrKey) {
         // Only fails once `serve` is stopping.
-        let _ = self.0.send(Request::Rerun(key));
+        let _ = self.requests.send(Request::Rerun(key));
+    }
+
+    fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool> {
+        config_edit::add_skip_title_to_file(&self.config_path, profile, pattern)
     }
 }
 
@@ -816,6 +822,29 @@ mod tests {
         let mut log = ProgressLog::new(start);
         let later = start + ProgressLog::INTERVAL * 2;
         assert!((0..5).all(|i| !log.step(4 - i, later).log));
+    }
+
+    #[test]
+    fn the_dashboard_adds_skip_titles_to_the_config_file() {
+        use sanic_web::Control as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let text = "# Mine.\n[profile.default] # the org\nrepos = [{ github = \"org\" }]\n";
+        std::fs::write(&config_path, text).unwrap();
+        let control = DashboardControl {
+            requests: mpsc::unbounded_channel().0,
+            config_path: config_path.clone(),
+        };
+        assert!(control.add_skip_title("build(deps)*", None).unwrap());
+        assert!(!control.add_skip_title("build(deps)*", None).unwrap());
+        assert!(control.add_skip_title("wip*", Some("default")).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "# Mine.\n[profile.default] # the org\nrepos = [{ github = \"org\" }]\n\
+             skip_titles = [\"wip*\"]\n\n[review_requests]\nskip_titles = [\"build(deps)*\"]\n"
+        );
+        assert!(control.add_skip_title("x*", Some("nope")).is_err());
     }
 
     #[test]

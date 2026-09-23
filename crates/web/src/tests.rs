@@ -15,6 +15,7 @@ use axum::{
 use http_body_util::BodyExt;
 use sanic_core::{
     clock::Clock,
+    config::{CheckoutResolver, Config, Vcs},
     pr::{PrKey, PrSnapshot},
     repo::RepoName,
     run::{
@@ -41,11 +42,23 @@ const HOST: &str = "127.0.0.1:7117";
 #[derive(Default)]
 struct FakeServe {
     started: Mutex<Vec<PrKey>>,
+    /// `skip_titles` patterns added, with the profile each went to.
+    skipped: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl Control for FakeServe {
     fn review_now(&self, key: PrKey) {
         self.started.lock().unwrap().push(key);
+    }
+
+    fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> color_eyre::Result<bool> {
+        let entry = (pattern.to_owned(), profile.map(Into::into));
+        let mut skipped = self.skipped.lock().unwrap();
+        if skipped.contains(&entry) {
+            return Ok(false);
+        }
+        skipped.push(entry);
+        Ok(true)
     }
 }
 
@@ -197,7 +210,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         github: Client::new(&github.uri(), Token::new("t0ken".into())).unwrap(),
         control: Arc::clone(&serve) as Arc<dyn Control>,
         due: due_rx,
-        skips: watch::channel(SkipRules::default()).1,
+        skips: watch::channel(skip_rules()).1,
         window: watch::channel(None).1,
         clock: Arc::new(FixedClock),
     })
@@ -211,6 +224,33 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         drafts: [ids[0], ids[1], ids[2]],
         _data: data,
     }
+}
+
+/// Unused: the test config has only `github =` entries.
+struct NoCheckouts;
+
+impl CheckoutResolver for NoCheckouts {
+    fn resolve(
+        &self,
+        path: &std::path::Path,
+        _: Option<&str>,
+    ) -> color_eyre::Result<(Vcs, RepoName)> {
+        Err(color_eyre::eyre::eyre!("no checkout at {}", path.display()))
+    }
+}
+
+/// Skip rules from a config with two profiles and the default draft skip.
+fn skip_rules() -> SkipRules {
+    let text = r#"
+[profile.default]
+repos = [{ github = "org" }]
+
+[profile.vuln]
+repos = [{ github = "sec" }]
+"#;
+    Config::parse(text, std::path::Path::new("/"), &NoCheckouts)
+        .unwrap()
+        .skip_rules()
 }
 
 struct Reply {
@@ -872,4 +912,85 @@ async fn paths_that_cant_name_a_repo_are_not_found() {
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{uri}");
     }
     assert!(f.serve.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn i_edits_a_title_glob_with_a_live_preview() {
+    let f = fixture(false).await;
+    let page = f.get("/pr/org/repo/8/ignore").await;
+    assert_eq!(page.status, StatusCode::OK);
+    insta::assert_snapshot!(readable(&f, &page.body));
+    // Only reviews you owe are skipped by title.
+    assert_eq!(
+        f.get("/pr/org/repo/9/ignore").await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let hits = ignore_preview(&f, "*i*", "").await;
+    assert!(hits.contains("Would skip (3)"), "{hits}");
+    // In one profile, only its reviews: every one here is `default`'s.
+    let hits = ignore_preview(&f, "*i*", "default").await;
+    assert!(hits.contains("Would skip (3)"), "{hits}");
+    let hits = ignore_preview(&f, "*i*", "vuln").await;
+    assert!(hits.contains("Would skip (0)"), "{hits}");
+    let hits = ignore_preview(&f, "fix <script>*", "").await;
+    assert!(hits.contains("Would skip (1)"), "{hits}");
+    assert!(
+        hits.contains("https://github.com/org/repo/pull/8"),
+        "{hits}"
+    );
+    assert!(
+        ignore_preview(&f, "[", "")
+            .await
+            .contains("Not a valid pattern")
+    );
+    assert!(
+        ignore_preview(&f, "", "")
+            .await
+            .contains("Not a valid pattern: empty")
+    );
+}
+
+#[tokio::test]
+async fn saving_a_glob_asks_serve_to_add_it_once() {
+    let f = fixture(false).await;
+    let save = "/pr/org/repo/8/ignore";
+    let reply = f.post(save, &[("pattern", "Fix*"), ("profile", "")]).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(reply.body.contains("is now in"));
+    let again = f.post(save, &[("pattern", "Fix*"), ("profile", "")]).await;
+    assert!(again.body.contains("was already in"), "{}", again.body);
+    let reply = f
+        .post(save, &[("pattern", "Fix*"), ("profile", "vuln")])
+        .await;
+    assert!(reply.body.contains("[profile.vuln]"), "{}", reply.body);
+    assert_eq!(
+        *f.serve.skipped.lock().unwrap(),
+        [
+            ("Fix*".to_owned(), None),
+            ("Fix*".to_owned(), Some("vuln".into()))
+        ]
+    );
+
+    // Bad globs and profiles the config doesn't have are refused.
+    for fields in [
+        [("pattern", "["), ("profile", "")],
+        [("pattern", ""), ("profile", "")],
+        [("pattern", "Fix*"), ("profile", "nope")],
+    ] {
+        assert_eq!(f.post(save, &fields).await.status, StatusCode::CONFLICT);
+    }
+    // And a save without the token never reaches serve.
+    let fields = [("pattern", "other*"), ("profile", "")];
+    let reply = f.send(form(save).body(encode(&fields)).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(f.serve.skipped.lock().unwrap().len(), 2);
+}
+
+/// What PR 8's ignore editor previews for `pattern` going to `profile`.
+async fn ignore_preview(f: &Fixture, pattern: &str, profile: &str) -> String {
+    let query = serde_urlencoded::to_string([("pattern", pattern), ("profile", profile)]).unwrap();
+    f.get(&format!("/pr/org/repo/8/ignore/preview?{query}"))
+        .await
+        .body
 }

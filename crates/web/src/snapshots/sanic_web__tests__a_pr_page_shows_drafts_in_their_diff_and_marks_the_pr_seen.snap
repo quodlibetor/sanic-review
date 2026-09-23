@@ -25,7 +25,8 @@ expression: "readable(&f, &page.body)"
 <p class="meta">
 <a class="gh" href="https://github.com/org/repo/pull/7">https://github.com/org/repo/pull/7</a> by alice · <span class="status ok">drafted</span>
 </p>
-<div class="actions" id="pr-actions">
+<div class="actions" id="pr-actions" data-ignore="/pr/org/repo/7/ignore">
+<a class="button" href="/pr/org/repo/7/ignore">Ignore by title</a>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
@@ -208,7 +209,7 @@ expression: "readable(&f, &page.body)"
 <th>
 <kbd>i</kbd>
 </th>
-<td>skip PRs by title: use i in the TUI for now</td>
+<td>skip PRs with titles like the selected one</td>
 </tr>
 <tr>
 <th>

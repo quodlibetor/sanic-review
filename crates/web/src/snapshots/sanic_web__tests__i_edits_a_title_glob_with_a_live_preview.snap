@@ -1,0 +1,136 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &page.body)"
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
+<title>Ignore by title · sanic-review</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer>
+</script>
+<script src="/assets/app.js" defer>
+</script>
+</head>
+<body data-page="confirm" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
+<header class="top">
+<a class="home" href="/">sanic-review</a>
+<span class="hint">? keys</span>
+</header>
+<main>
+<h1>Ignore by title</h1>
+<p class="meta">
+<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a> by bob</p>
+<h2>Title</h2>
+<pre class="title">Fix &lt;script&gt; escaping</pre>
+<details class="description" open>
+<summary>Description</summary>
+<pre>Fix &lt;script&gt; escaping, in detail.</pre>
+</details>
+<form id="confirm" method="post" action="/pr/org/repo/8/ignore" data-resend>
+<input type="hidden" name="csrf" value="<token>">
+<p>
+<label for="pattern">Pattern </label>
+<span class="dim">A glob over whole titles, ignoring case; only glob syntax is special. Edit it down, e.g. to <code>build(deps)*</code>.</span>
+</p>
+<input id="pattern" type="text" name="pattern" value="Fix &lt;script&gt; escaping" size="60" autocomplete="off" spellcheck="false" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="input changed delay:150ms" hx-include="[name='profile']:checked" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML">
+<div id="matches">
+<h2>Would skip (1)</h2>
+<ul>
+<li>
+<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a> Fix &lt;script&gt; escaping</li>
+</ul>
+</div>
+<fieldset>
+<legend>Add it to skip_titles in</legend>
+<label>
+<input type="radio" name="profile" value="" checked hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[review_requests]</code>: every profile</label>
+<br>
+<label>
+<input type="radio" name="profile" value="default" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[profile.default]</code>
+</label>
+<br>
+<label>
+<input type="radio" name="profile" value="vuln" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[profile.vuln]</code>
+</label>
+</fieldset>
+<button type="submit">
+<kbd>y</kbd> Save to the config</button> <a id="cancel" href="/pr/org/repo/8">
+<kbd>Esc</kbd> Cancel</a>
+</form>
+</main>
+<div class="overlay" id="help" hidden>
+<div class="popup">
+<h2>Keys</h2>
+<table>
+<tr>
+<th>
+<kbd>q</kbd>
+</th>
+<td>close this help; otherwise back to the index</td>
+</tr>
+<tr>
+<th>
+<kbd>Tab, Shift-Tab</kbd>
+</th>
+<td>next, previous list</td>
+</tr>
+<tr>
+<th>
+<kbd>j/k, Down/Up</kbd>
+</th>
+<td>move in the list</td>
+</tr>
+<tr>
+<th>
+<kbd>g/G, Home/End</kbd>
+</th>
+<td>first, last row</td>
+</tr>
+<tr>
+<th>
+<kbd>Enter</kbd>
+</th>
+<td>open the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>r</kbd>
+</th>
+<td>review now: failed, held or skipped (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>archive or unarchive the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>A</kbd>
+</th>
+<td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>i</kbd>
+</th>
+<td>skip PRs with titles like the selected one</td>
+</tr>
+<tr>
+<th>
+<kbd>?, Esc</kbd>
+</th>
+<td>show, close this help</td>
+</tr>
+</table>
+<p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div id="notice" hidden>
+</div>
+</body>
+</html>

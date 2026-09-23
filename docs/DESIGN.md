@@ -425,32 +425,38 @@ embedded in the binary, so nothing is fetched at runtime.
   pending. "Regenerate with an extra instruction" is shown disabled until
   the runner can resume a session. The PR's own actions are the TUI's: a
   review now, with a confirm page, and archive or unarchive, which writes
-  the store as `sanic-review archive` does. Adding a `skip_titles` pattern
-  is still only in the TUI (`i`).
+  the store as `sanic-review archive` does.
+- **Ignore by title.** The TUI's ignore editor, as a page, from `i` or a
+  button on a review you owe: the PR's title and description, read-only,
+  over a pattern prefilled with the title (glob syntax escaped) to edit
+  down. You pick where it goes, `[review_requests]` or one profile, and
+  a live preview lists the reviews you owe it would skip there, or the
+  glob's error. Saving has `serve` add it to that `skip_titles` the way
+  the TUI does, unless it's already there; the config reload picks it up.
 - **Submit.** You pick the verdict: comment, request changes or approve.
   The agent's suggestion is preselected, and approve never is. Confirming
-  an approval also takes ticking "I approve this PR" on the preview page. The preview
-  shows the exact payload: the review body, each inline comment and the
-  verdict, as the JSON request that will be sent. It points out what
-  GitHub's Markdown would make easy to miss: mentions, hidden comments,
-  images, HTML tags and invisible characters. The body is the summary
-  if you accepted it. Accepted comments go out as inline comments in one
-  GitHub review, anchored to the reviewed run's head, and accepted comments
-  that aren't on a line of the diff are added to the body. Each one there is
-  headed by a link to its lines in the file at that head, shown as source
-  even for Markdown, or by its plain `path:line` for lines of the old
-  file. You confirm, then
-  it posts, only if the payload is still exactly what the preview showed;
-  otherwise nothing is sent and you preview again. It's sent once: a GitHub
-  error is shown and nothing is retried or marked. Once GitHub has it, its
+  an approval also takes ticking "I approve this PR" on the preview page.
+  The preview shows the exact payload: the review body, each inline
+  comment and the verdict, as the JSON request that will be sent. It
+  points out what GitHub's Markdown would make easy to miss: mentions,
+  hidden comments, images, HTML tags and invisible characters. The body
+  is the summary if you accepted it. Accepted comments go out as inline
+  comments in one GitHub review, anchored to the reviewed run's head, and
+  accepted comments that aren't on a line of the diff are added to the
+  body. Each one there is headed by a link to its lines in the file at
+  that head, shown as source even for Markdown, or by its plain
+  `path:line` for lines of the old file. You confirm, then it posts, only
+  if the payload is still exactly what the preview showed; otherwise
+  nothing is sent and you preview again. It's sent once: a GitHub error
+  is shown and nothing is retried or marked. Once GitHub has it, its
   drafts are marked `posted` and can't be changed. Replies aren't posted
   yet: drafts don't record their thread.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm page, `a` archives or unarchives, `A` shows
-  archived PRs. `Enter` opens the selected PR. `q` closes the help, or else
-  goes back to the index. A confirm page takes `y`, and `Esc` or `q`
+  archived PRs, `i` opens the ignore editor. `Enter` opens the selected
+  PR. `q` closes the help, or else goes back to the index. A confirm page takes `y`, and `Esc` or `q`
   cancels. Keys are ignored while you type in a draft; `Esc` leaves it.
 - **Settings.** The dashboard can edit settings such as
   `review_requests.teams`. Edits are written back to the config file,

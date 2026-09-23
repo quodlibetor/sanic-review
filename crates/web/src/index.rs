@@ -40,7 +40,7 @@ impl Overview {
             .iter()
             .map(|(key, due)| (key.clone(), due.saturating_duration_since(now)))
             .collect();
-        let since = window_start(app.clock.now(), *app.window.borrow());
+        let since = since(app);
         let store = app.store();
         let owed = store.owed_reviews(&app.me, since.as_deref())?;
         let skipped = {
@@ -63,6 +63,16 @@ impl Overview {
             waiting,
         })
     }
+}
+
+/// The start of the recency window the lists are cut to.
+fn since(app: &App) -> Option<String> {
+    window_start(app.clock.now(), *app.window.borrow())
+}
+
+/// Just the reviews you owe, as [`Overview::load`] reads them.
+pub fn owed_reviews(app: &App) -> Result<Vec<OwedReview>> {
+    app.store().owed_reviews(&app.me, since(app).as_deref())
 }
 
 /// An owed review's status, as the TUI's status column words it, and the
@@ -217,7 +227,8 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     let error = pr.latest_run.as_ref().and_then(|run| run.error.as_deref());
     html! {
         li.row.archived[pr.archived] data-href=(href)
-            data-review-now=[why.map(|_| format!("{href}/review-now"))] {
+            data-review-now=[why.map(|_| format!("{href}/review-now"))]
+            data-ignore={ (href) "/ignore" } {
             span.status.(class) { (label) }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
@@ -228,6 +239,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
                 @if why.is_some() {
                     a.button href={ (href) "/review-now" } { "Review now" }
                 }
+                a.button href={ (href) "/ignore" } { "Ignore by title" }
                 (archive_form(app, &pr.key, pr.archived, "index"))
             }
             @if let Some(error) = error {
