@@ -203,11 +203,19 @@ impl Store {
     }
 
     pub fn fail_run(&self, id: i64, error: &str) -> Result<()> {
+        self.end_run(id, "failed", error)
+    }
+
+    /// Records a run whose task panicked. Like a failed run, it's queued
+    /// again the next time its key comes up.
+    pub fn crash_run(&self, id: i64, panic: &str) -> Result<()> {
+        self.end_run(id, "crashed", panic)
+    }
+
+    fn end_run(&self, id: i64, status: &str, error: &str) -> Result<()> {
         self.conn.execute(
-            &format!(
-                "UPDATE runs SET status = 'failed', error = ?2, finished_at = {NOW} WHERE id = ?1"
-            ),
-            params![id, error],
+            &format!("UPDATE runs SET status = ?2, error = ?3, finished_at = {NOW} WHERE id = ?1"),
+            params![id, status, error],
         )?;
         Ok(())
     }
@@ -547,6 +555,14 @@ mod tests {
         let retry = store.queue_review(&request("h1")).unwrap().unwrap();
         assert_eq!(retry.id, run.id);
         assert_eq!(store.run(run.id).unwrap().unwrap().error, None);
+
+        store.claim_run(run.id).unwrap();
+        store.crash_run(run.id, "index out of bounds").unwrap();
+        let record = store.run(run.id).unwrap().unwrap();
+        assert_eq!(record.status, "crashed");
+        assert_eq!(record.error.as_deref(), Some("index out of bounds"));
+        let retry = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert_eq!(retry.id, run.id);
     }
 
     #[test]

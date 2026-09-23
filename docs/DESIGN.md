@@ -216,7 +216,7 @@ Rules:
   reloaded `quiet_secs` applies from the next trigger on.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
   already has a queued, running or succeeded run is skipped; one whose run
-  failed or was superseded is queued again. A reply or respond
+  failed, crashed or was superseded is queued again. A reply or respond
   run is keyed by `(pr, newest comment id covered)`.
 - **Force pushes.** If the last reviewed SHA isn't an ancestor of the new
   head, the incremental review gets a range-diff instead of a plain diff.
@@ -277,6 +277,11 @@ Rules:
    always `worktrees/<id>/`, since resuming a session needs the same working
    directory.
 
+A review whose task panics is recorded as `crashed`, with the panic message
+as its error, so it's distinguishable from an ordinary failure. Its worktree
+is removed as for a failed run, the panic is logged under the run's span,
+and `serve` and the other runs carry on.
+
 A global semaphore bounds concurrency. The per-profile model setting controls
 cost.
 
@@ -317,7 +322,7 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path/line, resolved, participants |
 | `comments` | GitHub comment id, thread, author, body, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/superseded`), suggested verdict, session id, transcript path, timings |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
 
@@ -375,7 +380,9 @@ available when tuning instruction files.
   appended to `serve.log` in the data dir.
   Keys: `q` or Ctrl-C quits `serve`, Tab and Shift-Tab switch pane, `j`/`k`
   or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
-  The terminal is restored on exit and on panic.
+  The terminal is restored on exit, and on a panic on the main or TUI
+  thread, which also ends `serve`. A panic in a review task leaves the
+  terminal alone and shows in the log pane instead.
 
 ## Auto-fix (own PRs)
 

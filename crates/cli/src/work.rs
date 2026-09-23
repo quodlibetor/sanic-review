@@ -5,6 +5,7 @@
 //! code that has already changed.
 
 use std::{
+    any::Any,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
@@ -20,9 +21,9 @@ use sanic_runner::review::{AgentProfile, ReviewRunner, RunSettings};
 use sanic_store::Store;
 use tokio::{
     sync::{Notify, Semaphore, mpsc},
-    task::JoinSet,
+    task::{self, JoinError, JoinSet},
 };
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 
 pub struct Worker {
     runner: ReviewRunner,
@@ -117,23 +118,18 @@ impl Worker {
     }
 
     /// Runs each queued run as it arrives. Returns when `runs` closes and
-    /// every started run has finished.
-    pub async fn work(self: Arc<Self>, mut runs: mpsc::UnboundedReceiver<QueuedRun>) {
-        let mut tasks = JoinSet::new();
-        loop {
-            tokio::select! {
-                run = runs.recv() => match run {
-                    Some(run) => {
-                        self.stop_older_review(&run);
-                        let span = info_span!("run", id = run.id, url = %run.request.key.url());
-                        tasks.spawn(Arc::clone(&self).execute(run).instrument(span));
-                    }
-                    None => break,
-                },
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
-            }
-        }
-        while tasks.join_next().await.is_some() {}
+    /// every started run has finished. A run whose task panics is recorded
+    /// as crashed, and the others carry on.
+    pub async fn work(self: Arc<Self>, runs: mpsc::UnboundedReceiver<QueuedRun>) {
+        supervise(
+            runs,
+            |run| {
+                self.stop_older_review(&run);
+                Arc::clone(&self).execute(run)
+            },
+            |run, panic| self.crashed(run, panic),
+        )
+        .await;
     }
 
     /// Stops the running review of `run`'s PR, if it's of another head.
@@ -215,6 +211,24 @@ impl Worker {
         if let Err(err) = stored {
             warn!(url = %run.request.key.url(), "recording the run failed: {err:?}");
         }
+        self.log_counts();
+    }
+
+    /// Cleans up after a run whose task panicked, as a failed run would
+    /// have been.
+    async fn crashed(&self, run: QueuedRun, panic: String) {
+        let url = run.request.key.url();
+        error!(url = %url, "review crashed: {panic}");
+        self.finish(&run);
+        self.runner.discard_worktree(&run).await;
+        let stored = self.store().crash_run(run.id, &panic);
+        if let Err(err) = stored {
+            warn!(url = %url, "recording the run failed: {err:?}");
+        }
+        self.log_counts();
+    }
+
+    fn log_counts(&self) {
         let counts = self.store().run_counts();
         match counts {
             Ok(counts) => info!(
@@ -244,6 +258,71 @@ impl Worker {
     }
 }
 
+/// Spawns `execute` for each run as it arrives, and hands any run whose
+/// task panicked to `crashed`, in that run's span.
+async fn supervise<E, EF, C, CF>(
+    mut runs: mpsc::UnboundedReceiver<QueuedRun>,
+    execute: E,
+    crashed: C,
+) where
+    E: Fn(QueuedRun) -> EF,
+    EF: Future<Output = ()> + Send + 'static,
+    C: Fn(QueuedRun, String) -> CF,
+    CF: Future<Output = ()>,
+{
+    let mut tasks = JoinSet::new();
+    let mut started: HashMap<task::Id, QueuedRun> = HashMap::new();
+    let finished = async |done: Result<(task::Id, ()), JoinError>,
+                          started: &mut HashMap<task::Id, QueuedRun>| {
+        let err = match done {
+            Ok((id, ())) => {
+                started.remove(&id);
+                return;
+            }
+            Err(err) => err,
+        };
+        let Some(run) = started.remove(&err.id()) else {
+            return;
+        };
+        if err.is_panic() {
+            let span = run_span(&run);
+            crashed(run, panic_message(err.into_panic()))
+                .instrument(span)
+                .await;
+        }
+    };
+    loop {
+        tokio::select! {
+            run = runs.recv() => match run {
+                Some(run) => {
+                    let task = tasks.spawn(execute(run.clone()).instrument(run_span(&run)));
+                    started.insert(task.id(), run);
+                }
+                None => break,
+            },
+            Some(done) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                finished(done, &mut started).await;
+            }
+        }
+    }
+    while let Some(done) = tasks.join_next_with_id().await {
+        finished(done, &mut started).await;
+    }
+}
+
+fn run_span(run: &QueuedRun) -> Span {
+    info_span!("run", id = run.id, url = %run.request.key.url())
+}
+
+fn panic_message(panic: Box<dyn Any + Send>) -> String {
+    match panic.downcast::<String>() {
+        Ok(message) => *message,
+        Err(panic) => panic
+            .downcast_ref::<&str>()
+            .map_or_else(|| "panicked".to_owned(), |s| (*s).to_owned()),
+    }
+}
+
 fn log_result(result: &ReviewResult) {
     let unanchored = result.comments.iter().filter(|c| c.unanchored).count();
     let headline = result.summary.lines().next().unwrap_or_default();
@@ -260,7 +339,9 @@ mod tests {
     use color_eyre::eyre::bail;
     use sanic_core::{
         config::{CheckoutResolver, Vcs},
+        pr::{PrKey, PrSnapshot},
         repo::RepoName,
+        run::{ReviewRequest, ReviewTrigger},
     };
 
     use super::*;
@@ -279,6 +360,84 @@ mod tests {
              [profile.{profile}]\nrepos = [{{ github = \"org\" }}]\n"
         );
         Config::parse(&text, Path::new("/"), &NoCheckouts).unwrap()
+    }
+
+    fn queued(id: i64) -> QueuedRun {
+        QueuedRun {
+            id,
+            request: ReviewRequest {
+                key: PrKey {
+                    repo: RepoName::new("org", "repo"),
+                    number: 7,
+                },
+                profile: "p".into(),
+                head_sha: "h1".into(),
+                base_sha: "b1".into(),
+                trigger: ReviewTrigger::Requested,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_after_a_panicking_run_still_run() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(queued(1)).unwrap();
+        // Run 2 is only sent once run 1's crash is handled, and closing the
+        // channel then lets `supervise` return.
+        let tx = Mutex::new(Some(tx));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let crashes = Mutex::new(Vec::new());
+        supervise(
+            rx,
+            |run| {
+                let ran = Arc::clone(&ran);
+                async move {
+                    assert!(run.id != 1, "boom");
+                    ran.lock().unwrap().push(run.id);
+                }
+            },
+            |run, panic| {
+                crashes.lock().unwrap().push((run.id, panic));
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    tx.send(queued(2)).unwrap();
+                }
+                async {}
+            },
+        )
+        .await;
+        assert_eq!(*ran.lock().unwrap(), [2]);
+        assert_eq!(*crashes.lock().unwrap(), [(1, "boom".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn a_crashed_run_is_recorded_as_crashed() {
+        let data = tempfile::TempDir::new().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let snapshot = PrSnapshot {
+            key: queued(0).request.key,
+            title: "t".into(),
+            body: String::new(),
+            url: String::new(),
+            author: "alice".into(),
+            head_sha: "h1".into(),
+            base_sha: "b1".into(),
+            is_draft: false,
+            review_requested: true,
+            requested_teams: vec![],
+            reviews: vec![],
+            threads: vec![],
+            files: None,
+        };
+        store.record(&snapshot, "p", &[]).unwrap();
+        let run = store.queue_review(&queued(0).request).unwrap().unwrap();
+        assert!(store.claim_run(run.id).unwrap());
+        let store = Arc::new(Mutex::new(store));
+        let worker = Worker::new(data.path(), Arc::clone(&store), &config(1, "p"));
+
+        worker.crashed(run.clone(), "boom".into()).await;
+        let record = store.lock().unwrap().run(run.id).unwrap().unwrap();
+        assert_eq!(record.status, "crashed");
+        assert_eq!(record.error.as_deref(), Some("boom"));
     }
 
     #[tokio::test]

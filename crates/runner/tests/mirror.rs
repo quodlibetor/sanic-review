@@ -69,3 +69,24 @@ async fn a_vanished_head_is_an_error() {
         .unwrap_err();
     assert!(err.to_string().contains("is gone"), "{err:?}");
 }
+
+#[tokio::test]
+async fn a_lost_worktree_can_be_removed_by_path() {
+    let remote = remote();
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::new(data.path().join("mirrors"));
+    let url = remote.root.path().to_string_lossy();
+    let dest = data.path().join("worktrees/1");
+
+    // Simulate a panic: the `Worktree` is dropped without being removed.
+    drop(
+        mirrors
+            .checkout(&url, &key(), &remote.head, &remote.base, &dest)
+            .await
+            .unwrap(),
+    );
+    mirrors.remove_worktree(&key().repo, &dest).await;
+    assert!(!dest.exists());
+    let mirror = data.path().join("mirrors/org/repo.git");
+    assert_eq!(git(&mirror, &["worktree", "list"]).lines().count(), 1);
+}

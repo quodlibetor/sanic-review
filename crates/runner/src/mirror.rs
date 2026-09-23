@@ -52,6 +52,12 @@ impl Mirrors {
             .join(format!("{}.git", repo.name))
     }
 
+    /// Removes a worktree of `repo`'s mirror whose [`Worktree`] was lost,
+    /// e.g. to a panic. Does nothing if `path` doesn't exist.
+    pub async fn remove_worktree(&self, repo: &RepoName, path: &Path) {
+        remove_worktree(&self.mirror_path(repo), path).await;
+    }
+
     fn lock(&self, repo: &RepoName) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
             .lock()
