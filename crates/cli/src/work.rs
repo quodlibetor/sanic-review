@@ -144,12 +144,12 @@ impl Worker {
                 stored
             }
             Err(err) => {
-                warn!("review failed: {err:?}");
+                warn!(url = %run.request.key.url(), "review failed: {err:?}");
                 self.store().fail_run(run.id, &format!("{err:#}"))
             }
         };
         if let Err(err) = stored {
-            warn!("recording the run failed: {err:?}");
+            warn!(url = %run.request.key.url(), "recording the run failed: {err:?}");
         }
         let counts = self.store().run_counts();
         match counts {

@@ -358,11 +358,14 @@ struct BackPage {
 }
 
 impl<T> Connection<T> {
-    /// The nodes, warning if older ones were cut off. The caller's span
-    /// says which PR.
-    fn into_nodes(self, what: &str) -> Vec<T> {
+    /// The nodes, warning if older ones were cut off.
+    fn into_nodes(self, what: &str, key: &PrKey) -> Vec<T> {
         if self.page_info.is_some_and(|p| p.has_previous_page) {
-            tracing::warn!("{what} truncated to the newest {}", self.nodes.len());
+            tracing::warn!(
+                url = %key.url(),
+                "{what} truncated to the newest {}",
+                self.nodes.len()
+            );
         }
         self.nodes
     }
@@ -475,7 +478,7 @@ impl RawPr {
         });
         let reviews = self
             .reviews
-            .into_nodes("reviews")
+            .into_nodes("reviews", &key)
             .into_iter()
             .map(|r| Review {
                 state: review_state(&r.state),
@@ -492,16 +495,16 @@ impl RawPr {
             resolved: false,
             comments: self
                 .comments
-                .into_nodes("conversation comments")
+                .into_nodes("conversation comments", &key)
                 .into_iter()
                 .map(Comment::from)
                 .collect(),
         }];
-        for t in self.review_threads.into_nodes("review threads") {
+        for t in self.review_threads.into_nodes("review threads", &key) {
             threads.push(Thread {
                 comments: t
                     .comments
-                    .into_nodes("thread comments")
+                    .into_nodes("thread comments", &key)
                     .into_iter()
                     .map(Comment::from)
                     .collect(),
@@ -526,5 +529,60 @@ impl RawPr {
             files,
             key,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn truncation_warning_names_the_pr_without_a_span() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let key = PrKey {
+            repo: RepoName::parse("o/r").unwrap(),
+            number: 7,
+        };
+        let connection = Connection {
+            page_info: Some(BackPage {
+                has_previous_page: true,
+            }),
+            nodes: vec![()],
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Disabled at this level, as under `RUST_LOG=warn`.
+            let _span = tracing::info_span!("refresh", url = %key.url()).entered();
+            connection.into_nodes("reviews", &key);
+        });
+
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("reviews truncated to the newest 1"), "{logs}");
+        assert!(logs.contains("url=https://github.com/o/r/pull/7"), "{logs}");
     }
 }
