@@ -37,7 +37,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
     ServeArgs, Ui, logging,
-    poll::{GithubApi, Poller, Priority, RefreshQueue, Refreshed},
+    poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
     tui::{Request, Shared, Tui},
     watch::ConfigWatcher,
@@ -121,6 +121,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 due,
                 skips: live.skips.subscribe(),
                 window: live.window.subscribe(),
+                progress: live.progress.subscribe(),
                 clock: Arc::new(SystemClock),
                 requests,
                 config_path: config_path.clone(),
@@ -162,11 +163,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
 }
 
-/// Config the scheduler and the TUI follow across reloads.
+/// What the scheduler and the TUI follow as it changes: config across
+/// reloads, and the poller's progress.
 struct Live {
     skips: watch::Sender<SkipRules>,
     /// `poll.updated_within_days`.
     window: watch::Sender<Option<u32>>,
+    /// The refresh batch under way; `None` when the queue is empty.
+    progress: watch::Sender<Option<Progress>>,
 }
 
 impl Live {
@@ -174,6 +178,7 @@ impl Live {
         Self {
             skips: watch::Sender::new(config.skip_rules()),
             window: watch::Sender::new(config.poll.updated_within_days),
+            progress: watch::Sender::new(None),
         }
     }
 
@@ -215,6 +220,47 @@ impl sanic_web::Control for DashboardControl {
     fn review_now(&self, key: PrKey) {
         // Only fails once `serve` is stopping.
         let _ = self.0.send(Request::Rerun(key));
+    }
+}
+
+/// Counts a refresh batch and says when to log progress: only for big
+/// batches, every [`ProgressLog::EVERY`] PRs or [`ProgressLog::INTERVAL`].
+struct ProgressLog {
+    done: usize,
+    logged_at: Instant,
+}
+
+struct Step {
+    progress: Progress,
+    log: bool,
+}
+
+impl ProgressLog {
+    /// Smaller batches finish too soon to need progress lines.
+    const BIG: usize = 20;
+    const EVERY: usize = 25;
+    const INTERVAL: Duration = Duration::from_secs(10);
+
+    fn new(now: Instant) -> Self {
+        Self {
+            done: 0,
+            logged_at: now,
+        }
+    }
+
+    /// One more PR is about to be refreshed, with `remaining` after it.
+    fn step(&mut self, remaining: usize, now: Instant) -> Step {
+        let progress = Progress {
+            done: self.done,
+            total: self.done + remaining + 1,
+        };
+        self.done += 1;
+        let due = self.done.is_multiple_of(Self::EVERY) || now >= self.logged_at + Self::INTERVAL;
+        let log = progress.total >= Self::BIG && progress.done > 0 && due;
+        if log {
+            self.logged_at = now;
+        }
+        Step { progress, log }
     }
 }
 
@@ -400,8 +446,14 @@ async fn poll_forever<G: GithubApi>(
             next_reconcile = now + reconcile_every;
             match poller.reconcile().instrument(info_span!("reconcile")).await {
                 Ok(found) => {
+                    let (requested, involved) = (found.requested.len(), found.involved.len());
                     pending.extend(found.requested, Priority::Requested);
                     pending.extend(found.involved, Priority::Involved);
+                    info!(
+                        "reconcile: {requested} review requests, {involved} involving you, \
+                         {} queued",
+                        pending.len()
+                    );
                 }
                 Err(err) => backoff = handle(err)?,
             }
@@ -413,7 +465,11 @@ async fn poll_forever<G: GithubApi>(
                 .await
             {
                 Ok((keys, interval)) => {
-                    pending.extend(keys, Priority::Notified);
+                    if !keys.is_empty() {
+                        let count = keys.len();
+                        pending.extend(keys, Priority::Notified);
+                        info!("notifications: {count} PRs, {} queued", pending.len());
+                    }
                     next_notifications = now + interval.unwrap_or_default().max(min_notification);
                 }
                 Err(err) => {
@@ -423,42 +479,14 @@ async fn poll_forever<G: GithubApi>(
             }
         }
 
-        let mut triggered = 0;
-        while backoff.is_none()
-            && let Some((key, priority)) = pending.pop()
-        {
-            match poller
-                .refresh(&key)
-                .instrument(info_span!("refresh", url = %key.url()))
-                .await
-            {
-                Ok(Some(refreshed)) => {
-                    triggered += refreshed.triggers.len();
-                    log_triggers(&refreshed);
-                    let quiet = poller.config().poll.quiet_period;
-                    let mut update = Update::new(&refreshed, quiet);
-                    if seen.insert(key.clone())
-                        && let Some(standing) = standing_request(&refreshed, poller.me())
-                    {
-                        update.triggers.push(standing);
-                    }
-                    if !update.triggers.is_empty() {
-                        // Only fails once the scheduler has stopped, which
-                        // ends `serve` anyway.
-                        let _ = updates.send(update);
-                    }
-                }
-                Ok(None) => {}
-                Err(err @ (ApiError::RateLimited { .. } | ApiError::Unauthorized)) => {
-                    pending.push(key, priority);
-                    backoff = handle(err)?;
-                }
-                Err(err) => {
-                    warn!(url = %key.url(), "refresh failed: {err}");
-                }
-            }
-        }
-
+        let triggered = if backoff.is_none() {
+            let (triggered, wait) =
+                refresh_queued(poller, &mut pending, &mut seen, updates, live).await?;
+            backoff = wait;
+            triggered
+        } else {
+            0
+        };
         if let Some(wait) = backoff {
             let resume = Instant::now() + wait;
             next_reconcile = next_reconcile.max(resume);
@@ -473,6 +501,61 @@ async fn poll_forever<G: GithubApi>(
             );
         }
     }
+}
+
+/// Refreshes queued PRs, most urgent first, until the queue is empty or a
+/// rate limit says to wait. Returns the triggers found and that wait.
+async fn refresh_queued<G: GithubApi>(
+    poller: &mut Poller<G>,
+    pending: &mut RefreshQueue,
+    seen: &mut HashSet<PrKey>,
+    updates: &mpsc::UnboundedSender<Update>,
+    live: &Live,
+) -> Result<(usize, Option<Duration>)> {
+    let mut triggered = 0;
+    let mut backoff = None;
+    let mut progress = ProgressLog::new(Instant::now());
+    while backoff.is_none()
+        && let Some((key, priority)) = pending.pop()
+    {
+        let step = progress.step(pending.len(), Instant::now());
+        live.progress.send_replace(Some(step.progress));
+        if step.log {
+            info!("refreshed {}/{}", step.progress.done, step.progress.total);
+        }
+        match poller
+            .refresh(&key)
+            .instrument(info_span!("refresh", url = %key.url()))
+            .await
+        {
+            Ok(Some(refreshed)) => {
+                triggered += refreshed.triggers.len();
+                log_triggers(&refreshed);
+                let quiet = poller.config().poll.quiet_period;
+                let mut update = Update::new(&refreshed, quiet);
+                if seen.insert(key.clone())
+                    && let Some(standing) = standing_request(&refreshed, poller.me())
+                {
+                    update.triggers.push(standing);
+                }
+                if !update.triggers.is_empty() {
+                    // Only fails once the scheduler has stopped, which
+                    // ends `serve` anyway.
+                    let _ = updates.send(update);
+                }
+            }
+            Ok(None) => {}
+            Err(err @ (ApiError::RateLimited { .. } | ApiError::Unauthorized)) => {
+                pending.push(key, priority);
+                backoff = handle(err)?;
+            }
+            Err(err) => {
+                warn!(url = %key.url(), "refresh failed: {err}");
+            }
+        }
+    }
+    live.progress.send_replace(None);
+    Ok((triggered, backoff))
 }
 
 /// Swaps in the config at `path`, keeping the current one if the new one
@@ -668,6 +751,30 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn big_batches_log_progress_now_and_then() {
+        let start = Instant::now();
+        let mut log = ProgressLog::new(start);
+        let logged: Vec<usize> = (0..60)
+            .filter_map(|i| {
+                let step = log.step(59 - i, start);
+                assert_eq!(step.progress.total, 60);
+                step.log.then_some(step.progress.done)
+            })
+            .collect();
+        assert_eq!(logged, [24, 49]);
+
+        // A slow batch logs on time as well.
+        let mut log = ProgressLog::new(start);
+        let _ = log.step(29, start);
+        assert!(log.step(28, start + ProgressLog::INTERVAL).log);
+
+        // A small one never does.
+        let mut log = ProgressLog::new(start);
+        let later = start + ProgressLog::INTERVAL * 2;
+        assert!((0..5).all(|i| !log.step(4 - i, later).log));
     }
 
     #[test]
