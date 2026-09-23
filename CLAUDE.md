@@ -1,0 +1,34 @@
+# sanic-review
+
+Human-guided LLM review of GitHub PRs. The design lives in `docs/DESIGN.md`;
+read it before changing behaviour, and update it when behaviour changes.
+
+## Invariant
+
+Nothing is posted to GitHub or pushed on the user's behalf except through an
+explicit user action (a dashboard click or a command they run). Agents spawned
+by this tool never get GitHub write credentials. Don't add code paths that
+weaken this.
+
+## Gate
+
+Every change must pass `mise run check` (fmt, clippy with `-D warnings`,
+cargo-deny, nextest + doctests) before it is described as done. CI runs the
+same task. `mise run coverage` is informational.
+
+## Conventions
+
+- Dependency versions live only in the root `Cargo.toml`
+  `[workspace.dependencies]`, as plain semver requirements. Member crates use
+  `foo.workspace = true`. `Cargo.lock` is committed.
+- Every crate inherits `[lints] workspace = true`. No `unwrap`/`expect`
+  outside tests.
+- Errors: `color_eyre::eyre::Result` with `.wrap_err(...)` at boundaries.
+  Failures a caller branches on are return-type enums, not downcasts.
+- Tests never touch the network or spend tokens: GitHub, `claude` and the
+  clock go behind traits with fakes.
+
+## VCS
+
+This repo uses jj. Work in a workspace under `.workspaces/`, and run
+`jj st` after edits so they are snapshotted.

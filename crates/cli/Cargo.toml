@@ -1,0 +1,16 @@
+[package]
+name = "sanic-review"
+description = "Human-guided LLM review of GitHub PRs."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

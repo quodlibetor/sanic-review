@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+sanic-core = { path = "crates/core" }
+sanic-github = { path = "crates/github" }
+sanic-runner = { path = "crates/runner" }
+sanic-store = { path = "crates/store" }
+sanic-web = { path = "crates/web" }
+
+clap = { version = "4.6", features = ["derive"] }
+color-eyre = "0.6"
+tracing = "0.1"
+tracing-error = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "deny"
+expect_used = "deny"

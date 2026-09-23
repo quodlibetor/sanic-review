@@ -1,0 +1,9 @@
+[package]
+name = "sanic-core"
+description = "Types, configuration, repo matching and trigger logic."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
