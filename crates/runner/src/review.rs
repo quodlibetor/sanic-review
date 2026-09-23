@@ -14,7 +14,7 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr, bail};
 use sanic_core::{
     config::{Profile, RunnerSettings},
-    run::{DraftComment, PrContext, QueuedRun, ReviewOutput, ReviewResult},
+    run::{Basis, DraftComment, PrContext, QueuedRun, ReviewOutput, ReviewResult, RevisedOutput},
 };
 use serde_json::{Value, json};
 
@@ -103,7 +103,7 @@ impl ReviewRunner {
         ctx: &PrContext,
         settings: &RunSettings,
         cancel: impl Future<Output = ()>,
-    ) -> Result<Option<ReviewResult>> {
+    ) -> Result<Option<Reviewed>> {
         let req = &run.request;
         let run_dir = self.data_dir.join("runs").join(run.id.to_string());
         tokio::fs::create_dir_all(&run_dir)
@@ -220,7 +220,7 @@ impl ReviewRunner {
         run: &QueuedRun,
         ctx: &PrContext,
         settings: &RunSettings,
-    ) -> Result<ReviewResult> {
+    ) -> Result<Reviewed> {
         let profile = &settings.profile;
         let diff = worktree.diff().await?;
         let diff_path = run_dir.join("pr.diff");
@@ -237,7 +237,7 @@ impl ReviewRunner {
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
         let brief = match &run.revision {
-            Some(revision) => prompt::revision(&revision.instruction),
+            Some(revision) => prompt::revision(&revision.instruction, &revision.baseline),
             None => prompt::brief(&run.request, ctx, &diff, &diff_path),
         };
         write(&run_dir.join("system.md"), &system_prompt).await?;
@@ -256,7 +256,11 @@ impl ReviewRunner {
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
         let transcript = run_dir.join("transcript.jsonl");
-        let schema = review_schema();
+        let schema = if run.revision.is_some() {
+            revision_schema()
+        } else {
+            review_schema()
+        };
         let outcome = claude
             .run(&Invocation {
                 cwd: worktree.path(),
@@ -270,11 +274,19 @@ impl ReviewRunner {
                 resume: run.revision.as_ref().map(|r| r.session_id.as_str()),
             })
             .await?;
-        let output: ReviewOutput = serde_json::from_value(outcome.output)
-            .wrap_err("the agent's answer doesn't match the review schema")?;
+        let (output, basis) = if run.revision.is_some() {
+            let revised: RevisedOutput = serde_json::from_value(outcome.output)
+                .wrap_err("the agent's answer doesn't match the revision schema")?;
+            let (output, basis) = revised.split();
+            (output, Some(basis))
+        } else {
+            let output: ReviewOutput = serde_json::from_value(outcome.output)
+                .wrap_err("the agent's answer doesn't match the review schema")?;
+            (output, None)
+        };
 
         let index = DiffIndex::parse(&diff);
-        Ok(ReviewResult {
+        let result = ReviewResult {
             summary: output.summary,
             verdict: output.suggested_verdict,
             comments: output
@@ -287,8 +299,17 @@ impl ReviewRunner {
                 .collect(),
             session_id: outcome.session_id,
             transcript_path: transcript.display().to_string(),
-        })
+        };
+        Ok(Reviewed { result, basis })
     }
+}
+
+/// A finished review, and for a regeneration, which of the drafts it
+/// started from each of its own is based on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reviewed {
+    pub result: ReviewResult,
+    pub basis: Option<Basis>,
 }
 
 /// The directories in `dirs` that exist; a missing one is only a warning,
@@ -344,9 +365,45 @@ pub fn review_schema() -> Value {
     })
 }
 
+/// [`review_schema`], plus what a regeneration adds: the baseline draft
+/// the summary and each comment are based on, if any.
+#[must_use]
+pub fn revision_schema() -> Value {
+    let mut schema = review_schema();
+    schema["properties"]["summary_based_on"] = json!({ "type": ["integer", "null"] });
+    schema["properties"]["comments"]["items"]["properties"]["based_on"] =
+        json!({ "type": ["integer", "null"] });
+    schema
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_schema_example_parses() {
+        let example = json!({
+            "summary": "s", "summary_based_on": 4,
+            "suggested_verdict": "comment",
+            "comments": [{
+                "path": "a.rs", "line": 3, "side": "RIGHT", "body": "b",
+                "severity": "nit", "confidence": "high", "based_on": 5
+            }, {
+                "path": "a.rs", "line": 9, "side": "RIGHT", "body": "new",
+                "severity": "nit", "confidence": "high"
+            }]
+        });
+        let schema = revision_schema();
+        assert_eq!(
+            schema["properties"]["comments"]["items"]["properties"]["based_on"]["type"][0],
+            "integer"
+        );
+        let revised: RevisedOutput = serde_json::from_value(example).unwrap();
+        let (output, basis) = revised.split();
+        assert_eq!(output.comments.len(), 2);
+        assert_eq!(basis.summary, Some(4));
+        assert_eq!(basis.comments, [Some(5), None]);
+    }
 
     /// The schema and the serde types must accept the same shapes.
     #[test]

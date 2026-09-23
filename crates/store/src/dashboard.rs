@@ -58,6 +58,9 @@ pub struct DraftRow {
     pub edited_body: Option<String>,
     pub status: String,
     pub unanchored: bool,
+    /// For a regenerated draft: the draft of the revised run it's based on,
+    /// kept as it was if unchanged ("revised from #N" otherwise).
+    pub based_on: Option<i64>,
 }
 
 impl DraftRow {
@@ -93,7 +96,7 @@ const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 
 const DRAFT_COLUMNS: &str = "r.repo, r.number, d.id, d.run_id, d.kind, d.path, d.line,
     d.start_line, d.side, d.severity, d.confidence, d.original_body, d.edited_body,
-    d.status, d.unanchored";
+    d.status, d.unanchored, d.based_on";
 
 fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     Ok(DraftRow {
@@ -111,6 +114,7 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
         edited_body: row.get(12)?,
         status: row.get(13)?,
         unanchored: row.get(14)?,
+        based_on: row.get(15)?,
     })
 }
 

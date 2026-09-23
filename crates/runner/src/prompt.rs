@@ -7,7 +7,7 @@
 
 use std::{fmt::Write as _, path::Path};
 
-use sanic_core::run::{PrContext, ReviewRequest, ReviewTrigger};
+use sanic_core::run::{BaselineDraft, PrContext, ReviewRequest, ReviewTrigger};
 
 /// Diffs larger than this are left in the file rather than inlined.
 const MAX_INLINE_DIFF: usize = 200 * 1024;
@@ -142,13 +142,25 @@ pub fn brief(req: &ReviewRequest, ctx: &PrContext, diff: &str, diff_path: &Path)
 /// The prompt for a `regenerate` run, which resumes the review's session:
 /// your instruction, fenced as your words rather than PR text.
 #[must_use]
-pub fn revision(instruction: &str) -> String {
+pub fn revision(instruction: &str, baseline: &[BaselineDraft]) -> String {
+    let drafts = serde_json::to_string_pretty(baseline).unwrap_or_else(|_| "[]".into());
     format!(
         "The reviewer asked you to revise your review. Their request, in their own \
-         words:\n\n{}\nRevise the review accordingly and return the complete revised \
-         review in the same format as before: every comment you'd still make, not only \
-         what changed.\n",
-        fenced(instruction, "text")
+         words:\n\n{}\n\
+         This is your review as it stands after the reviewer went through it, one entry \
+         per draft: its `id`, `kind` (`summary` or `comment`), anchor, current `text` \
+         (the reviewer's edit if `edited`), and `status`:\n\n{}\n\
+         - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, \
+         word for word, unless the request asks otherwise.\n\
+         - `rejected` drafts were turned down: don't propose them again.\n\
+         - `posted` drafts are already on GitHub: don't repeat them.\n\
+         - `pending` and `stale` ones are yours to keep, change or drop.\n\n\
+         Return the complete revised review in the same format as before, every comment \
+         you'd still make and not only what changed. Give each comment you keep or revise \
+         the `id` of the draft it comes from as `based_on`, and the summary's as \
+         `summary_based_on`; leave them out for anything new.\n",
+        fenced(instruction, "text"),
+        fenced(&drafts, "json")
     )
 }
 

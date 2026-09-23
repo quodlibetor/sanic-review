@@ -457,6 +457,7 @@ mod tests {
             confidence: None,
             original_body: String::new(),
             edited_body: None,
+            based_on: None,
             status: "accepted".into(),
             unanchored: true,
         }
