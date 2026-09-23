@@ -560,6 +560,10 @@ embedded in the binary, so nothing is fetched at runtime.
   `sanic_core::state::PrState` works it out and words it (`status()` in
   full, `fitted(width)` to fit), for the TUI and the dashboard; the store's
   `pr_state` fills it in for each listed PR.
+  "Approved" and "changes requested" are GitHub's `reviewDecision`. A repo
+  that doesn't require reviews gives none, so then each reviewer's latest
+  approval, change request or dismissal counts, bots' aside: a change
+  request by anyone, else an approval by anyone.
   Every PR row shows its github.com URL, so it's clickable. Until the
   dashboard exists there are no dashboard URLs or `views`, so both PR panes
   list every open tracked PR updated within the window. Filtering to unseen items arrives with the

@@ -1,8 +1,6 @@
 //! Read-only summaries of tracked PRs and recent activity, for the terminal
 //! UI.
 
-use std::collections::HashMap;
-
 use color_eyre::eyre::Result;
 use rusqlite::{Row, params, types::Type};
 use sanic_core::{pr::PrKey, repo::RepoName, state::PrState};
@@ -48,23 +46,11 @@ pub struct MyPr {
     pub title: String,
     pub is_draft: bool,
     pub archived: bool,
-    pub review_state: ReviewState,
     pub pending_drafts: u32,
     /// The latest run with an agent session to chat with.
     pub chat_run: Option<i64>,
     /// Where it stands; see [`Store::pr_state`].
     pub state: PrState,
-}
-
-/// Where reviewers stand on one of your PRs, from each reviewer's latest
-/// approval, change request or dismissal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReviewState {
-    /// At least one reviewer's latest word is a change request.
-    ChangesRequested,
-    /// Someone approved and nobody's latest word is a change request.
-    Approved,
-    Waiting,
 }
 
 /// Something that happened to a tracked PR.
@@ -170,7 +156,6 @@ impl Store {
                 |(repo, number, title, is_draft, archived, pending_drafts)| {
                     let key = key(&repo, number)?;
                     Ok(MyPr {
-                        review_state: self.review_state(&repo, number, me)?,
                         chat_run: self.latest_session_run(&key)?.map(|s| s.run.id),
                         state: self.pr_state(&key, me, true)?,
                         key,
@@ -182,30 +167,6 @@ impl Store {
                 },
             )
             .collect()
-    }
-
-    fn review_state(&self, repo: &str, number: u32, me: &str) -> Result<ReviewState> {
-        // Comments don't change where a reviewer stands, as on GitHub.
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT lower(author), state FROM reviews
-             WHERE repo = ?1 AND number = ?2 AND lower(author) != lower(?3)
-                   AND state IN ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED')
-             ORDER BY submitted_at, rowid",
-        )?;
-        let mut latest: HashMap<String, String> = HashMap::new();
-        for row in stmt.query_map(params![repo, number, me], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (author, state) = row?;
-            latest.insert(author, state);
-        }
-        Ok(if latest.values().any(|s| s == "CHANGES_REQUESTED") {
-            ReviewState::ChangesRequested
-        } else if latest.values().any(|s| s == "APPROVED") {
-            ReviewState::Approved
-        } else {
-            ReviewState::Waiting
-        })
     }
 
     /// The `limit` most recent triggers and run transitions, newest first.
@@ -416,12 +377,7 @@ mod tests {
         waiting.is_draft = true;
         waiting.reviews = vec![
             review("r0", "bob", GithubState::Commented, "2026-01-01T00:00:00Z"),
-            review(
-                "r1",
-                "me",
-                GithubState::ChangesRequested,
-                "2026-01-01T00:00:00Z",
-            ),
+            review("r1", "me", GithubState::Commented, "2026-01-01T00:00:00Z"),
         ];
         let mut approved = snapshot(2, "ME");
         approved.reviews = vec![
@@ -471,15 +427,17 @@ mod tests {
             .my_prs("me", None)
             .unwrap()
             .into_iter()
-            .map(|pr| (pr.key.number, pr.is_draft, pr.review_state))
+            .map(|pr| (pr.key.number, pr.is_draft, pr.state.status()))
             .collect();
+        // GitHub gave no review decision, so each reviewer's latest word
+        // decides.
         assert_eq!(
             states,
             [
-                (1, true, ReviewState::Waiting),
-                (2, false, ReviewState::Approved),
-                (3, false, ReviewState::ChangesRequested),
-                (4, false, ReviewState::Waiting),
+                (1, true, "—".to_owned()),
+                (2, false, "approved".to_owned()),
+                (3, false, "changes requested".to_owned()),
+                (4, false, "—".to_owned()),
             ]
         );
     }
