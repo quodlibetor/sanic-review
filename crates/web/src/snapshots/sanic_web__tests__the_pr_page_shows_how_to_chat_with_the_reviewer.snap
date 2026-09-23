@@ -2,24 +2,38 @@
 source: crates/web/src/tests.rs
 expression: "readable(&f, chat)"
 ---
-<section id="chat">
-<h2>Chat with the reviewer</h2>
-<p>Ask the agent that did run 1 about its review. Paste this into a terminal:</p>
-<div class="copyable">
-<pre id="chat-command">
-<code>$EXE chat 1 --config '/config/sanic review.toml' --data-dir $DATA</code>
-</pre>
-<button type="button" data-copy="#chat-command">Copy</button>
+<section class="chat" id="chat">
+<h2>Chat with the reviewer <span class="dim">run 1 · paste into a terminal</span>
+</h2>
+<div class="copyrow">
+<pre id="chat-command">$EXE chat 1 --config '/config/sanic review.toml' --data-dir $DATA</pre>
+<button class="btn" type="button" data-copy="#chat-command" aria-describedby="chat-command">Copy</button>
 </div>
-<p class="dim">It checks the review's worktree out again, at the path the review used, and removes it when the chat ends. The agent keeps the review's limits: read-only tools and no GitHub token. Add <code>--allow-edits</code> to let it edit that copy of the worktree.</p>
+<p class="note">Checks the review's worktree out again and removes it when the chat ends. Read-only, no GitHub token; add <code>--allow-edits</code> to let it edit that copy.</p>
 <details>
-<summary>Or run claude yourself</summary>
-<p>This needs the worktree, which <code>$EXE chat --print-command 1 --config '/config/sanic review.toml' --data-dir $DATA</code> checks out and prints this line for. Remove the worktree afterwards with <code>$EXE chat --cleanup 1 --config '/config/sanic review.toml' --data-dir $DATA</code>.</p>
-<div class="copyable">
-<pre id="claude-command">
-<code>cd $DATA/worktrees/1 &amp;&amp; env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-7 --restricted --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --add-dir $DATA/runs/1 --add-dir /skills/review</code>
-</pre>
-<button type="button" data-copy="#claude-command">Copy</button>
+<summary>Run claude yourself instead</summary>
+<ol>
+<li>
+<span>Check out the worktree and print the claude line</span>
+<div class="copyrow">
+<pre id="print-command">$EXE chat --print-command 1 --config '/config/sanic review.toml' --data-dir $DATA</pre>
+<button class="btn" type="button" data-copy="#print-command" aria-describedby="print-command">Copy</button>
 </div>
+</li>
+<li>
+<span>Run it</span>
+<div class="copyrow">
+<pre id="claude-command">cd $DATA/worktrees/1 &amp;&amp; env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-7 --restricted --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --add-dir $DATA/runs/1 --add-dir /skills/review</pre>
+<button class="btn" type="button" data-copy="#claude-command" aria-describedby="claude-command">Copy</button>
+</div>
+</li>
+<li>
+<span>Remove the worktree afterwards</span>
+<div class="copyrow">
+<pre id="cleanup-command">$EXE chat --cleanup 1 --config '/config/sanic review.toml' --data-dir $DATA</pre>
+<button class="btn" type="button" data-copy="#cleanup-command" aria-describedby="cleanup-command">Copy</button>
+</div>
+</li>
+</ol>
 </details>
 </section>

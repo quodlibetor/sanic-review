@@ -36,15 +36,25 @@ fn claude_line(app: &App, session: &SessionRun) -> Result<String, String> {
         .shell_line())
 }
 
-/// The PR page's chat section, if a review of `key` has a session. A
-/// failed read shows in the section, not instead of the page.
-pub fn section(app: &App, key: &PrKey) -> Option<Markup> {
-    let session = match app.store().latest_session_run(key) {
+/// The PR page's chat section, if a review of `key` has a session: the
+/// run whose drafts the page shows, `shown`, if it has one, else the
+/// latest that does. A failed read shows in the section, not instead of
+/// the page.
+pub fn section(app: &App, key: &PrKey, shown: Option<i64>) -> Option<Markup> {
+    let found = {
+        let store = app.store();
+        match shown.map(|id| store.session_run(id)).transpose() {
+            Ok(Some(Some(session))) => Ok(Some(session)),
+            Ok(_) => store.latest_session_run(key),
+            Err(err) => Err(err),
+        }
+    };
+    let session = match found {
         Ok(session) => session?,
         Err(err) => {
             tracing::warn!(url = %key.url(), "finding a session to chat with failed: {err:?}");
             return Some(html! {
-                section #chat {
+                section.chat #chat {
                     h2 { "Chat with the reviewer" }
                     p.error { "Couldn't look for a session to chat with: " (format!("{err:#}")) }
                 }
@@ -52,43 +62,53 @@ pub fn section(app: &App, key: &PrKey) -> Option<Markup> {
         }
     };
     let id = session.run.id;
-    let chat = cli(app, &id.to_string());
     let claude = claude_line(app, &session);
     Some(html! {
-        section #chat {
-            h2 { "Chat with the reviewer" }
+        section.chat #chat {
+            h2 {
+                "Chat with the reviewer "
+                span.dim { "run " (id) @if claude.is_ok() { " · paste into a terminal" } }
+            }
             @match &claude {
                 Err(why) => { p.error { "Can't chat with run " (id) ": " (why) } }
                 Ok(line) => {
-                    p {
-                        "Ask the agent that did run " (id) " about its review. Paste this into a "
-                        "terminal:"
-                    }
-                    div.copyable {
-                        pre #chat-command { code { (chat) } }
-                        button type="button" data-copy="#chat-command" { "Copy" }
-                    }
-                    p.dim {
-                        "It checks the review's worktree out again, at the path the review used, "
-                        "and removes it when the chat ends. The agent keeps the review's limits: "
-                        "read-only tools and no GitHub token. Add " code { "--allow-edits" }
-                        " to let it edit that copy of the worktree."
+                    (copy_row("chat-command", &cli(app, &id.to_string())))
+                    p.note {
+                        "Checks the review's worktree out again and removes it when the chat "
+                        "ends. Read-only, no GitHub token; add " code { "--allow-edits" }
+                        " to let it edit that copy."
                     }
                     details {
-                        summary { "Or run claude yourself" }
-                        p {
-                            "This needs the worktree, which "
-                            code { (cli(app, &format!("--print-command {id}"))) }
-                            " checks out and prints this line for. Remove the worktree "
-                            "afterwards with " code { (cli(app, &format!("--cleanup {id}"))) } "."
-                        }
-                        div.copyable {
-                            pre #claude-command { code { (line) } }
-                            button type="button" data-copy="#claude-command" { "Copy" }
+                        summary { "Run claude yourself instead" }
+                        ol {
+                            li {
+                                span { "Check out the worktree and print the claude line" }
+                                (copy_row("print-command", &cli(app, &format!("--print-command {id}"))))
+                            }
+                            li {
+                                span { "Run it" }
+                                (copy_row("claude-command", line))
+                            }
+                            li {
+                                span { "Remove the worktree afterwards" }
+                                (copy_row("cleanup-command", &cli(app, &format!("--cleanup {id}"))))
+                            }
                         }
                     }
                 }
             }
         }
     })
+}
+
+/// A command on one line, scrolling sideways rather than wrapping, with a
+/// button that copies it.
+fn copy_row(id: &str, command: &str) -> Markup {
+    html! {
+        div.copyrow {
+            pre #(id) { (command) }
+            // Named by the command it copies, where there are several.
+            button.btn type="button" data-copy={ "#" (id) } aria-describedby=(id) { "Copy" }
+        }
+    }
 }

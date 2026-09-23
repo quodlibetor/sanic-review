@@ -83,7 +83,7 @@ pub async fn page(
         Some(run) => read_diff(&app, run.id),
         None => None,
     };
-    let chat = chat::section(&app, &key);
+    let chat = chat::section(&app, &key, shown.as_ref().map(|run| run.id));
     let content = html! {
         (pr_header(&app, &pr, state, owed, &overview, chat.is_some()))
         @if !pr.body.trim().is_empty() {
@@ -92,11 +92,12 @@ pub async fn page(
                 pre { (pr.body) }
             }
         }
-        @if let Some(chat) = &chat { (chat) }
         (run_list(&pr.key, &runs, shown.as_ref()))
         @if let Some(run) = &shown {
             (drafts_section(&app, &pr, run, &drafts, diff.as_ref()))
         }
+        // After the drafts: it's for once you've read them.
+        @if let Some(chat) = &chat { (chat) }
     };
     Ok(page::layout(&app, Kind::Pr, &pr.title, &content))
 }

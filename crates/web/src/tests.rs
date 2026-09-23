@@ -1203,7 +1203,7 @@ async fn pages_set_a_same_origin_referrer_policy() {
 async fn the_pr_page_shows_how_to_chat_with_the_reviewer() {
     let f = fixture(false).await;
     let page = f.get("/pr/org/repo/7").await.body;
-    let chat = &page[page.find(r#"<section id="chat">"#).unwrap()..];
+    let chat = &page[page.find(r#"<section class="chat" id="chat">"#).unwrap()..];
     let chat = &chat[..chat.find("</section>").unwrap() + "</section>".len()];
     insta::assert_snapshot!(readable(&f, chat));
     // Nothing ran: the worktree is only named, never made.
@@ -1444,4 +1444,41 @@ async fn the_preview_says_what_the_review_leaves_out_and_where_it_lands() {
         r#"href="/pr/org/repo/7?run={}#draft-{}""#,
         f.run, f.drafts[1]
     )));
+}
+
+#[tokio::test]
+async fn the_chat_card_is_for_the_run_whose_drafts_the_page_shows() {
+    let f = fixture(false).await;
+    let newer = {
+        let mut store = f.dashboard.app.store();
+        let run = store
+            .queue_review(&ReviewRequest {
+                key: key(7),
+                profile: "default".into(),
+                head_sha: "newer".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap()
+            .id;
+        store.claim_run(run).unwrap();
+        store
+            .finish_review(
+                run,
+                &ReviewResult {
+                    summary: "Fine now.".into(),
+                    verdict: Verdict::Comment,
+                    comments: vec![],
+                    session_id: Some("sess-newer".into()),
+                    transcript_path: "t".into(),
+                },
+            )
+            .unwrap();
+        run
+    };
+    let latest = f.get("/pr/org/repo/7").await.body;
+    assert!(latest.contains(&format!("chat {newer} ")), "{latest}");
+    let older = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await.body;
+    assert!(older.contains(&format!("chat {} ", f.run)), "{older}");
 }
