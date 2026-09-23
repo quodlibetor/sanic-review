@@ -155,12 +155,12 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// Fetches `key`, detects triggers against the stored baseline, and
-    /// stores the new baseline. `None` if the PR is gone or matches no
-    /// profile.
+    /// stores the new baseline. `None` if the PR is gone, closed or matches
+    /// no profile.
     pub async fn refresh(&mut self, key: &PrKey) -> Result<Option<Refreshed>, ApiError> {
         let with_files = self.config.needs_files(&key.repo);
         let Some(mut snapshot) = self.github.pull_request(key, &self.me, with_files).await? else {
-            tracing::debug!(pr = %key, "not visible; skipping");
+            tracing::debug!(pr = %key, "not open or not visible; skipping");
             return Ok(None);
         };
         let filter = &self.config.review_requests.teams;

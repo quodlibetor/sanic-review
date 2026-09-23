@@ -152,6 +152,9 @@ polls:
 Both loops write normalized rows. Triggers are computed by diffing GitHub state
 against stored state, never from notification payloads.
 
+- **Open PRs only.** A notification can point at a closed or merged PR,
+  which still lists its pending review requests. Refreshes skip those PRs,
+  so they don't look like new requests.
 - **Team review requests.** A review requested from a team counts as a
   request to you if you're a member of that team (from `GET /user/teams`,
   refreshed on each reconcile; needs `read:org`) and `review_requests.teams`
