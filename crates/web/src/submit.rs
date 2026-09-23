@@ -1,23 +1,27 @@
 //! Submitting a review: a preview of the exact payload, then, only when
 //! you confirm, the one GitHub write.
 
-use std::fmt::Write as _;
+use std::{
+    fmt::Write as _,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Form,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
 use sanic_core::{pr::PrKey, run::Side};
 use sanic_github::{ApiError, NewComment, NewReview, ReviewEvent};
 use sanic_store::{DraftRow, PrPage, ReviewRun};
-use serde::{Deserialize, de::IntoDeserializer as _};
+use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::{
     App, Error, Shared,
+    guard::Csrf,
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
     pr, pr_href,
 };
@@ -242,45 +246,91 @@ fn wire(review: &NewReview) -> Result<String, Error> {
     Ok(serde_json::to_string(review).map_err(color_eyre::Report::from)?)
 }
 
+/// How long a pick lasts: long enough to read the preview, short enough
+/// that an old preview URL, from history, has none.
+pub(crate) const PICK_TTL: Duration = Duration::from_mins(10);
+
+/// An approval picked on the PR page's verdict form. Approve is never
+/// taken from a URL alone: only that form, a post behind the CSRF guard,
+/// hands out a pick, and its id goes in the preview URL and the confirm
+/// form. Posting the approval uses it up, and it expires, so replaying a
+/// preview from history doesn't bring an approval back.
+#[derive(Debug)]
+pub struct Pick {
+    run: i64,
+    expires: SystemTime,
+    /// The payload its preview last showed, the one it may post.
+    shown: Option<String>,
+}
+
+impl Pick {
+    fn live(&self, run: i64, now: SystemTime) -> bool {
+        self.run == run && now < self.expires
+    }
+}
+
+/// What an approval without a live pick is told.
+const PICK_AGAIN: &str =
+    "This approval's pick is used up or expired: pick Approve again on the PR page.";
+
+#[derive(Debug, Deserialize)]
+pub struct VerdictForm {
+    event: ReviewEvent,
+}
+
+/// The PR page's verdict form: on to the preview, with a new pick for an
+/// approval.
+pub async fn pick(
+    State(app): State<Shared>,
+    Path(path): Path<RunPath>,
+    Form(form): Form<VerdictForm>,
+) -> Result<Response, Error> {
+    let key = path.pr().key()?;
+    let preview = format!(
+        "{}/runs/{}/preview?event={}",
+        pr_href(&key),
+        path.run,
+        form.event.as_str()
+    );
+    if form.event != ReviewEvent::Approve {
+        return Ok(Redirect::to(&preview).into_response());
+    }
+    let id = Csrf::generate()?.token().to_owned();
+    let now = app.clock.now();
+    let mut picks = app.picks();
+    picks.retain(|_, pick| now < pick.expires);
+    picks.insert(
+        id.clone(),
+        Pick {
+            run: path.run,
+            expires: now + PICK_TTL,
+            shown: None,
+        },
+    );
+    Ok(Redirect::to(&format!("{preview}&pick={id}")).into_response())
+}
+
+/// Whether pick `id` is live and for `run`.
+fn picked(app: &App, id: &str, run: i64) -> bool {
+    let now = app.clock.now();
+    app.picks().get(id).is_some_and(|pick| pick.live(run, now))
+}
+
+/// Uses up pick `id` to post `payload` from `run`, if it's live, for that
+/// run, and its preview showed that payload.
+fn take_pick(app: &App, id: &str, run: i64, payload: &str) -> bool {
+    let now = app.clock.now();
+    app.picks()
+        .remove(id)
+        .is_some_and(|pick| pick.live(run, now) && pick.shown.as_deref() == Some(payload))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PreviewQuery {
-    event: Verdict,
-}
-
-/// A verdict as the PR page's verdict form sends it. Approve's radio adds
-/// [`App::approve_pick`] after the verdict, so the pick comes only with
-/// Approve: a preview URL for another verdict, edited to say Approve,
-/// doesn't have it.
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "String")]
-struct Verdict {
     event: ReviewEvent,
-    picked: String,
-}
-
-impl TryFrom<String> for Verdict {
-    type Error = serde::de::value::Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let (event, picked) = value.split_once(':').unwrap_or((&value, ""));
-        Ok(Self {
-            event: ReviewEvent::deserialize(event.into_deserializer())?,
-            picked: picked.to_owned(),
-        })
-    }
-}
-
-/// The value of the verdict form's Approve radio; see [`Verdict`].
-pub fn approve_value(app: &App) -> String {
-    verdict_value(ReviewEvent::Approve, app.approve_pick.token())
-}
-
-fn verdict_value(event: ReviewEvent, picked: &str) -> String {
-    if event == ReviewEvent::Approve {
-        format!("{}:{picked}", event.as_str())
-    } else {
-        event.as_str().to_owned()
-    }
+    /// An approval's pick; see [`Pick`].
+    #[serde(default)]
+    pick: String,
 }
 
 pub async fn preview(
@@ -288,15 +338,12 @@ pub async fn preview(
     Path(path): Path<RunPath>,
     Query(query): Query<PreviewQuery>,
 ) -> Result<Response, Error> {
-    let Verdict { event, picked } = query.event;
+    let PreviewQuery { event, pick } = query;
+    if event == ReviewEvent::Approve && !picked(&app, &pick, path.run) {
+        return Err(Error::Refused(PICK_AGAIN.into()));
+    }
     let (pr, built) = load(&app, &path, event)?;
     let back = format!("{}?run={}", pr_href(&pr.key), path.run);
-    // Approve is never taken from a URL alone: it's picked on the PR page.
-    let built = if event == ReviewEvent::Approve && !app.approve_pick.matches(&picked) {
-        Err("Approve is picked on the PR page, with the verdict: go back and pick it there.".into())
-    } else {
-        built
-    };
     let built = match built {
         Ok(built) => built,
         Err(why) => {
@@ -320,6 +367,13 @@ pub async fn preview(
     let action = format!("{}/runs/{}/submit", pr_href(&pr.key), path.run);
     let review = &built.review;
     let approve = review.event == ReviewEvent::Approve;
+    let payload = wire(review)?;
+    if approve {
+        // The confirm may post only what this preview shows.
+        if let Some(pick) = app.picks().get_mut(&pick) {
+            pick.shown = Some(payload.clone());
+        }
+    }
     let (chip, verdict_class) = match review.event {
         ReviewEvent::Comment => ("COMMENT", "cm"),
         ReviewEvent::RequestChanges => ("REQUEST CHANGES", "rc"),
@@ -350,13 +404,18 @@ pub async fn preview(
         form.foot #confirm method="post" action=(action) {
             (csrf_field(&app))
             input type="hidden" name="event" value=(review.event.as_str());
-            input type="hidden" name="payload" value=(wire(review)?);
+            input type="hidden" name="payload" value=(payload);
             @if approve {
-                input type="hidden" name="picked" value=(picked);
+                input type="hidden" name="pick" value=(pick);
             }
             button.btn.go type="submit" {
-                @if approve { "Approve this PR with the above comments" }
-                @else { "Confirm and post to GitHub" }
+                @if approve && review.body.is_empty() && review.comments.is_empty() {
+                    "Approve this PR"
+                } @else if approve {
+                    "Approve this PR with the above comments"
+                } @else {
+                    "Confirm and post to GitHub"
+                }
                 (keycap("y"))
             }
             a.btn #cancel href=(back) { "Back to the drafts" (keycap("Esc")) }
@@ -387,11 +446,7 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
         });
     }
     if review.commit_id != pr.head_sha {
-        checks.push(html! {
-            "The review is of " code { (pr::short(&review.commit_id)) }
-            "; the PR is now at " code { (pr::short(&pr.head_sha)) }
-            ". Comments land on the older commit."
-        });
+        checks.push(pr::moved_on(&review.commit_id, &pr.head_sha));
     }
     if built.in_body > 0 {
         checks.push(html! {
@@ -464,9 +519,9 @@ pub struct SubmitForm {
     event: ReviewEvent,
     /// The payload the preview showed, as [`wire`] wrote it.
     payload: String,
-    /// As the preview had it; see [`Verdict`].
+    /// An approval's pick, as the preview had it; see [`Pick`].
     #[serde(default)]
-    picked: String,
+    pick: String,
 }
 
 /// Posts the review, if it's still exactly what the preview showed. One
@@ -476,10 +531,9 @@ pub async fn submit(
     Path(path): Path<RunPath>,
     Form(form): Form<SubmitForm>,
 ) -> Result<Response, Error> {
-    if form.event == ReviewEvent::Approve && !app.approve_pick.matches(&form.picked) {
-        return Err(Error::Refused(
-            "Approve is picked on the PR page; nothing was sent".into(),
-        ));
+    let approve = form.event == ReviewEvent::Approve;
+    if approve && !take_pick(&app, &form.pick, path.run, &form.payload) {
+        return Err(Error::Refused(format!("{PICK_AGAIN} Nothing was sent.")));
     }
     let mut posted_before = app.posting.lock().await;
     let (pr, built) = load(&app, &path, form.event)?;
@@ -491,13 +545,11 @@ pub async fn submit(
             built
         }
         _ => {
-            // The pick is already checked, so it can go along: without it,
-            // an approval's preview would be refused.
             let preview = format!(
                 "{}/runs/{}/preview?event={}",
                 pr_href(key),
                 path.run,
-                verdict_value(form.event, &form.picked)
+                form.event.as_str()
             );
             let content = result_card(
                 &pr,
@@ -506,9 +558,13 @@ pub async fn submit(
                     p.note {
                         "The drafts changed since the preview, or were already posted, so "
                         "nothing was sent."
+                        // Its pick is used up.
+                        @if approve { " Pick Approve again on the PR page." }
                     }
                 },
-                html! { a.btn.primary href=(preview) { "Preview again" } },
+                html! {
+                    @if !approve { a.btn.primary href=(preview) { "Preview again" } }
+                },
                 (&back, "Back to the drafts"),
                 Tone::Ask,
             );

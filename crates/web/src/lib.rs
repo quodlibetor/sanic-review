@@ -108,9 +108,9 @@ struct App {
     window: watch::Receiver<Option<u32>>,
     clock: Arc<dyn Clock>,
     csrf: Csrf,
-    /// Carried by the PR page's Approve radio, so a preview or submit of an
-    /// approval proves you picked Approve there, not just in a URL.
-    approve_pick: Csrf,
+    /// Approvals picked on the PR page's verdict form, by pick id; see
+    /// [`submit::Pick`].
+    picks: Mutex<HashMap<String, submit::Pick>>,
     /// Held while a review is being posted, so two confirms can't both
     /// post before either marks its drafts posted. It holds each run's
     /// posted payloads, as `<run>:<payload>`, so a second confirm of an
@@ -121,6 +121,10 @@ struct App {
 impl App {
     fn store(&self) -> MutexGuard<'_, Store> {
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn picks(&self) -> MutexGuard<'_, HashMap<String, submit::Pick>> {
+        self.picks.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -160,7 +164,7 @@ impl Dashboard {
                 window,
                 clock,
                 csrf: Csrf::generate()?,
-                approve_pick: Csrf::generate()?,
+                picks: Mutex::new(HashMap::new()),
                 posting: tokio::sync::Mutex::new(HashSet::new()),
             }),
         })
@@ -185,7 +189,7 @@ impl Dashboard {
             )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/preview",
-                get(submit::preview),
+                get(submit::preview).post(submit::pick),
             )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/submit",

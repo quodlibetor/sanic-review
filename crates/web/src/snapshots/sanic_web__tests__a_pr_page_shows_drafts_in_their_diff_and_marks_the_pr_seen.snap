@@ -60,7 +60,8 @@ expression: "readable(&f, &page.body)"
 </details>
 </div>
 </div>
-<form class="rbar" id="review-bar" method="get" action="/pr/org/repo/7/runs/1/preview">
+<form class="rbar" id="review-bar" method="post" action="/pr/org/repo/7/runs/1/preview">
+<input type="hidden" name="csrf" value="<token>">
 <span class="tally">
 <b data-count="pending">3</b> pending · <b class="ok" data-count="accepted">0</b> accepted · <b data-count="rejected">0</b> rejected</span>
 <span class="sp">
@@ -71,7 +72,7 @@ expression: "readable(&f, &page.body)"
 <input type="radio" name="event" value="REQUEST_CHANGES" checked>Request changes<span class="sugg" title="The agent's suggestion. It never suggests approving.">suggested</span>
 </label>
 <label>
-<input type="radio" name="event" value="APPROVE:<pick>">Approve</label>
+<input type="radio" name="event" value="APPROVE">Approve</label>
 </span>
 <button class="btn go" id="preview" type="submit">Preview the review<span class="k">p</span>
 </button>

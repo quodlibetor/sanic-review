@@ -98,11 +98,20 @@ impl Control for FakeServe {
     }
 }
 
-struct FixedClock;
+/// A clock that moves only when a test moves it.
+struct FixedClock(Mutex<SystemTime>);
+
+impl Default for FixedClock {
+    fn default() -> Self {
+        Self(Mutex::new(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_181_231),
+        ))
+    }
+}
 
 impl Clock for FixedClock {
     fn now(&self) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_181_231)
+        *self.0.lock().unwrap()
     }
 }
 
@@ -174,6 +183,7 @@ struct Fixture {
     run: i64,
     drafts: [i64; 3],
     data: TempDir,
+    clock: Arc<FixedClock>,
 }
 
 /// The fixture's PRs: 7 you owe, reviewed, where alice answered you; 8 you
@@ -276,6 +286,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     let github = MockServer::start().await;
     let serve = Arc::new(FakeServe::default());
     let (due, due_rx) = watch::channel(HashMap::new());
+    let clock = Arc::new(FixedClock::default());
     let dashboard = Dashboard::new(Context {
         me: "me".into(),
         manual_reviews,
@@ -287,7 +298,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         due: due_rx,
         skips: watch::channel(skip_rules()).1,
         window: watch::channel(None).1,
-        clock: Arc::new(FixedClock),
+        clock: Arc::clone(&clock) as Arc<dyn Clock>,
     })
     .unwrap();
     Fixture {
@@ -298,6 +309,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         run,
         drafts: [ids[0], ids[1], ids[2]],
         data,
+        clock,
     }
 }
 
@@ -385,26 +397,23 @@ impl Fixture {
         store.draft_row(self.drafts[i]).unwrap().unwrap().status
     }
 
-    /// The preview, as the PR page's verdict form asks for it: Approve's
-    /// radio carries the pick.
+    /// The preview with the verdict in the URL alone, as a link has it:
+    /// an approval's isn't picked.
     fn preview_uri(&self, event: &str) -> String {
-        if event == "APPROVE" {
-            format!("{}:{}", self.unpicked_preview_uri(event), self.pick())
-        } else {
-            self.unpicked_preview_uri(event)
-        }
-    }
-
-    /// The preview with the verdict in the URL alone, not picked on the PR
-    /// page.
-    fn unpicked_preview_uri(&self, event: &str) -> String {
         format!("/pr/org/repo/7/runs/{}/preview?event={event}", self.run)
     }
 
-    /// What the PR page's verdict form says, to show the verdict was
-    /// picked there.
-    fn pick(&self) -> String {
-        self.dashboard.app.approve_pick.token().to_owned()
+    /// Where the PR page's verdict form, sent with `event`, goes: for
+    /// Approve, with a new pick.
+    async fn picked_preview_uri(&self, event: &str) -> String {
+        let form = format!("/pr/org/repo/7/runs/{}/preview", self.run);
+        let reply = self.post(&form, &[("event", event)]).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+        reply.headers[header::LOCATION].to_str().unwrap().to_owned()
+    }
+
+    fn advance(&self, by: Duration) {
+        *self.clock.0.lock().unwrap() += by;
     }
 
     fn submit_uri(&self) -> String {
@@ -413,7 +422,7 @@ impl Fixture {
 
     /// The payload the preview's confirm form would send back.
     async fn previewed_payload(&self, event: &str) -> String {
-        let page = self.get(&self.preview_uri(event)).await;
+        let page = self.get(&self.picked_preview_uri(event).await).await;
         assert_eq!(page.status, StatusCode::OK, "{}", page.body);
         hidden_value(&page.body, "payload")
     }
@@ -458,7 +467,6 @@ fn readable(fixture: &Fixture, html: &str) -> String {
             html.replace(&format!(" -u {} ", sanic_runner::chat::quote(var)), " ")
         });
     html.replace(&fixture.token(), "<token>")
-        .replace(&fixture.pick(), "<pick>")
         // Not `<data>`: the tag split below would put a newline in the
         // command it ends.
         .replace(&fixture.data.path().display().to_string(), "$DATA")
@@ -737,13 +745,14 @@ async fn a_payload_that_changed_since_the_preview_is_not_posted() {
     assert!(reply.body.contains("nothing was sent"));
     // A different verdict is a different payload too.
     let payload = f.previewed_payload("COMMENT").await;
+    let approval = f.get(&f.picked_preview_uri("APPROVE").await).await.body;
     let reply = f
         .post(
             &f.submit_uri(),
             &[
                 ("event", "APPROVE"),
                 ("payload", &payload),
-                ("picked", &f.pick()),
+                ("pick", &hidden_value(&approval, "pick")),
             ],
         )
         .await;
@@ -806,49 +815,93 @@ async fn nothing_accepted_means_nothing_to_submit_except_an_approval() {
         .expect(1)
         .mount(&f.github)
         .await;
-    // Approve in a URL alone isn't picked: the PR page's verdict form
-    // says it was.
-    let unpicked = f.get(&f.unpicked_preview_uri("APPROVE")).await;
+    // Approve in a URL alone isn't picked: only the PR page's verdict
+    // form, a post, hands out a pick.
+    let unpicked = f.get(&f.preview_uri("APPROVE")).await;
     assert_eq!(unpicked.status, StatusCode::CONFLICT);
-    assert!(unpicked.body.contains("Approve is picked on the PR page"));
-    // Only Approve's radio carries the pick, so another verdict's preview
-    // URL, edited to say Approve, doesn't have it.
+    assert!(unpicked.body.contains("pick Approve again on the PR page"));
     let pr_page = f.get("/pr/org/repo/7").await.body;
-    assert_eq!(pr_page.matches(&f.pick()).count(), 1, "{pr_page}");
-    assert!(pr_page.contains(&format!(r#"value="APPROVE:{}""#, f.pick())));
-    let edited = format!("{}&picked={}", f.unpicked_preview_uri("APPROVE"), f.pick());
-    assert_eq!(f.get(&edited).await.status, StatusCode::CONFLICT);
-    let preview = f.get(&f.preview_uri("APPROVE")).await.body;
-    assert!(
-        preview.contains("Approve this PR with the above comments"),
-        "{preview}"
+    assert!(pr_page.contains(r#"method="post""#), "{pr_page}");
+    assert!(pr_page.contains(r#"value="APPROVE""#), "{pr_page}");
+    // Another verdict's form goes to its preview with no pick.
+    assert_eq!(
+        f.picked_preview_uri("COMMENT").await,
+        f.preview_uri("COMMENT")
     );
+    let uri = f.picked_preview_uri("APPROVE").await;
+    let preview = f.get(&uri).await.body;
+    assert!(preview.contains(">Approve this PR<"), "{preview}");
     assert!(!preview.contains(r#"type="checkbox""#));
+    let pick = hidden_value(&preview, "pick");
+    assert!(uri.ends_with(&format!("&pick={pick}")), "{uri}");
     let without_pick = [("event", "APPROVE"), ("payload", payload.as_str())];
     assert_eq!(
         f.post(&f.submit_uri(), &without_pick).await.status,
         StatusCode::CONFLICT
     );
-    let pick = f.pick();
     let confirm = [
         ("event", "APPROVE"),
         ("payload", payload.as_str()),
-        ("picked", pick.as_str()),
+        ("pick", pick.as_str()),
     ];
     assert_eq!(
         f.post(&f.submit_uri(), &confirm).await.status,
         StatusCode::OK
     );
+    // Posting used the pick up: neither the confirm nor its preview, from
+    // history, comes back.
     let again = f.post(&f.submit_uri(), &confirm).await;
     assert_eq!(again.status, StatusCode::CONFLICT);
-    // Its "Preview again" keeps the pick, so it isn't refused.
-    let preview_again = f.preview_uri("APPROVE");
-    assert!(
-        again.body.contains(&format!(r#"href="{preview_again}""#)),
-        "{}",
-        again.body
+    assert!(again.body.contains("pick Approve again on the PR page"));
+    let replayed = f.get(&uri).await;
+    assert_eq!(replayed.status, StatusCode::CONFLICT);
+    assert!(replayed.body.contains("pick Approve again on the PR page"));
+}
+
+#[tokio::test]
+async fn an_approval_pick_expires_and_is_for_its_run() {
+    let f = fixture(false).await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    let uri = f.picked_preview_uri("APPROVE").await;
+    let preview = f.get(&uri).await.body;
+    let (payload, pick) = (
+        hidden_value(&preview, "payload"),
+        hidden_value(&preview, "pick"),
     );
-    assert_eq!(f.get(&preview_again).await.status, StatusCode::OK);
+    let confirm = [("event", "APPROVE"), ("payload", &payload), ("pick", &pick)];
+    // Another run's confirm can't use it.
+    let other = format!("/pr/org/repo/7/runs/{}/submit", f.run + 1);
+    assert_eq!(f.post(&other, &confirm).await.status, StatusCode::CONFLICT);
+    let other = uri.replace(
+        &format!("/runs/{}/", f.run),
+        &format!("/runs/{}/", f.run + 1),
+    );
+    assert_eq!(f.get(&other).await.status, StatusCode::CONFLICT);
+    // Nor, once it's expired, can its own.
+    let uri = f.picked_preview_uri("APPROVE").await;
+    let preview = f.get(&uri).await.body;
+    f.advance(crate::submit::PICK_TTL);
+    assert_eq!(f.get(&uri).await.status, StatusCode::CONFLICT);
+    let expired = f
+        .post(
+            &f.submit_uri(),
+            &[
+                ("event", "APPROVE"),
+                ("payload", &hidden_value(&preview, "payload")),
+                ("pick", &hidden_value(&preview, "pick")),
+            ],
+        )
+        .await;
+    assert_eq!(expired.status, StatusCode::CONFLICT);
+    assert!(
+        expired.body.contains("Nothing was sent"),
+        "{}",
+        expired.body
+    );
 }
 
 #[tokio::test]
@@ -964,7 +1017,7 @@ async fn pages_another_site_opens_are_only_a_link_to_themselves() {
     };
     // A page on another site opens the confirm page, hoping you're typing
     // a `y`.
-    let preview = f.preview_uri("APPROVE");
+    let preview = f.picked_preview_uri("APPROVE").await;
     for site in ["cross-site", "same-site"] {
         let reply = f.send(opened(&preview, site)).await;
         assert_eq!(reply.status, StatusCode::OK);
@@ -1457,7 +1510,7 @@ async fn the_preview_says_what_the_review_leaves_out_and_where_it_lands() {
         .unwrap();
     let page = f.get(&f.preview_uri("COMMENT")).await.body;
     assert!(
-        page.contains("the PR is now at <code>newer</code>"),
+        page.contains("the PR has moved on to <code>newer</code>"),
         "{page}"
     );
     assert!(page.contains("<b>2</b> draft(s) still pending aren't included"));
