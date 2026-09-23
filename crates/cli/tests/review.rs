@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::{
+    ffi::OsStr,
     io::{BufRead, BufReader},
     os::unix::fs::PermissionsExt,
     path::Path,
@@ -209,13 +210,23 @@ impl World {
     }
 
     async fn serve_with_until(&self, extra: &[&str], needle: &'static str) -> String {
+        self.serve_with_data_dir_until(extra, self.data.as_os_str(), needle)
+            .await
+    }
+
+    async fn serve_with_data_dir_until(
+        &self,
+        extra: &[&str],
+        data_dir: &OsStr,
+        needle: &'static str,
+    ) -> String {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
             .arg("serve")
             .args(extra)
             .arg("--config")
             .arg(&self.config)
             .arg("--data-dir")
-            .arg(&self.data)
+            .arg(data_dir)
             .env("GITHUB_TOKEN", "t0ken")
             .env("GH_TOKEN", "t0ken")
             // The scheduler says at debug level when it skips a reviewed head.
@@ -322,4 +333,18 @@ async fn no_reviews_queues_without_running_until_a_normal_start() {
     // Held runs are still queued, so a normal start runs them.
     w.serve_until("drafted").await;
     assert!(w.fake.join("env").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relative_data_dir_still_reviews() {
+    let w = world().await;
+    // serve runs in the world's directory, so `data` is the same place as
+    // `w.data`, but git and claude run elsewhere.
+    let line = w
+        .serve_with_data_dir_until(&[], OsStr::new("data"), "drafted")
+        .await;
+    assert!(line.contains("org/repo#7"), "{line}");
+    let store = Store::open(&w.data.join("state.db")).unwrap();
+    assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
+    assert!(!w.data.join("worktrees/1").exists());
 }
