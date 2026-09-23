@@ -29,7 +29,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-pub use overview::{Activity, ActivityKind, MyPr, OwedReview, ReviewState};
+pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview, ReviewState};
 pub use runs::{Draft, RunCounts, RunRecord};
 
 /// A connection to the database. The poller and the runner each open their

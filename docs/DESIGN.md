@@ -364,10 +364,12 @@ available when tuning instruction files.
   TUI.
   - **Reviews you owe:** open PRs by others that request your review, with the
     latest run's status (queued, held by `--no-reviews`, running, drafted,
-    failed) and the pending draft count.
+    failed, crashed) and the pending draft count. A failed or crashed run
+    also shows the first line of its error.
   - **Your PRs:** every open PR you authored, with its review state
     (approved, changes requested, waiting) and pending drafts.
-  - **Activity:** recent triggers and run queues, starts and finishes.
+  - **Activity:** recent triggers and run queues, starts and finishes, with
+    the first line of the error for runs that failed or crashed.
   - **Log:** the tracing output.
 
   Every PR row shows its github.com URL, so it's clickable. Until the
