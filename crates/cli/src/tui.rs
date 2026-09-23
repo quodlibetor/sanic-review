@@ -284,8 +284,12 @@ pub struct App {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Overlay {
     Help,
-    /// Waiting for a yes before asking for a rerun of this PR's review.
-    ConfirmRerun(PrKey),
+    /// Waiting for a yes before asking for a review of this PR. `skipped`
+    /// says why it wouldn't be reviewed automatically, if it wouldn't.
+    ConfirmRerun {
+        key: PrKey,
+        skipped: Option<&'static str>,
+    },
 }
 
 /// What the loop does after a key.
@@ -389,7 +393,7 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.notice = None;
-        if let Some(Overlay::ConfirmRerun(pr)) = &self.overlay {
+        if let Some(Overlay::ConfirmRerun { key: pr, .. }) = &self.overlay {
             let pr = pr.clone();
             self.overlay = None;
             return match key.code {
@@ -428,22 +432,33 @@ impl App {
         Flow::Continue
     }
 
-    /// Asks to confirm a rerun of the selected review, if its latest run
-    /// failed or crashed.
+    /// Asks to confirm a review of the selected PR you owe, if its latest
+    /// run failed or crashed, or it's skipped or archived.
     fn ask_rerun(&mut self) {
         let selected = self.lists[Pane::Owed.index()]
             .selected()
-            .and_then(|i| self.overview.owed.get(i));
-        let rerunnable = |pr: &&OwedReview| {
-            pr.latest_run
-                .as_ref()
-                .is_some_and(|run| matches!(run.status.as_str(), "failed" | "crashed"))
+            .and_then(|i| self.overview.owed.get(i))
+            .filter(|_| self.focus == Pane::Owed);
+        let Some(pr) = selected else {
+            self.notice = Some(RERUN_HINT.into());
+            return;
         };
-        match selected.filter(rerunnable) {
-            Some(pr) if self.focus == Pane::Owed => {
-                self.overlay = Some(Overlay::ConfirmRerun(pr.key.clone()));
-            }
-            _ => self.notice = Some("r reruns a failed or crashed review you owe".into()),
+        let skipped = if pr.archived {
+            Some(Skip::Archived.label())
+        } else {
+            self.overview.skipped.get(&pr.key).map(Skip::label)
+        };
+        let failed = pr
+            .latest_run
+            .as_ref()
+            .is_some_and(|run| matches!(run.status.as_str(), "failed" | "crashed"));
+        if failed || skipped.is_some() {
+            self.overlay = Some(Overlay::ConfirmRerun {
+                key: pr.key.clone(),
+                skipped,
+            });
+        } else {
+            self.notice = Some(RERUN_HINT.into());
         }
     }
 
@@ -568,7 +583,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     );
     match overlay {
         Some(Overlay::Help) => render_help(frame),
-        Some(Overlay::ConfirmRerun(pr)) => render_confirm(frame, pr),
+        Some(Overlay::ConfirmRerun { key, skipped }) => render_confirm(frame, key, *skipped),
         None => {}
     }
 }
@@ -618,6 +633,8 @@ impl PaneFrame<'_> {
         frame.render_stateful_widget(list, area, state);
     }
 }
+
+const RERUN_HINT: &str = "r reviews a failed, crashed, skipped or archived PR you owe";
 
 /// Width of the status column in both PR panes, including the space that
 /// keeps a label as long as the column off what follows it.
@@ -783,7 +800,7 @@ const HELP: &[(&str, &str)] = &[
     ("Tab, Shift-Tab", "next, previous pane"),
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
-    ("r", "rerun a failed or crashed review"),
+    ("r", "review a failed or skipped PR again"),
     ("a", "archive or unarchive the selected PR"),
     ("A", "show or hide archived PRs"),
     ("?, Esc", "close this help"),
@@ -804,9 +821,13 @@ fn render_help(frame: &mut Frame<'_>) {
     render_popup(frame, " Keys ", lines);
 }
 
-fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey) {
+fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, skipped: Option<&str>) {
+    let head = match skipped {
+        Some(reason) => format!(" Review this {reason}-skipped PR anyway,"),
+        None => " Rerun the review of".into(),
+    };
     let lines = vec![
-        Line::raw(" Rerun the review of"),
+        Line::raw(head),
         Line::raw(format!(" {}", pr.url())),
         Line::raw(" at its current head? This spends tokens."),
         Line::raw(""),
@@ -1068,7 +1089,13 @@ mod tests {
         press(&mut app, KeyCode::End);
         assert_eq!(app.notice, None);
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.overlay, Some(Overlay::ConfirmRerun(pr("org/web", 79))));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 79),
+                skipped: None,
+            })
+        );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
         // Anything but `y` cancels.
         press(&mut app, KeyCode::Char('q'));
@@ -1151,6 +1178,27 @@ mod tests {
         // Nothing to archive in the other panes.
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.handle_key(key(KeyCode::Char('a'))), Flow::Continue);
+    }
+
+    #[test]
+    fn r_reviews_a_skipped_pr_anyway() {
+        let mut app = app(false);
+        // The second row is skipped by title.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/api", 490),
+                skipped: Some("title"),
+            })
+        );
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Flow::Request(Request::Rerun(pr("org/api", 490)))
+        );
     }
 
     #[test]

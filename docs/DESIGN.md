@@ -413,9 +413,11 @@ available when tuning instruction files.
   `a` archives or unarchives the selected PR in either PR pane. Archived
   PRs are hidden, and each pane's title counts them; `A` shows them,
   dimmed and marked `archived`.
-  `r` on a review you owe whose latest run failed or crashed asks for
-  confirmation, since it spends tokens, then queues a full review of the
-  PR's head as last polled. It goes through the store like any queued
+  `r` on a review you owe whose latest run failed or crashed, or that's
+  skipped or archived, asks for confirmation, since it spends tokens, then
+  queues a full review of the PR's head as last polled. For a skipped or
+  archived PR that's the way to review it anyway; it stays skipped or
+  archived. It goes through the store like any queued
   review: idempotency applies, `--no-reviews` holds it, and it's logged.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
