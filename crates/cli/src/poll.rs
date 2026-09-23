@@ -139,6 +139,13 @@ impl RefreshQueue {
     }
 }
 
+/// How far through its queue a refresh batch is, for the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
+}
+
 /// A refreshed PR that matched the config.
 #[derive(Debug)]
 pub struct Refreshed {

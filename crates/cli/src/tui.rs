@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use self::ignore::{IgnoreEditor, Outcome};
-use crate::{config_edit, logging::LogLines, schedule::DueTimes};
+use crate::{config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
 
 mod ignore;
 
@@ -141,6 +141,8 @@ pub struct Shared {
     pub skips: watch::Receiver<SkipRules>,
     /// `poll.updated_within_days`: PRs quiet for longer are left out.
     pub window: watch::Receiver<Option<u32>>,
+    /// The poller's refresh batch under way, if any.
+    pub progress: watch::Receiver<Option<Progress>>,
     pub clock: Arc<dyn Clock>,
     /// What you ask `serve` to do.
     pub requests: mpsc::UnboundedSender<Request>,
@@ -227,6 +229,8 @@ pub struct Overview {
     /// Newest first.
     pub activity: Vec<Activity>,
     pub counts: RunCounts,
+    /// The poller's refresh batch under way, if any.
+    pub refreshing: Option<Progress>,
     /// How long until each debounced review is queued.
     pub waiting: HashMap<PrKey, Duration>,
     /// Owed reviews that aren't reviewed automatically, and why.
@@ -266,6 +270,7 @@ impl Overview {
             mine: store.my_prs(&shared.me, since.as_deref())?,
             activity: store.recent_activity(ACTIVITY_ROWS)?,
             counts: store.run_counts()?,
+            refreshing: *shared.progress.borrow(),
             waiting,
         })
     }
@@ -662,13 +667,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     pane.highlight &= !*follow_log;
     pane.render(frame, log, rows, log_state, "");
 
-    render_status(
-        frame,
-        status,
-        &overview.counts,
-        *manual_reviews,
-        notice.as_deref(),
-    );
+    render_status(frame, status, overview, *manual_reviews, notice.as_deref());
     match overlay {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
@@ -858,10 +857,11 @@ fn activity_row(activity: &Activity) -> ListItem<'_> {
 fn render_status(
     frame: &mut Frame<'_>,
     area: Rect,
-    counts: &RunCounts,
+    overview: &Overview,
     manual_reviews: bool,
     notice: Option<&str>,
 ) {
+    let counts = &overview.counts;
     // A notice takes the whole line, so it isn't cut off at 80 columns.
     if let Some(notice) = notice {
         let notice = Span::styled(format!(" {notice}"), Style::new().fg(Color::Yellow));
@@ -880,7 +880,15 @@ fn render_status(
         Constraint::Length(u16::try_from(right.chars().count()).unwrap_or(u16::MAX)),
     ])
     .areas(area);
-    frame.render_widget(Paragraph::new(" ? help · q quit".dim()), left_area);
+    // The key hint makes room while the poller works through a batch.
+    let left = match overview.refreshing {
+        Some(p) => Span::styled(
+            format!(" refreshing {}/{}", p.done, p.total),
+            Style::new().fg(Color::Cyan),
+        ),
+        None => " ? help · q quit".dim(),
+    };
+    frame.render_widget(Paragraph::new(left), left_area);
     frame.render_widget(Paragraph::new(right), right_area);
 }
 
@@ -1069,6 +1077,7 @@ mod tests {
                 running: 0,
                 pending_drafts: 3,
             },
+            refreshing: None,
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
             profiles: vec!["default".into(), "vuln".into()],
             skipped: HashMap::from([(
@@ -1274,6 +1283,7 @@ mod tests {
             due: watch::channel(DueTimes::new()).1,
             skips: watch::channel(SkipRules::default()).1,
             window,
+            progress: watch::channel(None).1,
             clock: Arc::new(FixedClock),
             requests: mpsc::unbounded_channel().0,
             config_path: PathBuf::new(),
@@ -1285,6 +1295,22 @@ mod tests {
         assert_eq!(owed(&shared), [2]);
         window_tx.send_replace(None);
         assert_eq!(owed(&shared), [1, 2]);
+    }
+
+    #[test]
+    fn the_status_bar_counts_a_refresh_batch() {
+        let mut app = app(false);
+        let mut overview = overview();
+        overview.refreshing = Some(Progress {
+            done: 37,
+            total: 264,
+        });
+        app.set_overview(overview);
+        let terminal = draw(&mut app, 80, 24);
+        let row: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 23)].symbol().to_owned())
+            .collect();
+        assert!(row.starts_with(" refreshing 37/264 "), "{row}");
     }
 
     #[test]

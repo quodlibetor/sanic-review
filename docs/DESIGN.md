@@ -212,6 +212,11 @@ against stored state, never from notification payloads.
   notification pointed at. A PR is queued once, at its most urgent
   priority. A rate limit pauses everything and keeps the queue, priorities
   included.
+- **Progress.** Each reconcile logs what it found ("reconcile: 21 review
+  requests, 29 involving you, 50 queued"), and a notification poll that
+  queues PRs logs how many. A big refresh batch logs "refreshed 37/264"
+  every so often, and the TUI's status bar shows "refreshing 37/264" until
+  the queue is empty.
 
 ## Triggers
 
