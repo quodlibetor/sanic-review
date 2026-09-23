@@ -2,7 +2,10 @@
 
 use color_eyre::eyre::{WrapErr, eyre};
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, Comment, PrKey, PrSnapshot, Review, ReviewState, TeamRef, Thread},
+    pr::{
+        CONVERSATION_THREAD, Comment, PrKey, PrSnapshot, Review, ReviewState, TeamRef, Thread,
+        is_login,
+    },
     repo::RepoName,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -533,11 +536,7 @@ impl RawComment {
             .map(|r| r.nodes)
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| {
-                r.user
-                    .as_ref()
-                    .is_some_and(|u| u.login.eq_ignore_ascii_case(me))
-            })
+            .filter(|r| r.user.as_ref().is_some_and(|u| is_login(&u.login, me)))
             .map(|r| r.created_at.unwrap_or_else(|| created_at.clone()))
             .max()
             // The token is yours, so the viewer's reaction is yours; when
@@ -587,7 +586,7 @@ impl RawPr {
             r.requested_reviewer
                 .as_ref()
                 .and_then(|r| r.login.as_deref())
-                .is_some_and(|l| l.eq_ignore_ascii_case(me))
+                .is_some_and(|l| is_login(l, me))
         });
         let reviews = self
             .reviews
