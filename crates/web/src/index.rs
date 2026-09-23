@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use crate::{
     App, Error, Shared,
-    page::{self, Kind, countdown, csrf_field, drafts, first_line, github_link, state_cell},
+    page::{self, Kind, countdown, csrf_field, drafts, first_line, fitted_state_cell, github_link},
     pr_href,
 };
 
@@ -93,7 +93,7 @@ pub fn owed_status(
     overview: &Overview,
     manual_reviews: bool,
 ) -> (String, &'static str) {
-    let latest = pr.latest_run.as_ref().map(|run| run.status.as_str());
+    let latest = pr.latest_status();
     // A skip says why nothing will happen; a review waiting out the quiet
     // period is newer news than the last run.
     match (overview.waiting.get(&pr.key), latest) {
@@ -112,8 +112,11 @@ pub fn owed_status(
 
 /// Why a review of `pr` may be started by hand, as the TUI's `r` decides.
 pub fn why(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Option<Why> {
-    let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
-    Why::of(overview.skipped.get(&pr.key), status, manual_reviews)
+    Why::of(
+        overview.skipped.get(&pr.key),
+        pr.latest_status(),
+        manual_reviews,
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,7 +217,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
             data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
             data-ignore={ (href) "/ignore" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
-            (state_cell(pr.state))
+            (fitted_state_cell(pr.state))
             span.status.(class) { (label) }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))
@@ -247,7 +250,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
             @if pr.archived {
                 span.state.quiet { "archived" }
             } @else {
-                (state_cell(pr.state))
+                (fitted_state_cell(pr.state))
             }
             span.drafts { (drafts(pr.pending_drafts)) }
             (unseen(overview, &pr.key))

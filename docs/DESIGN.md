@@ -450,7 +450,9 @@ embedded in the binary, so nothing is fetched at runtime.
   and to its dashboard page. Each shows its PR state, as the TUI defines
   it: left of the run status in "Reviews you owe", and as the status in
   "Your PRs". The lists keep their columns aligned, as the TUI does, and
-  a state too long for its column is cut, with the whole of it on hover.
+  a state too long for its column is shortened as the TUI shortens it,
+  keeping its most pressing words, with the whole of it on hover. The
+  lists need CSS subgrid: Firefox 71+, Chrome 117+, Safari 16+.
   Short of room, a row cuts its GitHub link and wraps its actions before
   it narrows the title.
   Urgent states are highlighted, approved and mergeable ones green, the

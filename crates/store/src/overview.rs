@@ -32,6 +32,14 @@ pub struct OwedReview {
     pub pending_drafts: u32,
 }
 
+impl OwedReview {
+    /// The latest run's status, e.g. `failed`, if it has run at all.
+    #[must_use]
+    pub fn latest_status(&self) -> Option<&str> {
+        self.latest_run.as_ref().map(|run| run.status.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestRun {
     pub status: String,

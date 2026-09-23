@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::pr::Thread;
+use crate::pr::{Thread, is_login};
 
 /// What a PR's state is worked out from, as last polled.
 #[derive(Debug, Clone, Copy)]
@@ -115,7 +115,13 @@ impl PrState {
     /// same in short words, else the most pressing word alone.
     #[must_use]
     pub fn fitted(&self, width: usize) -> String {
-        let full = self.status();
+        self.fit(self.status(), width)
+    }
+
+    /// [`PrState::fitted`], given the [`PrState::status`] already built:
+    /// the dashboard shows both.
+    #[must_use]
+    pub fn fit(&self, full: String, width: usize) -> String {
         if full.chars().count() <= width {
             return full;
         }
@@ -212,7 +218,7 @@ fn decision_from<'a>(reviews: &[ReviewFact<'a>]) -> Option<&'static str> {
         }
         match latest
             .iter_mut()
-            .find(|seen| seen.author.eq_ignore_ascii_case(review.author))
+            .find(|seen| is_login(seen.author, review.author))
         {
             Some(seen) => seen.state = review.state,
             None => latest.push(review),
@@ -231,7 +237,7 @@ fn decision_from<'a>(reviews: &[ReviewFact<'a>]) -> Option<&'static str> {
 /// bot's) newer than your latest answer: your own comment, or your
 /// reaction to any comment in the thread.
 fn unanswered(facts: &StateFacts<'_>) -> u32 {
-    let is_me = |login: &str| login.eq_ignore_ascii_case(facts.me);
+    let is_me = |login: &str| is_login(login, facts.me);
     let count = facts
         .threads
         .iter()

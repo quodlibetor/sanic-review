@@ -169,8 +169,16 @@ pub struct Comment {
 impl PrSnapshot {
     #[must_use]
     pub fn is_authored_by(&self, login: &str) -> bool {
-        self.author.eq_ignore_ascii_case(login)
+        is_login(&self.author, login)
     }
+}
+
+/// Whether `login` and `other` name the same GitHub account: logins
+/// ignore case, ASCII only. The store's queries compare logins in SQL with
+/// `lower()`, which is the same rule; keep them in step.
+#[must_use]
+pub fn is_login(login: &str, other: &str) -> bool {
+    login.eq_ignore_ascii_case(other)
 }
 
 #[cfg(test)]

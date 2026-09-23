@@ -119,30 +119,54 @@ header.top {
   font-size: 1rem;
 }
 
+/* Columns, as the TUI keeps its panes' columns: state, run status (for
+   reviews you owe), drafts, the new mark, the GitHub link, the title, and
+   the actions. The list holds the grid and each row takes its columns
+   (subgrid), so a column is as wide as its widest cell in the list: the
+   state column fits the longest state, which page.rs has already fitted
+   to `STATE_COLUMN` characters, so it's never cut. The title keeps room
+   to be read: the link is cut and the actions wrap first. Needs CSS
+   subgrid: Firefox 71+, Chrome 117+, Safari 16+. */
 .rows {
+  display: grid;
+  column-gap: 0.75rem;
   list-style: none;
   margin: 0;
   padding: 0 0 0.5rem;
 }
 
-/* Columns, as the TUI keeps its panes' columns: state, run status (for
-   reviews you owe), drafts, the new mark, the GitHub link, the title, and
-   the actions. The title keeps room to be read: the link is cut and the
-   actions wrap first. */
+/* The run status wraps past 8rem: a skip names reviewers, and one long
+   login shouldn't widen every row's status. The title grows to its whole
+   length before the link does, since the link only takes what's left
+   (`1fr`), and the actions wrap past 12rem. */
+#owed .rows {
+  grid-template-columns:
+    max-content fit-content(8rem) max-content max-content
+    minmax(4rem, 1fr) minmax(8rem, max-content) fit-content(12rem);
+}
+
+#mine .rows {
+  grid-template-columns:
+    max-content max-content max-content minmax(4rem, max-content)
+    minmax(8rem, 1fr) auto;
+}
+
 .row {
   display: grid;
-  column-gap: 0.75rem;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: baseline;
-  padding: 0.2rem 0.3rem;
+  /* No side padding: the list's columns don't make room for it, so it
+     would push the actions past the pane. A selected row's background
+     reaches out with a shadow instead. */
+  padding: 0.2rem 0;
   border-radius: 4px;
 }
 
-#owed .row {
-  grid-template-columns: 12rem 8rem 5rem 2.5rem minmax(0, max-content) minmax(12rem, 1fr) auto;
-}
-
-#mine .row {
-  grid-template-columns: 12rem 5rem 2.5rem minmax(0, max-content) minmax(12rem, 1fr) auto;
+.row.selected {
+  box-shadow:
+    -0.3rem 0 0 var(--select),
+    0.3rem 0 0 var(--select);
 }
 
 .row.selected,
@@ -167,7 +191,6 @@ header.top {
   color: var(--dim);
 }
 
-.row .state,
 .row .gh {
   overflow: hidden;
   text-overflow: ellipsis;

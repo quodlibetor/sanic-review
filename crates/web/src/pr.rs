@@ -8,9 +8,14 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
-use sanic_core::{pr::PrKey, skip::Skip, start::Why, state::PrState};
+use sanic_core::{
+    pr::{PrKey, is_login},
+    skip::Skip,
+    start::Why,
+    state::PrState,
+};
 use sanic_runner::diff::DiffIndex;
-use sanic_store::{DraftRow, DraftStatus, PrPage, ReviewRun};
+use sanic_store::{DraftRow, DraftStatus, OwedReview, PrPage, ReviewRun};
 use serde::Deserialize;
 use tracing::info;
 
@@ -34,19 +39,26 @@ pub async fn page(
 ) -> Result<Markup, Error> {
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
+    let owed = overview.owed.iter().find(|o| o.key == key);
     let (pr, state, runs, shown, drafts) = {
         let store = app.store();
         let load = || -> color_eyre::Result<_> {
             let Some(pr) = store.pr_page(&key)? else {
                 return Ok(None);
             };
-            // From the store, not the overview: a PR outside the lists'
-            // recency window still has a state. A closed one has none.
-            let state = if pr.open {
-                let mine = pr.author.eq_ignore_ascii_case(&app.me);
-                Some(store.pr_state(&key, &app.me, mine)?)
-            } else {
-                None
+            // As the lists have it, or else from the store: a PR outside
+            // the lists' recency window still has a state. A closed one
+            // has none.
+            let listed = owed
+                .map(|o| o.state)
+                .or_else(|| overview.mine.iter().find(|m| m.key == key).map(|m| m.state));
+            let state = match listed {
+                _ if !pr.open => None,
+                Some(state) => Some(state),
+                None => {
+                    let mine = is_login(&pr.author, &app.me);
+                    Some(store.pr_state(&key, &app.me, mine)?)
+                }
             };
             let runs = store.review_runs(&key)?;
             let shown = match query.run {
@@ -71,7 +83,7 @@ pub async fn page(
     };
     let chat = chat::section(&app, &key);
     let content = html! {
-        (pr_header(&app, &pr, state, &overview, chat.is_some()))
+        (pr_header(&app, &pr, state, owed, &overview, chat.is_some()))
         @if !pr.body.trim().is_empty() {
             details.description {
                 summary { "Description" }
@@ -103,10 +115,10 @@ fn pr_header(
     app: &App,
     pr: &PrPage,
     state: Option<PrState>,
+    owed: Option<&OwedReview>,
     overview: &Overview,
     chat: bool,
 ) -> Markup {
-    let owed = overview.owed.iter().find(|o| o.key == pr.key);
     // `—` fills a column; in a sentence it says nothing.
     let state = state.filter(|state| !state.is_blank());
     let status = owed.map(|o| owed_status(o, overview, app.manual_reviews));

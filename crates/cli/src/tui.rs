@@ -572,9 +572,8 @@ impl App {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
-        let status = pr.latest_run.as_ref().map(|run| run.status.as_str());
         let skip = self.overview.skipped.get(&pr.key);
-        let Some(why) = Why::of(skip, status, self.manual_reviews) else {
+        let Some(why) = Why::of(skip, pr.latest_status(), self.manual_reviews) else {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
@@ -858,7 +857,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -
     let waiting = overview.waiting.get(&pr.key).copied();
     // A skip says why nothing will happen; a review waiting out the quiet
     // period is newer news than the last run.
-    let (label, color) = match (waiting, latest.map(|run| run.status.as_str())) {
+    let (label, color) = match (waiting, pr.latest_status()) {
         _ if pr.archived => ("archived".into(), Color::DarkGray),
         _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), Color::DarkGray),
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
