@@ -2608,6 +2608,7 @@ dependencies = [
  "sanic-github",
  "sanic-runner",
  "sanic-store",
+ "sanic-web",
  "serde_json",
  "similar 3.2.0",
  "tempfile",

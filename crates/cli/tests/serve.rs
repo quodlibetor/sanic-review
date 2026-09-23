@@ -136,6 +136,8 @@ async fn serve_logs_a_review_request_and_reloads_config() {
         // The config uses the real `claude` and github.com; only the quiet
         // period would otherwise keep a review from running.
         .arg("--manual-reviews")
+        // Any free port for the dashboard, so tests can run side by side.
+        .args(["--port", "0"])
         .arg("--config")
         .arg(&config)
         .arg("--data-dir")

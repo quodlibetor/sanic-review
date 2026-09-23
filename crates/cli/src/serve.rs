@@ -28,6 +28,7 @@ use sanic_core::{
 use sanic_github::{ApiError, Client, Token};
 use sanic_runner::vcs::VcsResolver;
 use sanic_store::Store;
+use sanic_web::Dashboard;
 use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep_until},
@@ -43,6 +44,10 @@ use crate::{
     work::Worker,
 };
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "it starts each of serve's tasks in turn; splitting it only scatters the wiring"
+)]
 pub async fn run(args: ServeArgs) -> Result<()> {
     // Absolute, because runs hand these paths to `git -C <mirror>` and to
     // `claude` running in a worktree, where relative ones would resolve
@@ -98,6 +103,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let (requests, requests_rx) = mpsc::unbounded_channel();
     let (due_tx, due) = watch::channel(DueTimes::new());
     let live = Live::new(&config);
+    let web = live.dashboard(
+        &me,
+        args.manual_reviews,
+        &data_dir,
+        &github,
+        &requests,
+        &due,
+    )?;
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
@@ -141,6 +154,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             start: started,
         }) => Ok(()),
         () = run_reviews(Arc::clone(&worker), runs_rx, started_rx) => Ok(()),
+        result = web.serve(args.port) => result,
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
@@ -166,6 +180,41 @@ impl Live {
     fn publish(&self, config: &Config) {
         self.skips.send_replace(config.skip_rules());
         self.window.send_replace(config.poll.updated_within_days);
+    }
+
+    /// The dashboard, on its own store connection, seeing what the TUI
+    /// sees.
+    fn dashboard(
+        &self,
+        me: &str,
+        manual_reviews: bool,
+        data_dir: &Path,
+        github: &Client,
+        requests: &mpsc::UnboundedSender<Request>,
+        due: &watch::Receiver<DueTimes>,
+    ) -> Result<Dashboard> {
+        Dashboard::new(sanic_web::Context {
+            me: me.to_owned(),
+            manual_reviews,
+            data_dir: data_dir.to_owned(),
+            store: Store::open(&data_dir.join("state.db"))?,
+            github: github.clone(),
+            control: Arc::new(DashboardControl(requests.clone())),
+            due: due.clone(),
+            skips: self.skips.subscribe(),
+            window: self.window.subscribe(),
+            clock: Arc::new(SystemClock),
+        })
+    }
+}
+
+/// The dashboard starts reviews the way the TUI's `r` does.
+struct DashboardControl(mpsc::UnboundedSender<Request>);
+
+impl sanic_web::Control for DashboardControl {
+    fn review_now(&self, key: PrKey) {
+        // Only fails once `serve` is stopping.
+        let _ = self.0.send(Request::Rerun(key));
     }
 }
 
@@ -212,7 +261,8 @@ async fn handle_requests(
     store: Arc<Mutex<Store>>,
     starter: Starter,
 ) {
-    // Closed from the start without the TUI; `review` requests still come.
+    // Open while the TUI or the dashboard can still send; `review`
+    // requests come either way.
     let mut open = true;
     let mut poll = tokio::time::interval(START_POLL);
     loop {
