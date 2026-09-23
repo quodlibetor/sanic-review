@@ -52,16 +52,24 @@ pub struct RunSettings {
     pub timeout: Duration,
     /// See `github.git_url`.
     pub git_url: String,
+    /// Read-only context for the agent; see `Config::reference_dirs`.
+    pub reference_dirs: Vec<PathBuf>,
 }
 
 impl RunSettings {
     #[must_use]
-    pub fn new(profile: AgentProfile, runner: &RunnerSettings, git_url: &str) -> Self {
+    pub fn new(
+        profile: AgentProfile,
+        runner: &RunnerSettings,
+        git_url: &str,
+        reference_dirs: Vec<PathBuf>,
+    ) -> Self {
         Self {
             profile,
             claude: runner.claude.clone(),
             timeout: runner.timeout,
             git_url: git_url.to_owned(),
+            reference_dirs,
         }
     }
 }
@@ -107,8 +115,7 @@ impl ReviewRunner {
             )
             .await?;
         let claude = Claude::new(settings.claude.clone(), settings.timeout);
-        let result =
-            Self::review_in(&claude, &worktree, &run_dir, run, ctx, &settings.profile).await;
+        let result = Self::review_in(&claude, &worktree, &run_dir, run, ctx, settings).await;
         worktree.remove().await;
         result
     }
@@ -119,8 +126,9 @@ impl ReviewRunner {
         run_dir: &Path,
         run: &QueuedRun,
         ctx: &PrContext,
-        profile: &AgentProfile,
+        settings: &RunSettings,
     ) -> Result<ReviewResult> {
+        let profile = &settings.profile;
         let diff = worktree.diff().await?;
         let diff_path = run_dir.join("pr.diff");
         write(&diff_path, &diff).await?;
@@ -133,14 +141,17 @@ impl ReviewRunner {
             instructions.push((path.display().to_string(), text));
         }
         let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
-        let system_prompt = prompt::system_prompt(&instructions, &skills);
+        let references = existing_dirs(&settings.reference_dirs);
+        let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
         let brief = prompt::brief(&run.request, ctx, &diff, &diff_path);
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
 
-        // The run dir holds the diff; skills are read in place.
+        // The run dir holds the diff; skills and reference checkouts are
+        // read in place.
         let add_dirs: Vec<PathBuf> = std::iter::once(run_dir.to_owned())
             .chain(profile.skills.iter().cloned())
+            .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
         let transcript = run_dir.join("transcript.jsonl");
         let schema = review_schema();
@@ -175,6 +186,21 @@ impl ReviewRunner {
             transcript_path: transcript.display().to_string(),
         })
     }
+}
+
+/// The directories in `dirs` that exist; a missing one is only a warning,
+/// since a checkout can be moved without the config catching up.
+fn existing_dirs(dirs: &[PathBuf]) -> Vec<&Path> {
+    dirs.iter()
+        .map(PathBuf::as_path)
+        .filter(|dir| {
+            let exists = dir.is_dir();
+            if !exists {
+                tracing::warn!(dir = %dir.display(), "reference directory is missing; skipping it");
+            }
+            exists
+        })
+        .collect()
 }
 
 async fn write(path: &Path, contents: &str) -> Result<()> {
