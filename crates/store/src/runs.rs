@@ -129,6 +129,27 @@ impl Store {
         }))
     }
 
+    /// A full review of `key` at its head as last polled, for rerunning a
+    /// review by hand. `None` if the PR isn't tracked.
+    pub fn review_request(&self, key: &PrKey) -> Result<Option<ReviewRequest>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT profile, head_sha, base_sha FROM prs WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number],
+                |row| {
+                    Ok(ReviewRequest {
+                        key: key.clone(),
+                        profile: row.get(0)?,
+                        head_sha: row.get(1)?,
+                        base_sha: row.get(2)?,
+                        trigger: ReviewTrigger::Requested,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Marks a queued run as running. `false` if it was superseded while it
     /// waited.
     pub fn claim_run(&self, id: i64) -> Result<bool> {
@@ -593,6 +614,18 @@ mod tests {
                 pending_drafts: 2
             }
         );
+    }
+
+    #[test]
+    fn a_rerun_is_a_full_review_of_the_polled_head() {
+        let store = store();
+        assert_eq!(
+            store.review_request(&snapshot().key).unwrap(),
+            Some(request("h1"))
+        );
+        let mut other = snapshot().key;
+        other.number = 8;
+        assert_eq!(store.review_request(&other).unwrap(), None);
     }
 
     #[test]

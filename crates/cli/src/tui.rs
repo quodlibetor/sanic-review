@@ -2,8 +2,8 @@
 //! the log.
 //!
 //! It runs on its own thread with its own read-only store connection, and
-//! rereads the store on an interval, so nothing else in `serve` knows it
-//! exists. Nothing in it edits anything.
+//! rereads the store on an interval. Its one action is asking `serve` to
+//! rerun a failed or crashed review; nothing in it edits drafts.
 
 use std::{
     path::Path,
@@ -29,8 +29,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
+use sanic_core::pr::PrKey;
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, ReviewState, RunCounts, Store};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::logging::LogLines;
@@ -49,8 +50,15 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// Takes over the terminal. `db` must already be migrated.
-    pub fn start(db: &Path, me: String, no_reviews: bool, logs: LogLines) -> Result<Self> {
+    /// Takes over the terminal. `db` must already be migrated. Confirmed
+    /// reruns go to `reruns`.
+    pub fn start(
+        db: &Path,
+        me: String,
+        no_reviews: bool,
+        logs: LogLines,
+        reruns: mpsc::UnboundedSender<PrKey>,
+    ) -> Result<Self> {
         let store = Store::open_read_only(db)?;
         let mut terminal = init_terminal().wrap_err("starting the terminal UI")?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -59,7 +67,14 @@ impl Tui {
             let stop = Arc::clone(&stop);
             move || {
                 let mut app = App::new(no_reviews);
-                let result = run(&mut terminal, &mut app, &store, &me, &logs, &stop);
+                let io = Io {
+                    store: &store,
+                    me: &me,
+                    logs: &logs,
+                    reruns: &reruns,
+                    stop: &stop,
+                };
+                let result = run(&mut terminal, &mut app, &io);
                 ratatui::restore();
                 let _ = tx.send(result);
             }
@@ -118,14 +133,23 @@ impl Drop for Tui {
     }
 }
 
-fn run(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    store: &Store,
-    me: &str,
-    logs: &LogLines,
-    stop: &AtomicBool,
-) -> Result<()> {
+/// What the UI thread reads from and reports to.
+struct Io<'a> {
+    store: &'a Store,
+    me: &'a str,
+    logs: &'a LogLines,
+    reruns: &'a mpsc::UnboundedSender<PrKey>,
+    stop: &'a AtomicBool,
+}
+
+fn run(terminal: &mut DefaultTerminal, app: &mut App, io: &Io<'_>) -> Result<()> {
+    let Io {
+        store,
+        me,
+        logs,
+        reruns,
+        stop,
+    } = io;
     let mut loaded_at: Option<Instant> = None;
     let mut load_failed = false;
     while !stop.load(Ordering::Relaxed) {
@@ -152,9 +176,15 @@ fn run(
             .wrap_err("drawing the terminal UI")?;
         if event::poll(TICK).wrap_err("reading terminal input")?
             && let Event::Key(key) = event::read().wrap_err("reading terminal input")?
-            && app.handle_key(key) == Flow::Quit
         {
-            break;
+            match app.handle_key(key) {
+                Flow::Continue => {}
+                Flow::Quit => break,
+                // Only fails once `serve` is stopping.
+                Flow::Rerun(pr) => {
+                    let _ = reruns.send(pr);
+                }
+            }
         }
     }
     Ok(())
@@ -220,14 +250,20 @@ pub struct App {
     /// The log pane shows the newest lines until you move up in it.
     follow_log: bool,
     help: bool,
+    /// Waiting for a yes before asking for a rerun of this PR's review.
+    confirm_rerun: Option<PrKey>,
+    /// Shown in the status bar until the next key.
+    notice: Option<&'static str>,
 }
 
 /// What the loop does after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub enum Flow {
     Continue,
     Quit,
+    /// You confirmed a rerun of this PR's review.
+    Rerun(PrKey),
 }
 
 impl App {
@@ -242,6 +278,8 @@ impl App {
             lists: Default::default(),
             follow_log: true,
             help: false,
+            confirm_rerun: None,
+            notice: None,
         }
     }
 
@@ -296,9 +334,19 @@ impl App {
             return Flow::Continue;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        self.notice = None;
+        if let Some(pr) = self.confirm_rerun.take() {
+            return match key.code {
+                KeyCode::Char('c') if ctrl => Flow::Quit,
+                KeyCode::Char('y') => Flow::Rerun(pr),
+                // Anything else is a no, so a stray key can't spend tokens.
+                _ => Flow::Continue,
+            };
+        }
         match key.code {
             KeyCode::Char('q') => return Flow::Quit,
             KeyCode::Char('c') if ctrl => return Flow::Quit,
+            KeyCode::Char('r') => self.ask_rerun(),
             KeyCode::Char('?') => self.help = !self.help,
             KeyCode::Esc => self.help = false,
             KeyCode::Tab => self.focus = self.focus.step(true),
@@ -310,6 +358,23 @@ impl App {
             _ => {}
         }
         Flow::Continue
+    }
+
+    /// Asks to confirm a rerun of the selected review, if its latest run
+    /// failed or crashed.
+    fn ask_rerun(&mut self) {
+        let selected = self.lists[Pane::Owed.index()]
+            .selected()
+            .and_then(|i| self.overview.owed.get(i));
+        let rerunnable = |pr: &&OwedReview| {
+            pr.latest_run
+                .as_ref()
+                .is_some_and(|run| matches!(run.status.as_str(), "failed" | "crashed"))
+        };
+        match selected.filter(rerunnable) {
+            Some(pr) if self.focus == Pane::Owed => self.confirm_rerun = Some(pr.key.clone()),
+            _ => self.notice = Some("r reruns a failed or crashed review you owe"),
+        }
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -351,6 +416,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         lists,
         follow_log,
         help,
+        confirm_rerun,
+        notice,
         ..
     } = app;
     let [owed_state, mine_state, activity_state, log_state] = lists;
@@ -378,9 +445,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     pane.highlight &= !*follow_log;
     pane.render(frame, log, rows, log_state, "");
 
-    render_status(frame, status, &overview.counts, *no_reviews);
+    render_status(frame, status, &overview.counts, *no_reviews, *notice);
     if *help {
         render_help(frame);
+    }
+    if let Some(pr) = confirm_rerun {
+        render_confirm(frame, pr);
     }
 }
 
@@ -523,7 +593,19 @@ fn activity_row(activity: &Activity) -> ListItem<'_> {
     ListItem::new(Line::from(spans))
 }
 
-fn render_status(frame: &mut Frame<'_>, area: Rect, counts: &RunCounts, no_reviews: bool) {
+fn render_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    counts: &RunCounts,
+    no_reviews: bool,
+    notice: Option<&str>,
+) {
+    // A notice takes the whole line, so it isn't cut off at 80 columns.
+    if let Some(notice) = notice {
+        let notice = Span::styled(format!(" {notice}"), Style::new().fg(Color::Yellow));
+        frame.render_widget(Paragraph::new(notice), area);
+        return;
+    }
     let mut right = format!(
         "{} queued · {} running · {} pending drafts ",
         counts.queued, counts.running, counts.pending_drafts
@@ -545,6 +627,7 @@ const HELP: &[(&str, &str)] = &[
     ("Tab, Shift-Tab", "next, previous pane"),
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
+    ("r", "rerun a failed or crashed review"),
     ("?, Esc", "close this help"),
 ];
 
@@ -559,14 +642,32 @@ fn render_help(frame: &mut Frame<'_>) {
         })
         .collect();
     lines.push(Line::raw(""));
-    lines.push(Line::raw(" Read-only: edit and submit drafts in the dashboard.").dim());
+    lines.push(Line::raw(" Drafts are edited and submitted in the dashboard.").dim());
+    render_popup(frame, " Keys ", lines);
+}
+
+fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey) {
+    let lines = vec![
+        Line::raw(" Rerun the review of"),
+        Line::raw(format!(" {}", pr.url())),
+        Line::raw(" at its current head? This spends tokens."),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw(" y").bold(),
+            Span::raw(" rerun · any other key cancels"),
+        ]),
+    ];
+    render_popup(frame, " Rerun ", lines);
+}
+
+fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let area = frame
         .area()
-        .centered(Constraint::Length(58), Constraint::Length(height));
+        .centered(Constraint::Length(62), Constraint::Length(height));
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Keys ")),
+        Paragraph::new(lines).block(Block::bordered().title(title)),
         area,
     );
 }
@@ -768,6 +869,37 @@ mod tests {
             Flow::Quit
         );
         assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Flow::Quit);
+    }
+
+    #[test]
+    fn r_asks_before_rerunning_a_failed_or_crashed_review() {
+        let mut app = app(false);
+        // The first row's latest run succeeded.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.confirm_rerun, None);
+        assert!(app.notice.is_some());
+
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.notice, None);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.confirm_rerun, Some(pr("org/web", 79)));
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+        // Anything but `y` cancels.
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.confirm_rerun, None);
+
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Flow::Rerun(pr("org/web", 79))
+        );
+        assert_eq!(app.confirm_rerun, None);
+
+        // Only from the pane of reviews you owe.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.confirm_rerun, None);
     }
 
     #[test]

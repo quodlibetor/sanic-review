@@ -99,8 +99,15 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
+    let (reruns, reruns_rx) = mpsc::unbounded_channel();
     let mut ui = match logs {
-        Some(logs) => Some(Tui::start(&db_path, me.clone(), args.no_reviews, logs)?),
+        Some(logs) => Some(Tui::start(
+            &db_path,
+            me.clone(),
+            args.no_reviews,
+            logs,
+            reruns,
+        )?),
         None => None,
     };
     let quit = async {
@@ -119,13 +126,47 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             result
         }
         result = poll_forever(&mut poller, &mut watcher, &config_path, &updates, &worker) => result,
-        result = schedule(updates_rx, run_store, runs) => result,
+        result = schedule(updates_rx, Arc::clone(&run_store), runs.clone()) => result,
+        () = rerun(reruns_rx, run_store, runs) => Ok(()),
         () = run_or_hold(args.no_reviews, Arc::clone(&worker), runs_rx) => Ok(()),
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())
         }
     }
+}
+
+/// Queues a review of each requested PR's current head, as the scheduler
+/// would, so `--no-reviews` holds it and a head that already has a queued,
+/// running or succeeded review is left alone. Never returns: without the
+/// TUI nothing sends requests.
+async fn rerun(
+    mut requests: mpsc::UnboundedReceiver<PrKey>,
+    store: Arc<Mutex<Store>>,
+    runs: mpsc::UnboundedSender<QueuedRun>,
+) {
+    while let Some(key) = requests.recv().await {
+        let _span = info_span!("rerun", url = %key.url()).entered();
+        let queued = {
+            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            store.review_request(&key).and_then(|req| match req {
+                Some(req) => store.queue_review(&req),
+                None => Ok(None),
+            })
+        };
+        match queued {
+            Ok(Some(run)) => {
+                info!(head = %run.request.head_sha, "review queued again by hand");
+                let _ = runs.send(run);
+            }
+            Ok(None) => info!(
+                "not rerun: the PR isn't tracked, or its head already has a queued, \
+                 running or finished review"
+            ),
+            Err(err) => warn!(url = %key.url(), "rerunning the review failed: {err:?}"),
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 /// Runs queued reviews, or with `--no-reviews` only logs them; they stay
@@ -341,7 +382,63 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use sanic_core::{pr::PrSnapshot, repo::RepoName};
+
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rerun_requeues_a_failed_review_once() {
+        let key = PrKey {
+            repo: RepoName::new("org", "repo"),
+            number: 7,
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        let snapshot = PrSnapshot {
+            key: key.clone(),
+            title: "t".into(),
+            body: String::new(),
+            url: key.url(),
+            author: "alice".into(),
+            head_sha: "h1".into(),
+            base_sha: "b1".into(),
+            is_draft: false,
+            review_requested: true,
+            requested_teams: vec![],
+            reviews: vec![],
+            threads: vec![],
+            files: None,
+        };
+        store.record(&snapshot, "p", &[]).unwrap();
+        let failed = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        store.claim_run(failed.id).unwrap();
+        store.fail_run(failed.id, "boom").unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (requests, requests_rx) = mpsc::unbounded_channel();
+        let (runs, mut runs_rx) = mpsc::unbounded_channel();
+        // The second request finds the first one's run queued.
+        requests.send(key.clone()).unwrap();
+        requests.send(key).unwrap();
+        let handled = tokio::time::timeout(
+            Duration::from_secs(1),
+            rerun(requests_rx, Arc::clone(&store), runs),
+        );
+        assert!(handled.await.is_err(), "rerun never returns");
+
+        assert_eq!(runs_rx.try_recv().unwrap(), failed);
+        assert!(runs_rx.try_recv().is_err());
+        let status = store
+            .lock()
+            .unwrap()
+            .run(failed.id)
+            .unwrap()
+            .unwrap()
+            .status;
+        assert_eq!(status, "queued");
+    }
 
     #[test]
     fn describes_triggers_for_humans() {

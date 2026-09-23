@@ -361,7 +361,7 @@ available when tuning instruction files.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
-  TUI.
+  TUI. Its only action is rerunning a failed or crashed review.
   - **Reviews you owe:** open PRs by others that request your review, with the
     latest run's status (queued, held by `--no-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A failed or crashed run
@@ -382,6 +382,10 @@ available when tuning instruction files.
   appended to `serve.log` in the data dir.
   Keys: `q` or Ctrl-C quits `serve`, Tab and Shift-Tab switch pane, `j`/`k`
   or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
+  `r` on a review you owe whose latest run failed or crashed asks for
+  confirmation, since it spends tokens, then queues a full review of the
+  PR's head as last polled. It goes through the store like any queued
+  review: idempotency applies, `--no-reviews` holds it, and it's logged.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
   terminal alone and shows in the log pane instead.
