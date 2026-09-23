@@ -1,4 +1,5 @@
-//! Which lines of a PR's diff GitHub accepts inline comments on.
+//! Which lines of a PR's diff GitHub accepts inline comments on, and what
+//! they say, for showing drafts in context.
 //!
 //! GitHub anchors a comment to a line inside a diff hunk, context lines
 //! included: `RIGHT` lines are numbered in the new file, `LEFT` lines in the
@@ -15,10 +16,22 @@ pub struct DiffIndex {
     files: HashMap<String, Vec<Hunk>>,
 }
 
-#[derive(Debug)]
-struct Hunk {
-    old: Range<u32>,
-    new: Range<u32>,
+/// One `@@` hunk: the lines it covers on each side, and its lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    pub old: Range<u32>,
+    pub new: Range<u32>,
+    pub lines: Vec<DiffLine>,
+}
+
+/// A line of a hunk, with its number in the old file, the new one, or
+/// both for context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    /// Without its leading ` `, `+` or `-`.
+    pub text: String,
 }
 
 impl Hunk {
@@ -40,8 +53,37 @@ impl DiffIndex {
         // File headers come between `diff --git` and the first hunk; after
         // that, a `--- ` line is a removed line that began with `-- `.
         let mut in_header = false;
+        // The hunk being read, its path, and how many of its old and new
+        // lines are still to come.
+        let mut open: Option<(String, Hunk, u32, u32)> = None;
         for line in diff.lines() {
+            // A line that can't be part of a hunk ends it, even if its
+            // header promised more.
+            if let Some((_, hunk, old_left, new_left)) = &mut open
+                && (*old_left > 0 || *new_left > 0)
+                && (line.is_empty() || line.starts_with([' ', '+', '-', '\\']))
+            {
+                let (old, new) = (hunk.old.end - *old_left, hunk.new.end - *new_left);
+                let (old, new, text) = match line.split_at_checked(1) {
+                    Some(("+", text)) => (None, Some(new), text),
+                    Some(("-", text)) => (Some(old), None, text),
+                    // `\ No newline at end of file` isn't a line.
+                    Some(("\\", _)) => continue,
+                    Some((_, text)) => (Some(old), Some(new), text),
+                    // Some tools strip the space off a blank context line.
+                    None => (Some(old), Some(new), ""),
+                };
+                *old_left = old_left.saturating_sub(u32::from(old.is_some()));
+                *new_left = new_left.saturating_sub(u32::from(new.is_some()));
+                hunk.lines.push(DiffLine {
+                    old,
+                    new,
+                    text: text.to_owned(),
+                });
+                continue;
+            }
             if line.starts_with("diff --git ") {
+                index.close(open.take());
                 in_header = true;
                 old_path = None;
                 path = None;
@@ -50,13 +92,30 @@ impl DiffIndex {
             } else if in_header && let Some(p) = line.strip_prefix("+++ ") {
                 path = header_path(p, "b/").or_else(|| old_path.clone());
             } else if let Some(header) = line.strip_prefix("@@ ") {
+                index.close(open.take());
                 in_header = false;
                 if let (Some(path), Some(hunk)) = (&path, parse_hunk_header(header)) {
-                    index.files.entry(path.clone()).or_default().push(hunk);
+                    let (old_left, new_left) =
+                        (hunk.old.end - hunk.old.start, hunk.new.end - hunk.new.start);
+                    open = Some((path.clone(), hunk, old_left, new_left));
                 }
             }
         }
+        index.close(open);
         index
+    }
+
+    fn close(&mut self, hunk: Option<(String, Hunk, u32, u32)>) {
+        if let Some((path, hunk, ..)) = hunk {
+            self.files.entry(path).or_default().push(hunk);
+        }
+    }
+
+    /// `path`'s hunks, in diff order; empty for a file the diff doesn't
+    /// touch.
+    #[must_use]
+    pub fn hunks(&self, path: &str) -> &[Hunk] {
+        self.files.get(path).map_or(&[], Vec::as_slice)
     }
 
     /// Whether GitHub would accept `comment`'s anchor.
@@ -127,7 +186,11 @@ fn parse_hunk_header(header: &str) -> Option<Hunk> {
     let mut fields = header.split_whitespace();
     let old = parse_range(fields.next()?.strip_prefix('-')?)?;
     let new = parse_range(fields.next()?.strip_prefix('+')?)?;
-    Some(Hunk { old, new })
+    Some(Hunk {
+        old,
+        new,
+        lines: Vec::new(),
+    })
 }
 
 fn parse_range(spec: &str) -> Option<Range<u32>> {
@@ -240,6 +303,53 @@ diff --git \"a/tab\\there \\\"q\\\" \\303\\251\" \"b/tab\\there \\\"q\\\" \\303\
         let index = DiffIndex::parse(diff);
         assert!(index.anchors(&comment("with space.txt", Side::Right, None, 1)));
         assert!(index.anchors(&comment("tab\there \"q\" é", Side::Right, None, 1)));
+    }
+
+    #[test]
+    fn hunk_lines_are_numbered_on_their_sides() {
+        let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,3 +3,3 @@ fn f() {
+ keep
+--- was a comment
++new
+
+@@ -20 +20,2 @@
+-last
+\\ No newline at end of file
++last
++more
+";
+        let index = DiffIndex::parse(diff);
+        let lines: Vec<Vec<_>> = index
+            .hunks("src/lib.rs")
+            .iter()
+            .map(|hunk| {
+                hunk.lines
+                    .iter()
+                    .map(|l| (l.old, l.new, l.text.as_str()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                vec![
+                    (Some(3), Some(3), "keep"),
+                    (Some(4), None, "-- was a comment"),
+                    (None, Some(4), "new"),
+                    (Some(5), Some(5), ""),
+                ],
+                vec![
+                    (Some(20), None, "last"),
+                    (None, Some(20), "last"),
+                    (None, Some(21), "more"),
+                ],
+            ]
+        );
+        assert!(index.hunks("elsewhere.rs").is_empty());
     }
 
     #[test]
