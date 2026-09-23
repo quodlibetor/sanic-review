@@ -66,7 +66,9 @@ impl Update {
             .triggers
             .iter()
             .filter_map(|t| match t {
-                Trigger::ReviewRequested { .. } => Some(ReviewTrigger::Requested),
+                Trigger::ReviewRequested { .. } | Trigger::ReadyForReview { .. } => {
+                    Some(ReviewTrigger::Requested)
+                }
                 Trigger::Push { from_sha, .. } => Some(ReviewTrigger::Push {
                     from_sha: from_sha.clone(),
                 }),
@@ -230,7 +232,7 @@ pub async fn schedule(
 fn skip(store: &Store, rules: &SkipRules, key: &PrKey) -> Result<Option<Skip>> {
     Ok(store
         .pr_summary(key)?
-        .and_then(|pr| rules.check(&pr.profile, &pr.title)))
+        .and_then(|pr| rules.check(&pr.profile, &pr.title, pr.is_draft)))
 }
 
 #[cfg(test)]
@@ -460,6 +462,42 @@ mod tests {
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
         let run = runs.recv().await.unwrap();
         assert_eq!(run.request.head_sha, "h2");
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drafts_wait_until_ready_for_review() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        let mut draft = snapshot("alice", true);
+        draft.is_draft = true;
+        store
+            .lock()
+            .unwrap()
+            .record(&draft, "default", &[])
+            .unwrap();
+        let task = tokio::spawn(schedule(rx, Arc::clone(&store), runs_tx, due_tx, skips));
+
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(runs.try_recv().is_err());
+
+        draft.is_draft = false;
+        store
+            .lock()
+            .unwrap()
+            .record(&draft, "default", &[])
+            .unwrap();
+        let ready = Trigger::ReadyForReview {
+            head_sha: "h1".into(),
+        };
+        tx.send(update(1, "h1", vec![ready])).unwrap();
+        let run = runs.recv().await.unwrap();
+        assert_eq!(run.request.trigger, ReviewTrigger::Requested);
         drop(tx);
         task.await.unwrap().unwrap();
     }

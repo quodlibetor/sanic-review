@@ -370,6 +370,9 @@ fn describe(trigger: &Trigger) -> String {
         Trigger::ReviewRequested { head_sha } => {
             format!("review requested at {}", short(head_sha))
         }
+        Trigger::ReadyForReview { head_sha } => {
+            format!("ready for review at {}", short(head_sha))
+        }
         Trigger::Push { from_sha, to_sha } => {
             format!("new commits {}..{}", short(from_sha), short(to_sha))
         }

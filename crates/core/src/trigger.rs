@@ -16,6 +16,7 @@ use crate::pr::{PrSnapshot, ReviewState};
 pub struct Known {
     pub head_sha: String,
     pub review_requested: bool,
+    pub is_draft: bool,
     pub comment_ids: HashSet<String>,
     pub review_ids: HashSet<String>,
 }
@@ -27,6 +28,10 @@ pub enum Trigger {
     ReviewRequested { head_sha: String },
     /// Someone else's PR you're reviewing got new commits.
     Push { from_sha: String, to_sha: String },
+    /// Someone else's PR you're asked to review or reviewing went from
+    /// draft to ready for review: a full review, since drafts are usually
+    /// skipped.
+    ReadyForReview { head_sha: String },
     /// Someone replied in a thread you commented in, on someone else's PR.
     Reply {
         thread_id: String,
@@ -51,6 +56,7 @@ impl Trigger {
         match self {
             Self::ReviewRequested { .. } => "review_requested",
             Self::Push { .. } => "push",
+            Self::ReadyForReview { .. } => "ready_for_review",
             Self::Reply { .. } => "reply",
             Self::Feedback { .. } => "feedback",
             Self::Approved { .. } => "approved",
@@ -88,6 +94,11 @@ pub fn detect(me: &str, known: Option<&Known>, snapshot: &PrSnapshot) -> Vec<Tri
     };
 
     let reviewing = snapshot.review_requested || snapshot.reviews.iter().any(|r| is_me(&r.author));
+    if !newly_requested && reviewing && known.is_draft && !snapshot.is_draft {
+        triggers.push(Trigger::ReadyForReview {
+            head_sha: snapshot.head_sha.clone(),
+        });
+    }
     if !newly_requested && reviewing && known.head_sha != snapshot.head_sha {
         triggers.push(Trigger::Push {
             from_sha: known.head_sha.clone(),
@@ -229,6 +240,7 @@ mod tests {
         Known {
             head_sha: snapshot.head_sha.clone(),
             review_requested: snapshot.review_requested,
+            is_draft: snapshot.is_draft,
             comment_ids: snapshot
                 .threads
                 .iter()
@@ -260,6 +272,27 @@ mod tests {
         let mut snap = snapshot("alice");
         snap.review_requested = true;
         assert_eq!(detect(ME, Some(&known_from(&snap)), &snap), []);
+    }
+
+    #[test]
+    fn leaving_draft_triggers_when_asked_to_review() {
+        let mut before = snapshot("alice");
+        before.is_draft = true;
+        let mut after = before.clone();
+        after.is_draft = false;
+        // Nobody asked you.
+        assert_eq!(detect(ME, Some(&known_from(&before)), &after), []);
+
+        before.review_requested = true;
+        after.review_requested = true;
+        assert_eq!(
+            detect(ME, Some(&known_from(&before)), &after),
+            [Trigger::ReadyForReview {
+                head_sha: "h1".into()
+            }]
+        );
+        // Going back to draft isn't a trigger.
+        assert_eq!(detect(ME, Some(&known_from(&after)), &before), []);
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub struct Store {
 pub struct PrSummary {
     pub profile: String,
     pub title: String,
+    pub is_draft: bool,
 }
 
 /// A logged trigger, as read back from the event log.
@@ -103,17 +104,25 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT head_sha, review_requested FROM prs WHERE repo = ?1 AND number = ?2",
+                "SELECT head_sha, review_requested, is_draft FROM prs
+                 WHERE repo = ?1 AND number = ?2",
                 params![repo, key.number],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((head_sha, review_requested)) = row else {
+        let Some((head_sha, review_requested, is_draft)) = row else {
             return Ok(None);
         };
         Ok(Some(Known {
             head_sha,
             review_requested,
+            is_draft,
             comment_ids: self.ids("comments", &repo, key.number)?,
             review_ids: self.ids("reviews", &repo, key.number)?,
         }))
@@ -227,12 +236,13 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT profile, title FROM prs WHERE repo = ?1 AND number = ?2",
+                "SELECT profile, title, is_draft FROM prs WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
                     Ok(PrSummary {
                         profile: row.get(0)?,
                         title: row.get(1)?,
+                        is_draft: row.get(2)?,
                     })
                 },
             )
@@ -511,6 +521,7 @@ mod tests {
             Some(PrSummary {
                 profile: "other".into(),
                 title: "build(deps): bump".into(),
+                is_draft: false,
             })
         );
     }
