@@ -127,7 +127,7 @@ uses its own bare mirror and never touches your checkout.
   are written as `!org/slug` after `*`, so teams you join later count until
   you exclude them.
 - **Checkouts:** scan a directory for jj and git checkouts with a GitHub
-  remote, then pick which to watch.
+  remote, then pick which to watch, listed by repo name.
 - **Orgs:** pick orgs to watch, suggested from your orgs, your teams and the
   checkouts found, plus any others you type.
 - **Model:** the default review model (`runner.model`), defaulting to its
