@@ -535,12 +535,19 @@ embedded in the binary, so nothing is fetched at runtime.
   glob's error. Saving has `serve` add it to that `skip_titles` the way
   the TUI does, unless it's already there; the config reload picks it up.
 - **Submit.** You pick the verdict: comment, request changes or approve.
-  The agent's suggestion is preselected, and approve never is. Confirming
-  an approval also takes ticking "I approve this PR" on the preview page.
-  The preview shows the exact payload: the review body, each inline
-  comment and the verdict, as the JSON request that will be sent. It
-  points out what GitHub's Markdown would make easy to miss: mentions,
-  hidden comments, images, HTML tags and invisible characters. The body
+  The agent's suggestion is preselected, and approve never is. An
+  approval has to be picked on the PR page's verdict form, whose Approve
+  radio alone carries a per-process token the preview and submit check, so
+  Approve in a URL alone, or in another verdict's preview URL edited to
+  say it, is refused; the preview's button then reads "Approve this PR with
+  the above comments". The preview shows the review as it'll read (body,
+  then each inline comment) beside the exact payload, the JSON request
+  that will be sent, with the confirm in a footer that stays in view; on a
+  narrow window they stack. Above them, "Check before posting" lists what
+  to look at: that you picked Approve, that the reviewed commit is behind
+  the PR's head, comments moved into the body, what GitHub's Markdown would
+  make easy to miss (mentions, hidden comments, images, HTML tags and
+  invisible characters), and drafts still pending, which aren't sent. The body
   is the summary if you accepted it. Accepted comments go out as inline
   comments in one GitHub review, anchored to the reviewed run's head, and
   accepted comments that aren't on a line of the diff are added to the

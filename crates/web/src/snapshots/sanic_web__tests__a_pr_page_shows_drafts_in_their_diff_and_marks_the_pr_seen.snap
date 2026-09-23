@@ -171,7 +171,7 @@ expression: "readable(&f, &page.body)"
 <label>
 <input type="radio" name="event" value="REQUEST_CHANGES" checked> Request changes</label>
 <label>
-<input type="radio" name="event" value="APPROVE"> Approve</label>
+<input type="radio" name="event" value="APPROVE:<pick>"> Approve</label>
 <p class="dim">The agent suggests request changes. It never suggests approving; that's only ever your pick.</p>
 </fieldset>
 <button type="submit">Preview the review</button> <span class="dim">Nothing is posted until you confirm on the next page.</span>

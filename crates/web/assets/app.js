@@ -371,15 +371,10 @@
       }
     );
   });
-  // Back and forward can bring a page back with its approval box ticked;
-  // it's ticked afresh each time.
+  // Coming back to a page after confirming in its dialog finds it closed,
+  // not showing a spent card.
   window.addEventListener("pageshow", function (e) {
-    // Coming back to a page after confirming in its dialog finds it closed,
-    // not showing a spent card.
     if (e.persisted && dialogOpen()) closeDialog();
-    document.querySelectorAll('input[name="approve"]').forEach(function (box) {
-      box.checked = false;
-    });
   });
   // A confirm is sent once: a second click or `y` would replace the result
   // page with "Not posted", or post a second empty approval.

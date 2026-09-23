@@ -25,7 +25,7 @@ use crate::{
     page::{
         self, Card, Kind, Tone, csrf_field, first_line, github_link, keycap, pr_ref, state_cell,
     },
-    pr_href,
+    pr_href, submit,
 };
 
 #[derive(Debug, Deserialize)]
@@ -183,7 +183,7 @@ pub fn crumb(key: &PrKey) -> Markup {
     html! { a href=(pr_href(key)) { (key.repo) "#" (key.number) } }
 }
 
-fn short(sha: &str) -> &str {
+pub fn short(sha: &str) -> &str {
     sha.get(..8).unwrap_or(sha)
 }
 
@@ -217,10 +217,12 @@ fn drafts_section(
         form.submit method="get" action=(preview) {
             fieldset {
                 legend { "Verdict" }
+                // Approve's value says it was picked here, which an
+                // approval needs.
                 @for (value, label) in [
-                    ("COMMENT", "Comment"),
-                    ("REQUEST_CHANGES", "Request changes"),
-                    ("APPROVE", "Approve"),
+                    ("COMMENT".to_owned(), "Comment"),
+                    ("REQUEST_CHANGES".to_owned(), "Request changes"),
+                    (submit::approve_value(app), "Approve"),
                 ] {
                     label {
                         input type="radio" name="event" value=(value) checked[value == preselect];
