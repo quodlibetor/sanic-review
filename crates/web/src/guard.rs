@@ -75,14 +75,7 @@ pub async fn guard(State(app): State<Shared>, req: Request, next: Next) -> Respo
         Ok(req) => req,
         Err(why) => return (StatusCode::FORBIDDEN, why).into_response(),
     };
-    // `check` has made sure there's a loopback `Host`.
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
-    let mut resp = if navigated_from_elsewhere(&req, &host) {
+    let mut resp = if navigated_from_elsewhere(&req) {
         let target = req
             .uri()
             .path_and_query()
@@ -126,18 +119,23 @@ async fn check(csrf: &Csrf, req: Request) -> Result<Request, &'static str> {
         return Ok(req);
     }
     let headers = req.headers();
-    let mut sites = headers.get_all("sec-fetch-site").iter().peekable();
-    // Only the browser sets this, so a page can't claim to be the dashboard.
-    let same_origin = sites.peek().is_some();
-    if sites.any(|site| site != "same-origin") {
+    if headers
+        .get_all("sec-fetch-site")
+        .iter()
+        .any(|site| site != "same-origin")
+    {
         return Err("cross-site requests are refused");
     }
-    // Firefox sends `Origin: null` for the dashboard's own form posts in
-    // some cases, so `null` passes when the browser vouches for the origin.
-    let own = format!("http://{host}");
+    // Only the browser sets `Sec-Fetch-Site`, and it's `same-origin` if it
+    // got this far, so a page can't be claiming to be the dashboard. Firefox
+    // sends `Origin: null` for the dashboard's own form posts in some cases,
+    // so `null` passes when the browser vouches for the origin like this.
+    let vouched = headers.contains_key("sec-fetch-site");
+    let own = own_origin(&host);
     if headers.get_all(header::ORIGIN).iter().any(|origin| {
-        let origin = origin.to_str().ok();
-        origin != Some(own.as_str()) && !(same_origin && origin == Some("null"))
+        let origin = origin.to_str().ok().map(str::to_ascii_lowercase);
+        let origin = origin.as_deref();
+        origin != Some(own.as_str()) && !(vouched && origin == Some("null"))
     }) {
         return Err("requests from other origins are refused");
     }
@@ -167,12 +165,12 @@ async fn check(csrf: &Csrf, req: Request) -> Result<Request, &'static str> {
 /// they have no effect.
 ///
 /// Browsers that send `Sec-Fetch-Site` say where a navigation came from
-/// outright. Without it, a `Referer` from anywhere but the dashboard on
-/// `host` counts as elsewhere. No `Referer` doesn't: a typed URL or a
-/// bookmark sends none, and neither does a site that hides where it links
-/// from, which is what the keyboard script's delay after a page opens is
-/// for.
-fn navigated_from_elsewhere(req: &Request, host: &str) -> bool {
+/// outright. Without it, a `Referer` from anywhere but the dashboard at
+/// the request's `Host` counts as elsewhere. No `Referer` doesn't: a typed
+/// URL or a bookmark sends none, and neither does a site that hides where
+/// it links from, which is what the keyboard script's delay after a page
+/// opens is for.
+fn navigated_from_elsewhere(req: &Request) -> bool {
     if !matches!(*req.method(), Method::GET | Method::HEAD)
         || req.uri().path().starts_with("/assets/")
     {
@@ -183,11 +181,23 @@ fn navigated_from_elsewhere(req: &Request, host: &str) -> bool {
     if sites.peek().is_some() {
         return sites.any(|site| site != "same-origin" && site != "none");
     }
-    let own = format!("http://{host}/");
-    headers
-        .get_all(header::REFERER)
-        .iter()
-        .any(|referer| !referer.to_str().is_ok_and(|r| r.starts_with(&own)))
+    // `check` has made sure there's a loopback `Host`.
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default();
+    let own = format!("{}/", own_origin(host));
+    headers.get_all(header::REFERER).iter().any(|referer| {
+        !referer
+            .to_str()
+            .is_ok_and(|r| r.to_ascii_lowercase().starts_with(&own))
+    })
+}
+
+/// The dashboard's own origin when it's reached at `host`, lowercased as
+/// browsers write origins; `Host` itself may not be.
+fn own_origin(host: &str) -> String {
+    format!("http://{}", host.to_ascii_lowercase())
 }
 
 fn header_token(headers: &HeaderMap) -> Option<&str> {
