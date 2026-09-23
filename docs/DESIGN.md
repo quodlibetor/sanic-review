@@ -132,7 +132,11 @@ uses its own bare mirror and never touches your checkout.
   checkouts found, plus any others you type.
 - **Model:** the default review model (`runner.model`), defaulting to its
   current value or `auto`. Answering `auto` when it's unset leaves the file
-  unchanged.
+  unchanged. Suggests `auto`, the current value, the `opus`/`sonnet`/`haiku`/
+  `fable` aliases, the `model` and `availableModels` in your user-level
+  Claude settings (`settings.json` in `$CLAUDE_CONFIG_DIR`, else
+  `~/.claude`), and the `ANTHROPIC_*MODEL` variables from that file's `env`
+  block and your environment; any other id is accepted too.
 
 Current config values are pre-selected. Entries setup doesn't manage
 (`owner/name`, path-scoped or remote-override entries) are never removed.

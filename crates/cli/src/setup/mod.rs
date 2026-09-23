@@ -1,6 +1,7 @@
 //! `sanic-review setup`: write or update the config interactively.
 
 mod edit;
+mod models;
 mod scan;
 
 use std::{
@@ -329,10 +330,14 @@ fn choose_orgs(candidates: BTreeSet<String>, current: &Current) -> Result<Vec<(S
 }
 
 fn choose_model(current: Option<&str>) -> Result<Option<String>> {
+    let known = models::known_models(current, models::read_claude_settings().as_deref(), |var| {
+        std::env::var(var).ok()
+    });
     let answer = Text::new("Default model for reviews:")
         .with_default(model_default(current))
+        .with_autocomplete(move |input: &str| Ok(models::matching(&known, input)))
         .with_help_message(&format!(
-            "\"{AUTO_MODEL}\" uses your Claude default; or e.g. claude-sonnet-5. \
+            "\"{AUTO_MODEL}\" uses your Claude default; any model id works. \
              A profile's `model` overrides it"
         ))
         .prompt()?;
