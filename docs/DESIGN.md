@@ -181,7 +181,9 @@ against stored state, never from notification payloads.
   older, so a notification about it changes nothing. The TUI leaves such
   PRs out. They aren't forgotten: an old PR comes back as soon as it's
   updated again. PRs a reconcile no longer returns are marked no longer
-  open, as below, until then.
+  open, as below, until then. A notification whose own `updated_at` is
+  older than the window is dropped before its PR is fetched at all; a
+  first poll can return a great many of those.
 - **Open PRs only.** A notification can point at a closed or merged PR,
   which still lists its pending review requests. Refreshes skip those PRs,
   so they don't look like new requests.
