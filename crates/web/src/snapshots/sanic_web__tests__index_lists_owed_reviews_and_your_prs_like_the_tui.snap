@@ -49,7 +49,7 @@ expression: "readable(&f, &page.body)"
 </span>
 </li>
 <li class="row" data-href="/pr/org/repo/8" data-review-now="/pr/org/repo/8/review-now" data-ignore="/pr/org/repo/8/ignore">
-<span class="state act" title="changes requested">changes requested</span>
+<span class="state quiet" title="changes requested">changes requested</span>
 <span class="status bad">failed</span>
 <span class="drafts">
 </span>

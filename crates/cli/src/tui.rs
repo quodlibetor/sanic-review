@@ -1167,7 +1167,7 @@ mod tests {
                     latest_run: Some(latest("succeeded", None)),
                     state: PrState {
                         approval: Approval::Approved(Checks::Pending),
-                        unanswered: 0,
+                        ..PrState::default()
                     },
                     pending_drafts: 3,
                     ..owed("org/api", 481, "Retry webhook deliveries", "alice")
@@ -1176,8 +1176,8 @@ mod tests {
                 OwedReview {
                     latest_run: Some(latest("queued", None)),
                     state: PrState {
-                        approval: Approval::None,
                         unanswered: 2,
+                        ..PrState::default()
                     },
                     ..owed("org/web", 77, "Fix login flake", "bob")
                 },
@@ -1195,6 +1195,7 @@ mod tests {
                     state: PrState {
                         approval: Approval::ChangesRequested,
                         unanswered: 1,
+                        mine: true,
                     },
                     ..my("org/api", 470, "Speed up search")
                 },
@@ -1203,6 +1204,7 @@ mod tests {
                     state: PrState {
                         approval: Approval::Mergeable,
                         unanswered: 0,
+                        mine: true,
                     },
                     ..my("org/web", 80, "New settings page")
                 },

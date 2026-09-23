@@ -1250,7 +1250,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     let index = f.get("/").await.body;
     for cell in [
         r#"<span class="state act" title="1 unanswered">1 unanswered</span>"#,
-        r#"<span class="state act" title="changes requested">changes requested</span>"#,
+        r#"<span class="state quiet" title="changes requested">changes requested</span>"#,
         r#"<span class="state quiet" title="—">—</span>"#,
         r#"<span class="state good" title="mergeable">mergeable</span>"#,
     ] {
@@ -1278,12 +1278,20 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     let page = f.get("/pr/org/repo/8").await.body;
     assert!(
         page.contains(
-            r#"<span class="state act" title="changes requested">changes requested</span>"#
+            r#"<span class="state quiet" title="changes requested">changes requested</span>"#
         ),
         "{page}"
     );
     // With nothing to say, the header says nothing.
     let page = f.get("/pr/org/repo/10").await.body;
+    assert!(!page.contains(r#"class="state"#), "{page}");
+    // Your own PRs too.
+    f.dashboard
+        .app
+        .store()
+        .record(&snapshot(11, "me", "Quiet change"), "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/11").await.body;
     assert!(!page.contains(r#"class="state"#), "{page}");
     // Archived, a PR of yours says so instead.
     f.post(
