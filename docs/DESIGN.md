@@ -169,6 +169,10 @@ Rules:
    and the base, then `git worktree add` at the head SHA under the data dir.
    Remove the worktree when the run finishes. Your own PRs with auto-fix are
    handled differently; see Auto-fix.
+   The base is fetched by SHA, since that's what the PR snapshot records.
+   The diff runs from the merge base of base and head, as GitHub's does, and
+   fetches never prompt for credentials: they use your git credential
+   helper or fail.
 2. **Prompt.** Assembled from the profile's instruction files and a generated
    brief: PR metadata, the diff or interdiff, relevant threads, previous drafts
    and how you handled them. PR text goes in as quoted data, never as
