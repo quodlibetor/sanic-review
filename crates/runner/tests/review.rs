@@ -282,6 +282,42 @@ async fn cancelling_kills_the_agent_and_removes_the_worktree() {
 }
 
 #[tokio::test]
+async fn cancelling_also_kills_what_the_agent_started() {
+    // The agent starts a process of its own and waits on it.
+    let s = setup(
+        "sleep 30 &\necho $! > \"$d/child\"\ntouch \"$d/started\"\nwait",
+        "",
+        Duration::from_secs(60),
+    );
+    let started = s.fake.path().join("started");
+    let cancel = async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let result = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), cancel)
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    let child = std::fs::read_to_string(s.fake.path().join("child")).unwrap();
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", child.trim()])
+            .status()
+            .unwrap()
+            .success()
+    };
+    // Killed, then reaped by init shortly after.
+    let begun = std::time::Instant::now();
+    while alive() && begun.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!alive(), "the agent's own process outlived it");
+}
+
+#[tokio::test]
 async fn slow_agents_are_killed() {
     let s = setup("sleep 30", "", Duration::from_millis(300));
     let err = s

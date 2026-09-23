@@ -58,6 +58,22 @@ pub struct Outcome {
     pub output: Value,
 }
 
+/// Kills a process group when dropped: when the session ends, or when a
+/// cancelled review drops it. `kill_on_drop` only reaches the agent itself,
+/// not processes it started.
+struct KillGroup(u32);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        // Usually the group has already exited, and this fails harmlessly.
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.0)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 impl Claude {
     #[must_use]
     pub fn new(program: PathBuf, timeout: Duration) -> Self {
@@ -109,11 +125,15 @@ impl Claude {
             .stdout(transcript)
             .stderr(stderr)
             .kill_on_drop(true)
+            // Its own process group, so `KillGroup` can end whatever the
+            // agent started too.
+            .process_group(0)
             .spawn()
             .wrap_err_with(|| format!("starting `{program}`"))
             .with_suggestion(|| {
                 format!("is `{program}` installed? `runner.claude` in the config sets the path")
             })?;
+        let _group = child.id().map(KillGroup);
         // The timeout covers sending the prompt too: a prompt larger than the
         // pipe buffer blocks until the agent reads it.
         let stdin = child.stdin.take();
