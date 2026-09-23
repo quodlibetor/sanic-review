@@ -10,6 +10,8 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
+use crate::config_edit;
+
 /// Editors write a file in several steps (truncate, write, rename); wait for
 /// the burst to finish before reloading.
 const SETTLE: Duration = Duration::from_millis(250);
@@ -25,31 +27,51 @@ pub struct ConfigWatcher {
 
 impl ConfigWatcher {
     /// Watches the file's directory rather than the file, so replacing the
-    /// file by rename (as most editors do) is still seen.
+    /// file by rename (as most editors do) is still seen. A symlinked
+    /// config is watched at the link and at the file it points to when
+    /// this starts, since edits go to that file.
     pub fn new(path: &Path) -> Result<Self> {
-        let dir = path
-            .parent()
-            .map(Path::to_path_buf)
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let name: OsString = path
-            .file_name()
-            .ok_or_else(|| eyre!("config path {} has no file name", path.display()))?
-            .to_owned();
+        let target = config_edit::resolve_links(path)?;
+        // Each file as the watcher names it: under the watched directory,
+        // which is canonical so the link's `..`s and symlinked directories
+        // don't make the same file look like another.
+        let mut files: Vec<PathBuf> = Vec::new();
+        for path in [path, target.as_path()] {
+            let dir = path
+                .parent()
+                .map(Path::to_path_buf)
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+            let name: OsString = path
+                .file_name()
+                .ok_or_else(|| eyre!("config path {} has no file name", path.display()))?
+                .to_owned();
+            let file = dir.join(name);
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        let dirs: Vec<PathBuf> = files
+            .iter()
+            .filter_map(|file| file.parent().map(Path::to_path_buf))
+            .collect();
         let (tx, events) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 let Ok(event) = event else { return };
-                let touches_config = event.paths.iter().any(|p| p.file_name() == Some(&name));
+                let touches_config = event.paths.iter().any(|p| files.contains(p));
                 if touches_config && !matches!(event.kind, EventKind::Access(_)) {
                     // A closed receiver means serve is shutting down.
                     let _ = tx.send(());
                 }
             })
             .wrap_err("starting the config file watcher")?;
-        watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .wrap_err_with(|| format!("watching {}", dir.display()))?;
+        for dir in &dirs {
+            watcher
+                .watch(dir, RecursiveMode::NonRecursive)
+                .wrap_err_with(|| format!("watching {}", dir.display()))?;
+        }
         Ok(Self {
             _watcher: watcher,
             events,
@@ -103,6 +125,31 @@ mod tests {
         std::fs::write(&tmp, "c").unwrap();
         std::fs::rename(&tmp, &path).unwrap();
         tokio::time::timeout(wait, watcher.changed()).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sees_edits_to_the_file_a_symlinked_config_points_to() {
+        let dir = TempDir::new().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("sanic.toml");
+        std::fs::write(&target, "a").unwrap();
+        let path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let mut watcher = ConfigWatcher::new(&path).unwrap();
+
+        // A file of the config's name beside the target isn't the config.
+        std::fs::write(dotfiles.join("config.toml"), "x").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), watcher.changed())
+                .await
+                .is_err()
+        );
+        config_edit::write_atomically(&path, "b").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), watcher.changed())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

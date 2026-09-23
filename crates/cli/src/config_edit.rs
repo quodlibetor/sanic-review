@@ -3,7 +3,7 @@
 //! here.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
 };
 
@@ -34,14 +34,55 @@ pub fn new_table() -> Table {
 }
 
 /// Writes via a temporary file and rename, so `serve` never reads a
-/// half-written config.
+/// half-written config. A symlinked config, say from a dotfiles repo,
+/// stays a symlink: the file it points at is the one replaced, so its
+/// directory must be writable. One that isn't, such as the Nix store, is
+/// an error rather than a link silently swapped for a file.
 pub fn write_atomically(path: &Path, text: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+    let target = &resolve_links(path)?;
+    let linked = if target == path {
+        String::new()
+    } else {
+        format!(", which {} links to", path.display())
+    };
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)
+            .wrap_err_with(|| format!("creating {}{linked}", dir.display()))?;
     }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).wrap_err_with(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).wrap_err_with(|| format!("replacing {}", path.display()))
+    let tmp = target.with_extension("toml.tmp");
+    std::fs::write(&tmp, text).wrap_err_with(|| {
+        format!(
+            "writing {} beside {}{linked}",
+            tmp.display(),
+            target.display()
+        )
+    })?;
+    std::fs::rename(&tmp, target).wrap_err_with(|| format!("replacing {}", target.display()))
+}
+
+/// Hops a symlink can take before it's taken to be a loop, as Linux's
+/// own limit.
+const MAX_LINKS: usize = 40;
+
+/// The file `path` names once symlinks are followed, whether or not that
+/// file exists yet; `path` itself if it isn't a symlink.
+pub fn resolve_links(path: &Path) -> Result<PathBuf> {
+    let mut path = path.to_owned();
+    for _ in 0..MAX_LINKS {
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&path)
+                    .wrap_err_with(|| format!("reading the symlink {}", path.display()))?;
+                // A relative target is relative to the link's directory.
+                path = match path.parent() {
+                    Some(dir) => dir.join(target),
+                    None => target,
+                };
+            }
+            _ => return Ok(path),
+        }
+    }
+    bail!("{} is a symlink loop", path.display())
 }
 
 /// Adds `pattern` to `skip_titles` in `[review_requests]`, or in
@@ -156,6 +197,57 @@ skip_titles = ["wip*"]
                 "{pattern} lost:\n{text}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_stays_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let target = dotfiles.join("sanic.toml");
+        std::fs::write(&target, CONFIG).unwrap();
+        // Linked relatively, through a second link.
+        let middle = config_dir.join("middle.toml");
+        symlink("../dotfiles/sanic.toml", &middle).unwrap();
+        let path = config_dir.join("config.toml");
+        symlink(&middle, &path).unwrap();
+
+        assert_eq!(
+            resolve_links(&path).unwrap(),
+            config_dir.join("../dotfiles/sanic.toml")
+        );
+        assert!(add_skip_title_to_file(&path, None, "wip*").unwrap());
+        for link in [&path, &middle] {
+            assert!(
+                std::fs::symlink_metadata(link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains(r#"skip_titles = ["wip*"]"#), "{text}");
+        assert!(text.starts_with("# My config."), "{text}");
+        // No temporary file is left beside either.
+        assert!(!config_dir.join("config.toml.tmp").exists());
+        assert!(!dotfiles.join("sanic.toml.tmp").exists());
+
+        // A dangling link gets its target created; a loop is an error.
+        let dangling = config_dir.join("dangling.toml");
+        symlink("../dotfiles/new.toml", &dangling).unwrap();
+        write_atomically(&dangling, "x = 1\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dotfiles.join("new.toml")).unwrap(),
+            "x = 1\n"
+        );
+        let looped = config_dir.join("loop.toml");
+        symlink(&looped, &looped).unwrap();
+        assert!(write_atomically(&looped, "").is_err());
     }
 
     #[test]
