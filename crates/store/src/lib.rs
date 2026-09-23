@@ -22,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_runs_drafts.sql"),
     include_str!("migrations/0003_pr_body.sql"),
     include_str!("migrations/0004_pr_open.sql"),
+    include_str!("migrations/0005_pr_archived.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -44,6 +45,7 @@ pub struct PrSummary {
     pub profile: String,
     pub title: String,
     pub is_draft: bool,
+    pub archived: bool,
 }
 
 /// A logged trigger, as read back from the event log.
@@ -236,17 +238,44 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT profile, title, is_draft FROM prs WHERE repo = ?1 AND number = ?2",
+                "SELECT profile, title, is_draft, archived FROM prs
+                 WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
                     Ok(PrSummary {
                         profile: row.get(0)?,
                         title: row.get(1)?,
                         is_draft: row.get(2)?,
+                        archived: row.get(3)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    /// Archives or unarchives `key`. Archiving also supersedes every run of
+    /// the PR that's queued but not started, whatever its kind: an archived
+    /// PR is meant to be silent. A running one finishes. `false` if the PR
+    /// isn't tracked.
+    pub fn set_archived(&mut self, key: &PrKey, archived: bool) -> Result<bool> {
+        let repo = key.repo.to_string();
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE prs SET archived = ?3 WHERE repo = ?1 AND number = ?2",
+            params![repo, key.number, archived],
+        )?;
+        if archived {
+            tx.execute(
+                &format!(
+                    "UPDATE runs SET status = 'superseded', finished_at = {NOW}
+                     WHERE repo = ?1 AND number = ?2 AND status = 'queued'"
+                ),
+                params![repo, key.number],
+            )?;
+        }
+        tx.commit()
+            .wrap_err_with(|| format!("archiving {}", key.url()))?;
+        Ok(changed == 1)
     }
 
     pub fn tracked_prs(&self) -> Result<u32> {
@@ -522,8 +551,30 @@ mod tests {
                 profile: "other".into(),
                 title: "build(deps): bump".into(),
                 is_draft: false,
+                archived: false,
             })
         );
+    }
+
+    #[test]
+    fn archiving_sticks_through_polls_and_supersedes_queued_reviews() {
+        let mut store = Store::open_in_memory().unwrap();
+        let snap = snapshot();
+        let mut other = snapshot();
+        other.key.number = 8;
+        assert!(!store.set_archived(&snap.key, true).unwrap());
+        store.record(&snap, "default", &[]).unwrap();
+        let run = store
+            .queue_review(&store.review_request(&snap.key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+
+        assert!(store.set_archived(&snap.key, true).unwrap());
+        assert_eq!(store.run(run.id).unwrap().unwrap().status, "superseded");
+        store.record(&snap, "default", &[]).unwrap();
+        assert!(store.pr_summary(&snap.key).unwrap().unwrap().archived);
+        assert!(store.set_archived(&snap.key, false).unwrap());
+        assert!(!store.pr_summary(&snap.key).unwrap().unwrap().archived);
     }
 
     #[test]

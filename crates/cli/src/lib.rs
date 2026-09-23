@@ -1,5 +1,6 @@
 //! The `sanic-review` command line.
 
+mod archive;
 pub mod logging;
 pub mod poll;
 pub mod schedule;
@@ -27,6 +28,10 @@ enum Command {
     Serve(ServeArgs),
     /// Write or update the config: pick teams, local checkouts and orgs.
     Setup(setup::SetupArgs),
+    /// Stop reviewing a PR automatically, and hide it in the TUI.
+    Archive(archive::ArchiveArgs),
+    /// Undo `archive`.
+    Unarchive(archive::ArchiveArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -69,6 +74,14 @@ impl Cli {
             Command::Setup(args) => {
                 logging::init_stdout();
                 setup::run(args).await
+            }
+            Command::Archive(args) => {
+                logging::init_stdout();
+                archive::run(args, true)
+            }
+            Command::Unarchive(args) => {
+                logging::init_stdout();
+                archive::run(args, false)
             }
         }
     }

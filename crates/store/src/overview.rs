@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use color_eyre::eyre::Result;
-use rusqlite::params;
+use rusqlite::{Row, params, types::Type};
 use sanic_core::{pr::PrKey, repo::RepoName};
 
 use crate::Store;
@@ -18,6 +18,8 @@ pub struct OwedReview {
     /// The profile it matched when last polled.
     pub profile: String,
     pub is_draft: bool,
+    /// Set by you; it stops automatic reviews.
+    pub archived: bool,
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
@@ -36,6 +38,7 @@ pub struct MyPr {
     pub key: PrKey,
     pub title: String,
     pub is_draft: bool,
+    pub archived: bool,
     pub review_state: ReviewState,
     pub pending_drafts: u32,
 }
@@ -78,7 +81,7 @@ impl Store {
     /// Open PRs by others that request your review, by repo and number.
     pub fn owed_reviews(&self, me: &str) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft,
+            "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft, p.archived,
                     latest.status, latest.error,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
@@ -90,52 +93,29 @@ impl Store {
              WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
              ORDER BY p.repo, p.number",
         )?;
-        let rows = stmt
+        let owed = stmt
             .query_map([me], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                ))
+                let status: Option<String> = row.get(7)?;
+                let error: Option<String> = row.get(8)?;
+                Ok(OwedReview {
+                    key: key_columns(row)?,
+                    title: row.get(2)?,
+                    author: row.get(3)?,
+                    profile: row.get(4)?,
+                    is_draft: row.get(5)?,
+                    archived: row.get(6)?,
+                    latest_run: status.map(|status| LatestRun { status, error }),
+                    pending_drafts: row.get(9)?,
+                })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    repo,
-                    number,
-                    title,
-                    author,
-                    profile,
-                    is_draft,
-                    status,
-                    error,
-                    pending_drafts,
-                )| {
-                    Ok(OwedReview {
-                        key: key(&repo, number)?,
-                        title,
-                        author,
-                        profile,
-                        is_draft,
-                        latest_run: status.map(|status| LatestRun { status, error }),
-                        pending_drafts,
-                    })
-                },
-            )
-            .collect()
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(owed)
     }
 
     /// Open PRs you authored, by repo and number.
     pub fn my_prs(&self, me: &str) -> Result<Vec<MyPr>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.repo, p.number, p.title, p.is_draft,
+            "SELECT p.repo, p.number, p.title, p.is_draft, p.archived,
                     (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
                      WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
              FROM prs p
@@ -150,19 +130,23 @@ impl Store {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(repo, number, title, is_draft, pending_drafts)| {
-                Ok(MyPr {
-                    review_state: self.review_state(&repo, number, me)?,
-                    key: key(&repo, number)?,
-                    title,
-                    is_draft,
-                    pending_drafts,
-                })
-            })
+            .map(
+                |(repo, number, title, is_draft, archived, pending_drafts)| {
+                    Ok(MyPr {
+                        review_state: self.review_state(&repo, number, me)?,
+                        key: key(&repo, number)?,
+                        title,
+                        is_draft,
+                        archived,
+                        pending_drafts,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -238,6 +222,16 @@ impl Store {
             })
             .collect()
     }
+}
+
+/// The PR key in a row's first two columns.
+fn key_columns(row: &Row<'_>) -> rusqlite::Result<PrKey> {
+    let repo: String = row.get(0)?;
+    Ok(PrKey {
+        repo: RepoName::parse(&repo)
+            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, err.into()))?,
+        number: row.get(1)?,
+    })
 }
 
 fn key(repo: &str, number: u32) -> Result<PrKey> {
@@ -332,10 +326,16 @@ mod tests {
                 author: "alice".into(),
                 profile: "default".into(),
                 is_draft: false,
+                archived: false,
                 latest_run: None,
                 pending_drafts: 0,
             }]
         );
+
+        // Archived PRs are still listed, flagged, for the UI to hide.
+        store.set_archived(&requested.key, true).unwrap();
+        assert!(store.owed_reviews("me").unwrap()[0].archived);
+        store.set_archived(&requested.key, false).unwrap();
 
         let run = store.queue_review(&request(&requested)).unwrap().unwrap();
         let latest = |store: &Store| store.owed_reviews("me").unwrap()[0].latest_run.clone();

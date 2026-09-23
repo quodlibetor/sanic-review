@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use color_eyre::eyre::{Result, eyre};
+
 use crate::repo::RepoName;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -17,6 +19,23 @@ impl PrKey {
     #[must_use]
     pub fn url(&self) -> String {
         format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    }
+
+    /// Parses a PR page URL as [`PrKey::url`] writes it. Anything after
+    /// the number, such as `/files` or a `#fragment`, is ignored.
+    pub fn parse_url(url: &str) -> Result<Self> {
+        let parsed = url.strip_prefix("https://github.com/").and_then(|rest| {
+            let mut parts = rest.split('/');
+            let (owner, name) = (parts.next()?, parts.next()?);
+            (parts.next()? == "pull").then_some(())?;
+            let number = parts.next()?;
+            let number = number.split(['#', '?']).next()?.parse().ok()?;
+            Some((RepoName::parse(&format!("{owner}/{name}")).ok()?, number))
+        });
+        let (repo, number) = parsed.ok_or_else(|| {
+            eyre!("`{url}` is not a pull request URL like https://github.com/owner/name/pull/123")
+        })?;
+        Ok(Self { repo, number })
     }
 }
 
@@ -137,6 +156,27 @@ impl PrSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls_parse_back_to_keys() {
+        let key = PrKey {
+            repo: RepoName::new("org", "repo"),
+            number: 7,
+        };
+        assert_eq!(PrKey::parse_url(&key.url()).unwrap(), key);
+        assert_eq!(
+            PrKey::parse_url("https://github.com/Org/Repo/pull/7/files#diff").unwrap(),
+            key
+        );
+        for bad in [
+            "https://github.com/org/repo/issues/7",
+            "https://github.com/org/repo/pull/x",
+            "https://example.com/org/repo/pull/7",
+            "org/repo#7",
+        ] {
+            assert!(PrKey::parse_url(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn url_is_the_github_pull_page() {

@@ -230,9 +230,13 @@ pub async fn schedule(
 
 /// Why `key` isn't reviewed automatically, if it isn't.
 fn skip(store: &Store, rules: &SkipRules, key: &PrKey) -> Result<Option<Skip>> {
-    Ok(store
-        .pr_summary(key)?
-        .and_then(|pr| rules.check(&pr.profile, &pr.title, pr.is_draft)))
+    Ok(store.pr_summary(key)?.and_then(|pr| {
+        if pr.archived {
+            Some(Skip::Archived)
+        } else {
+            rules.check(&pr.profile, &pr.title, pr.is_draft)
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -500,6 +504,22 @@ mod tests {
         assert_eq!(run.request.trigger, ReviewTrigger::Requested);
         drop(tx);
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn archived_prs_are_not_queued() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        store.lock().unwrap().set_archived(&key(1), true).unwrap();
+        let task = tokio::spawn(schedule(rx, store, runs_tx, due_tx, skips));
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        drop(tx);
+        task.await.unwrap().unwrap();
+        assert!(runs.try_recv().is_err());
     }
 
     struct NoCheckouts;

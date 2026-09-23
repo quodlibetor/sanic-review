@@ -42,6 +42,8 @@ impl TitleFilter {
 /// Why a PR isn't reviewed automatically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skip {
+    /// You archived the PR.
+    Archived,
     /// The PR is a draft, and `skip_drafts` is on.
     Draft,
     /// The title matches `review_requests.skip_titles` or the profile's.
@@ -53,6 +55,7 @@ impl Skip {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Archived => "archived",
             Self::Draft => "draft",
             Self::Title { .. } => "title",
         }
@@ -62,6 +65,7 @@ impl Skip {
 impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Archived => write!(f, "it's archived"),
             Self::Draft => write!(f, "it's a draft"),
             Self::Title { pattern } => write!(f, "title matches `{pattern}`"),
         }
