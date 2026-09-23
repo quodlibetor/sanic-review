@@ -10,6 +10,7 @@ clap.workspace = true
 color-eyre.workspace = true
 inquire.workspace = true
 notify.workspace = true
+ratatui.workspace = true
 sanic-core.workspace = true
 sanic-github.workspace = true
 sanic-runner.workspace = true
@@ -23,6 +24,7 @@ tracing-error.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true

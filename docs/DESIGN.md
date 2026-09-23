@@ -52,7 +52,7 @@ port forwarding.
 
 `~/.config/sanic-review/config.toml`. Data lives under
 `~/.local/share/sanic-review/`: the SQLite DB, bare repo mirrors, run
-transcripts. Nothing lives under `/tmp`.
+transcripts, and `serve.log` when the TUI is in use. Nothing lives under `/tmp`.
 
 Each profile lists the targets it applies to in `repos`. An entry is one of:
 
@@ -355,8 +355,27 @@ available when tuning instruction files.
   one-line summary: unseen PRs, pending drafts, running and queued runs.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
-- `--ui tui`: ratatui list of the same unseen items, with dashboard URLs, plus
-  a run-activity pane. No editing happens in the TUI.
+- `--ui tui`: a ratatui summary with four panes. No editing happens in the
+  TUI.
+  - **Reviews you owe:** open PRs by others that request your review, with the
+    latest run's status (queued, held by `--no-reviews`, running, drafted,
+    failed) and the pending draft count.
+  - **Your PRs:** every open PR you authored, with its review state
+    (approved, changes requested, waiting) and pending drafts.
+  - **Activity:** recent triggers and run queues, starts and finishes.
+  - **Log:** the tracing output.
+
+  Every PR row shows its github.com URL, so it's clickable. Until the
+  dashboard exists there are no dashboard URLs or `views`, so both PR panes
+  list every open tracked PR. Filtering to unseen items arrives with the
+  dashboard.
+  The TUI opens its own read-only connection and rereads the store on a
+  short interval, so the poller, scheduler and runner don't know it exists.
+  Logs never go to stdout while it runs. They go to the log pane and are
+  appended to `serve.log` in the data dir.
+  Keys: `q` or Ctrl-C quits `serve`, Tab and Shift-Tab switch pane, `j`/`k`
+  or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
+  The terminal is restored on exit and on panic.
 
 ## Auto-fix (own PRs)
 

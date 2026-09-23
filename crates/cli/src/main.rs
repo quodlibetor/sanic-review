@@ -4,26 +4,17 @@ use std::io::IsTerminal;
 
 use clap::Parser;
 use color_eyre::{config::HookBuilder, config::Theme, eyre::Result};
-use sanic_review::Cli;
-use tracing_error::ErrorLayer;
-use tracing_subscriber::{EnvFilter, prelude::*};
+use sanic_review::{Cli, logging};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Honour NO_COLOR, and keep escapes out of pipes and log files.
-    let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let hook = HookBuilder::default();
-    let hook = if color && std::io::stderr().is_terminal() {
+    let hook = if logging::color() && std::io::stderr().is_terminal() {
         hook
     } else {
         hook.theme(Theme::new())
     };
     hook.install()?;
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer().with_ansi(color && std::io::stdout().is_terminal()))
-        .with(ErrorLayer::default())
-        .init();
-
+    // Each command sets up tracing, since where logs go depends on its UI.
     Cli::parse().run().await
 }
