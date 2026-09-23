@@ -402,16 +402,36 @@ struct PathContext<'a> {
 
 impl PathContext<'_> {
     fn expand(&self, raw: &str) -> Result<PathBuf> {
-        let path = match raw.strip_prefix("~/") {
-            Some(rest) => home()?.join(rest),
-            None if raw == "~" => home()?,
-            None => PathBuf::from(raw),
-        };
-        Ok(if path.is_absolute() {
-            path
-        } else {
-            self.base.join(path)
-        })
+        expand_path(raw, self.base)
+    }
+}
+
+/// Expands a config path: `~` is the home directory, and relative paths
+/// resolve against `base` (the config file's directory).
+pub fn expand_path(raw: &str, base: &Path) -> Result<PathBuf> {
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => home()?.join(rest),
+        None if raw == "~" => home()?,
+        None => PathBuf::from(raw),
+    };
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    })
+}
+
+/// The inverse of [`expand_path`] for writing configs: paths under the home
+/// directory are written with `~/`.
+#[must_use]
+pub fn contract_path(path: &Path) -> String {
+    match home()
+        .ok()
+        .and_then(|h| path.strip_prefix(h).ok().map(Path::to_path_buf))
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 

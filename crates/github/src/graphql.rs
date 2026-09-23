@@ -266,6 +266,24 @@ impl Client {
         Ok(teams)
     }
 
+    /// Logins of the orgs the authenticated user belongs to. Needs
+    /// `read:org`.
+    pub async fn my_orgs(&self) -> Result<Vec<String>, ApiError> {
+        let mut url = format!("{}?per_page=100", self.url("/user/orgs"));
+        let mut orgs = Vec::new();
+        loop {
+            let resp = self.send(self.get(&url), "your orgs").await?;
+            let next = next_link(resp.headers());
+            let page: Vec<Login> = resp.json().await.wrap_err("decoding your orgs")?;
+            orgs.extend(page.into_iter().map(|o| o.login.to_ascii_lowercase()));
+            match next {
+                Some(next) => url = next,
+                None => break,
+            }
+        }
+        Ok(orgs)
+    }
+
     /// Changed paths, including the old path of renamed files.
     async fn pull_files(&self, key: &PrKey) -> Result<Vec<String>, ApiError> {
         #[derive(Deserialize)]

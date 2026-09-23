@@ -3,6 +3,7 @@
 pub mod poll;
 pub mod schedule;
 mod serve;
+mod setup;
 mod watch;
 mod work;
 
@@ -22,6 +23,8 @@ pub struct Cli {
 enum Command {
     /// Watch GitHub, run reviews, and serve the dashboard in the foreground.
     Serve(ServeArgs),
+    /// Write or update the config: pick teams, local checkouts and orgs.
+    Setup(setup::SetupArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -55,6 +58,7 @@ impl Cli {
     pub async fn run(self) -> Result<()> {
         match self.command {
             Command::Serve(args) => serve::run(args).await,
+            Command::Setup(args) => setup::run(args).await,
         }
     }
 }
@@ -73,7 +77,9 @@ mod tests {
     #[test]
     fn serve_defaults_to_log_ui() {
         let cli = Cli::try_parse_from(["sanic-review", "serve"]).unwrap();
-        let Command::Serve(args) = cli.command;
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve");
+        };
         assert_eq!(args.ui, Ui::Logs);
     }
 }
