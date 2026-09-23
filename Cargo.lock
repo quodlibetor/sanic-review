@@ -1651,6 +1651,7 @@ dependencies = [
  "color-eyre",
  "sanic-core",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
