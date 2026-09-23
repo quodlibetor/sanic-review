@@ -244,6 +244,27 @@ impl Store {
         Ok(())
     }
 
+    /// PRs with a review running, by repo and number.
+    pub fn running_reviews(&self) -> Result<Vec<PrKey>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT repo, number FROM runs
+             WHERE status = 'running' AND kind = ?1 ORDER BY repo, number",
+        )?;
+        let rows = stmt
+            .query_map([REVIEW], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(repo, number)| {
+                Ok(PrKey {
+                    repo: RepoName::parse(&repo)?,
+                    number,
+                })
+            })
+            .collect()
+    }
+
     /// Puts a run that was interrupted back in the queue, for the next
     /// start to run (or hold).
     pub fn requeue_run(&self, id: i64) -> Result<()> {
@@ -749,7 +770,9 @@ mod tests {
     fn a_cancelled_run_is_queued_again() {
         let mut store = store();
         let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert!(store.running_reviews().unwrap().is_empty());
         store.claim_run(run.id).unwrap();
+        assert_eq!(store.running_reviews().unwrap(), [snapshot().key]);
         store.requeue_run(run.id).unwrap();
         assert_eq!(status(&store, run.id), "queued");
         assert_eq!(store.recover_runs().unwrap(), [run]);
