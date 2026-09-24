@@ -125,7 +125,7 @@ expression: "readable(&f, &page.body)"
 </article>
 <article class="draft dc pending" id="draft-2">
 <div class="h">
-<span class="anc">src/lib.rs:3</span>
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
 <span class="sev major">major</span>
 <span class="dim conf">high conf.</span>
 <span class="sp">
@@ -188,7 +188,7 @@ expression: "readable(&f, &page.body)"
 </article>
 <article class="draft dc pending" id="draft-3">
 <div class="h">
-<span class="anc">src/gone.rs:40</span>
+<a class="anc" href="https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40" title="On GitHub, at the reviewed commit">src/gone.rs:40</a>
 <span class="sev major">major</span>
 <span class="dim conf">high conf.</span>
 <span class="tag-body" title="Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body.">not in the diff → goes in the body</span>

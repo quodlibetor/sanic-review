@@ -22,8 +22,9 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
     index::{Overview, archive_form, owed_status, why},
+    links,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
-    pr_href,
+    pr_href, submit,
     threads::{self, Existing},
 };
 
@@ -305,8 +306,10 @@ fn drafts_section(
     threads: &[Thread],
 ) -> Markup {
     let existing = Existing {
+        key: &pr.key,
         threads,
         head: &run.head_sha,
+        pr_head: &pr.head_sha,
     };
     let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
     let preselect = if suggested == "request_changes" {
@@ -397,7 +400,11 @@ pub fn draft_card(
                 @if draft.kind == "summary" {
                     span.anc { "Summary" } span.tag-sum { "the review body" }
                 } @else {
-                    span.anc { (anchor(draft)) }
+                    @if let Some(url) = line_link(draft, existing.at()) {
+                        a.anc href=(url) title="On GitHub, at the reviewed commit" { (anchor(draft)) }
+                    } @else {
+                        span.anc { (anchor(draft)) }
+                    }
                     @if let Some(severity) = &draft.severity { span.sev.(severity) { (severity) } }
                     @if let Some(confidence) = &draft.confidence {
                         span.dim.conf { (confidence) " conf." }
@@ -521,8 +528,8 @@ fn in_threads(
                 @for thread in shown {
                     @let actions = if choosable { choose_form(app, draft, thread) } else { html! {} };
                     (threads::thread_box_with(
+                        existing.at(),
                         thread,
-                        existing.head,
                         chosen.is_some_and(|c| c.id == thread.id),
                         &actions,
                     ))
@@ -603,6 +610,16 @@ pub async fn choose_thread(
     decided(&app, id, &headers, |store| store.choose_thread(id, &choice))
 }
 
+/// Where `draft`'s lines are on GitHub: see [`links::At::lines`]; for
+/// lines the diff doesn't have, in the file at the reviewed head.
+pub fn line_link(draft: &DraftRow, at: links::At<'_>) -> Option<String> {
+    if draft.unanchored {
+        return submit::blob_link(draft, at.reviewed);
+    }
+    let (path, side, lines) = threads::lines(draft)?;
+    at.lines(path, side, lines)
+}
+
 /// `path:line`, or `path:start-line`, with the side when it's the old one.
 pub fn anchor(draft: &DraftRow) -> String {
     let path = draft.path.as_deref().unwrap_or("?");
@@ -669,7 +686,7 @@ fn decided(
     headers: &HeaderMap,
     change: impl FnOnce(&sanic_store::Store) -> color_eyre::Result<bool>,
 ) -> Result<Response, Error> {
-    let (draft, threads, head) = {
+    let (draft, threads, head, pr_head) = {
         let store = app.store();
         let Some(draft) = store.draft_row(id)? else {
             return Err(Error::NotFound(format!("there's no draft {id}")));
@@ -689,15 +706,21 @@ fn decided(
                 .find(|run| run.id == draft.run_id)
                 .map(|run| run.head_sha)
                 .unwrap_or_default();
-            Ok((draft, store.threads(&key)?, head))
+            let pr_head = store
+                .pr_page(&key)?
+                .map(|pr| pr.head_sha)
+                .unwrap_or_default();
+            Ok((draft, store.threads(&key)?, head, pr_head))
         };
         load().map_err(Error::pr(&key))?
     };
     if headers.contains_key("hx-request") {
         let diff = read_diff(app, draft.run_id);
         let existing = Existing {
+            key: &draft.key,
             threads: &threads,
             head: &head,
+            pr_head: &pr_head,
         };
         return Ok(draft_card(app, &draft, diff.as_ref(), existing).into_response());
     }

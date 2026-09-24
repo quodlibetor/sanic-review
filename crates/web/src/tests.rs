@@ -3053,3 +3053,25 @@ async fn a_posted_review_lists_the_copies_it_marks_posted_in_other_runs() {
     assert_eq!(status(ids[1]), "posted");
     assert_ne!(status(ids[2]), "posted");
 }
+
+#[tokio::test]
+async fn once_the_pr_moves_on_a_drafts_lines_link_to_the_file_at_the_reviewed_head() {
+    let f = fixture(false).await;
+    let moved = PrSnapshot {
+        head_sha: "head8".into(),
+        ..snapshot(7, "alice", "Add the thing")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&moved, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/7").await;
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(
+        card.contains(
+            r#"<a class="anc" href="https://github.com/org/repo/blob/head7/src/lib.rs?plain=1#L3""#
+        ),
+        "{card}"
+    );
+}

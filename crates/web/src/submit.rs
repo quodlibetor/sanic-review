@@ -3,7 +3,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Write as _,
     time::{Duration, SystemTime},
 };
 
@@ -30,6 +29,7 @@ use tracing::{info, warn};
 use crate::{
     App, Error, Shared,
     guard::Csrf,
+    links,
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
     pr, pr_href, threads,
 };
@@ -309,37 +309,10 @@ fn in_thread(
 
 /// A link to `draft`'s lines in the file at `head`, so a comment that
 /// can't go inline still points at them. `None` without a path and line,
-/// or for lines of the old file, which `head` doesn't have. `plain=1`, or
-/// GitHub shows a Markdown file rendered, without its lines.
-fn blob_link(draft: &DraftRow, head: &str) -> Option<String> {
-    let (path, line) = (draft.path.as_deref()?, draft.line?);
-    if draft.side.as_deref() == Some("LEFT") {
-        return None;
-    }
-    let path: Vec<String> = path.split('/').map(percent_encode).collect();
-    let lines = match draft.start_line {
-        Some(start) if start != line => format!("L{start}-L{line}"),
-        _ => format!("L{line}"),
-    };
-    Some(format!(
-        "https://github.com/{}/blob/{head}/{}?plain=1#{lines}",
-        draft.key.repo,
-        path.join("/")
-    ))
-}
-
-/// `segment` with everything but RFC 3986's unreserved characters
-/// percent-encoded, byte by byte.
-fn percent_encode(segment: &str) -> String {
-    let mut out = String::with_capacity(segment.len());
-    for b in segment.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(b));
-        } else {
-            let _ = write!(out, "%{b:02X}");
-        }
-    }
-    out
+/// or for lines of the old file, which `head` doesn't have.
+pub(crate) fn blob_link(draft: &DraftRow, head: &str) -> Option<String> {
+    let (path, side, lines) = threads::lines(draft)?;
+    (side == Side::Right).then(|| links::blob_url(&draft.key, head, path, lines))
 }
 
 /// `draft` as an inline comment, if GitHub will take it inline.
@@ -575,7 +548,14 @@ pub async fn preview(
         div.cols {
             div {
                 (checklist(&built, &pr, &back))
-                (readable_review(&built))
+                (readable_review(
+                    links::At {
+                        key: &pr.key,
+                        reviewed: &built.head,
+                        current: &pr.head_sha,
+                    },
+                    &built,
+                ))
             }
             div.wirecol {
                 @for (i, step) in steps.iter().enumerate() {
@@ -742,7 +722,7 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
 
 /// The review as GitHub will show it: its body, then each inline comment;
 /// then the replies in existing threads, and the thumbs-ups.
-fn readable_review(built: &Built) -> Markup {
+fn readable_review(at: links::At<'_>, built: &Built) -> Markup {
     html! {
     @if let Some(review) = &built.review {
         @let comments = review.comments.len();
@@ -772,7 +752,7 @@ fn readable_review(built: &Built) -> Markup {
         h2.sec { "Replies in existing threads " span.dim { (built.replies.len()) } }
         @for reply in &built.replies {
             div.rv {
-                (threads::thread_box(&reply.thread, &built.head))
+                (threads::thread_box(at, &reply.thread))
                 div.dim { "draft " (reply.draft) ", in reply:" }
                 pre { (reply.new.body) }
             }
@@ -782,7 +762,7 @@ fn readable_review(built: &Built) -> Markup {
         h2.sec { "👍 on existing comments " span.dim { (built.reactions.len()) } }
         @for reaction in &built.reactions {
             div.rv {
-                (threads::thread_head(&reaction.thread, &built.head))
+                (threads::thread_head(at, &reaction.thread))
                 div { "👍 on " (threads::said(&reaction.comment)) }
                 div.dim {
                     "in place of "
