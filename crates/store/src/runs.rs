@@ -117,12 +117,11 @@ pub struct Draft {
     pub note: Option<String>,
 }
 
-/// Counts for the terminal's summary line.
+/// Run counts for the status line; its pending drafts are the lists'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RunCounts {
     pub queued: u32,
     pub running: u32,
-    pub pending_drafts: u32,
 }
 
 impl Store {
@@ -810,18 +809,18 @@ impl Store {
         Ok(drafts)
     }
 
+    /// Runs queued and running. The pending drafts to go with them are
+    /// [`Store::listed_pending_drafts`].
     pub fn run_counts(&self) -> Result<RunCounts> {
         Ok(self.conn.query_row(
             "SELECT
                  (SELECT count(*) FROM runs WHERE status = 'queued'),
-                 (SELECT count(*) FROM runs WHERE status = 'running'),
-                 (SELECT count(*) FROM drafts WHERE status = 'pending')",
+                 (SELECT count(*) FROM runs WHERE status = 'running')",
             [],
             |row| {
                 Ok(RunCounts {
                     queued: row.get(0)?,
                     running: row.get(1)?,
-                    pending_drafts: row.get(2)?,
                 })
             },
         )?)
@@ -1498,9 +1497,9 @@ mod tests {
             RunCounts {
                 queued: 0,
                 running: 0,
-                pending_drafts: 2
             }
         );
+        assert_eq!(store.listed_pending_drafts("me", None, false).unwrap(), 2);
     }
 
     #[test]

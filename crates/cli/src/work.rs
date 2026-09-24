@@ -331,15 +331,12 @@ impl Worker {
         self.log_counts();
     }
 
+    /// Queued and running runs. Not pending drafts: they're counted as
+    /// the lists show them, which takes the recency window and who you are.
     fn log_counts(&self) {
         let counts = self.store().run_counts();
         match counts {
-            Ok(counts) => info!(
-                queued = counts.queued,
-                running = counts.running,
-                pending_drafts = counts.pending_drafts,
-                "runs"
-            ),
+            Ok(counts) => info!(queued = counts.queued, running = counts.running, "runs"),
             Err(err) => warn!("counting runs failed: {err:?}"),
         }
     }

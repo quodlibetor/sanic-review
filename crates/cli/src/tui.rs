@@ -1300,9 +1300,16 @@ fn render_status(
         frame.render_widget(Paragraph::new(notice), area);
         return;
     }
+    // The lists' own, as the panes show them.
+    let pending: u32 = overview
+        .owed
+        .iter()
+        .map(|pr| pr.pending_drafts)
+        .chain(overview.mine.iter().map(|pr| pr.pending_drafts))
+        .sum();
     let mut right = format!(
-        "{} queued · {} running · {} pending drafts ",
-        counts.queued, counts.running, counts.pending_drafts
+        "{} queued · {} running · {pending} pending drafts ",
+        counts.queued, counts.running
     );
     if manual_reviews {
         right.insert_str(0, "manual reviews · ");
@@ -1560,7 +1567,6 @@ mod tests {
             counts: RunCounts {
                 queued: 1,
                 running: 0,
-                pending_drafts: 3,
             },
             refreshing: None,
             running: Vec::new(),
@@ -1806,6 +1812,39 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 23)].symbol().to_owned())
             .collect();
         assert!(row.starts_with(" refreshing 37/264 "), "{row}");
+    }
+
+    #[test]
+    fn the_status_bar_counts_the_drafts_the_panes_show() {
+        let mut app = App::new(false);
+        let mut overview = Overview::default();
+        overview.owed.push(OwedReview {
+            pending_drafts: 2,
+            ..owed("org/web", 82, "Tidy the logs", "erin")
+        });
+        overview.mine.push(MyPr {
+            pending_drafts: 1,
+            ..my("org/web", 83, "Speed up search")
+        });
+        overview.mine.push(MyPr {
+            archived: true,
+            pending_drafts: 4,
+            ..my("org/web", 84, "Abandoned experiment")
+        });
+        app.set_overview(overview);
+        let status = |app: &mut App| -> String {
+            let terminal = draw(app, 80, 24);
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, 23)].symbol().to_owned())
+                .collect()
+        };
+        let row = status(&mut app);
+        assert!(row.ends_with(" 3 pending drafts "), "{row}");
+        // The archived one's are counted once X shows it.
+        press(&mut app, KeyCode::Char('X'));
+        app.notice = None;
+        let row = status(&mut app);
+        assert!(row.ends_with(" 7 pending drafts "), "{row}");
     }
 
     #[test]

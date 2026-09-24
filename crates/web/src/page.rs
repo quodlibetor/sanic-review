@@ -14,10 +14,14 @@ use crate::{
     guard::{TOKEN_FIELD, TOKEN_HEADER},
 };
 
-/// Which page it is, for the keyboard script.
+/// Which page it is, for the keyboard script and the top bar's counts.
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
-    Index,
+    /// The index, and whether it shows archived PRs: only then does the top
+    /// bar count their pending drafts.
+    Index {
+        archived: bool,
+    },
     Pr,
     Confirm,
     Other,
@@ -26,7 +30,7 @@ pub enum Kind {
 impl Kind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Index => "index",
+            Self::Index { .. } => "index",
             Self::Pr => "pr",
             Self::Confirm => "confirm",
             Self::Other => "other",
@@ -99,7 +103,7 @@ pub fn layout_in(
                 header.topbar {
                     a.home href="/" { "sanic-review" }
                     @for crumb in crumbs { span.crumb { "/ " (crumb) } }
-                    (counts(app))
+                    (counts(app, matches!(kind, Kind::Index { archived: true })))
                 }
                 main { (content) }
                 (help())
@@ -120,20 +124,27 @@ fn icon_and_style() -> Markup {
 }
 
 /// The run and draft counts the TUI's status line has, and the keys hint.
-/// The index refreshes it with its lists. Counts the store can't read are
-/// left out, and logged, rather than failing the page they head.
-pub fn counts(app: &App) -> Markup {
-    let counts = app
-        .store()
-        .run_counts()
-        .inspect_err(|err| tracing::warn!("reading the run counts failed: {err:?}"))
-        .ok();
+/// The pending drafts are those of the PRs the index lists, archived ones
+/// only `with_archived`, as the index shows them. The index refreshes it
+/// with its lists. Counts the store can't read are left out, and logged,
+/// rather than failing the page they head.
+pub fn counts(app: &App, with_archived: bool) -> Markup {
+    let since = crate::index::since(app);
+    let counts = {
+        let store = app.store();
+        store.run_counts().and_then(|runs| {
+            let pending = store.listed_pending_drafts(&app.me, since.as_deref(), with_archived)?;
+            Ok((runs, pending))
+        })
+    }
+    .inspect_err(|err| tracing::warn!("reading the run counts failed: {err:?}"))
+    .ok();
     html! {
         span.counts #counts {
             @if app.manual_reviews { span.held { "manual reviews" } " · " }
-            @if let Some(c) = counts {
+            @if let Some((c, pending)) = counts {
                 b { (c.queued) } " queued · " b { (c.running) } " running · "
-                b.cnt { (c.pending_drafts) } " pending drafts"
+                b.cnt { (pending) } " pending drafts"
                 " " span.muted-sep { "|" } " "
             }
             (keycap("?")) " keys"

@@ -13,6 +13,42 @@ use sanic_core::{
 
 use crate::Store;
 
+/// The run whose drafts a PR's page shows, and so the one whose drafts the
+/// lists and counts count: the PR's latest review or regeneration that
+/// succeeded, as [`Store::review_runs`] orders them. `repo` and `number`
+/// are SQL for the PR's columns. A regeneration copies drafts it keeps, so
+/// counting every run's would count them again.
+fn current_run(repo: &str, number: &str) -> String {
+    format!(
+        "(SELECT c.id FROM runs c
+          WHERE c.repo = {repo} AND c.number = {number} AND c.status = 'succeeded'
+                AND c.kind IN ('{}', '{}')
+          ORDER BY c.queued_at DESC, c.id DESC LIMIT 1)",
+        RunKind::Review.as_str(),
+        RunKind::Regenerate.as_str()
+    )
+}
+
+/// The PRs of the reviews-you-owe list, as SQL over a `prs` row `p`: open
+/// PRs by others you review, which GitHub saw activity on since `?2`, if
+/// it's set, or has no timestamp stored for. `?1` is you; `lower()` on
+/// both sides is `is_login`'s rule.
+const OWED: &str = "p.open AND p.reviewer AND lower(p.author) != lower(?1)
+    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)";
+
+/// The PRs of your-PRs list, as [`OWED`] is for its list.
+const MINE: &str = "p.open AND lower(p.author) = lower(?1)
+    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)";
+
+/// How many pending drafts `p`'s current run has: see [`current_run`].
+fn pending_drafts() -> String {
+    format!(
+        "(SELECT count(*) FROM drafts d
+          WHERE d.run_id = {} AND d.status = 'pending')",
+        current_run("p.repo", "p.number")
+    )
+}
+
 /// Someone else's PR that requests your review.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwedReview {
@@ -81,8 +117,8 @@ pub struct RowFacts {
     pub merge: Merge,
     /// The latest run of any kind, as [`OwedReview::latest_run`] picks it.
     pub latest_run: Option<RunTimes>,
-    /// The drafts of the latest review that succeeded, whose drafts the PR
-    /// page shows.
+    /// The drafts of the latest review or regeneration that succeeded,
+    /// whose drafts the PR page shows.
     pub decided: Option<Decided>,
 }
 
@@ -157,11 +193,9 @@ impl Store {
     /// With `since`, only those GitHub saw activity on from then on, or
     /// that have no GitHub timestamp stored.
     pub fn owed_reviews(&self, me: &str, since: Option<&str>) -> Result<Vec<OwedReview>> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft, p.archived,
-                    latest.status, latest.error,
-                    (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending'),
+                    latest.status, latest.error, {pending},
                     p.body, p.head_sha, (
                         SELECT id FROM runs s
                         WHERE s.repo = p.repo AND s.number = p.number AND s.session_id IS NOT NULL
@@ -171,11 +205,10 @@ impl Store {
                  SELECT id FROM runs r
                  WHERE r.repo = p.repo AND r.number = p.number
                  ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
-             -- lower() on both sides is `is_login`'s rule.
-             WHERE p.open AND p.reviewer AND lower(p.author) != lower(?1)
-                   AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
+             WHERE {OWED}
              ORDER BY p.repo, p.number",
-        )?;
+            pending = pending_drafts()
+        ))?;
         let mut owed = stmt
             .query_map(params![me, since], |row| {
                 let status: Option<String> = row.get(7)?;
@@ -207,16 +240,13 @@ impl Store {
     /// Open PRs you authored, by repo and number, limited by `since` as
     /// [`Store::owed_reviews`] is.
     pub fn my_prs(&self, me: &str, since: Option<&str>) -> Result<Vec<MyPr>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT p.repo, p.number, p.title, p.is_draft, p.archived,
-                    (SELECT count(*) FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE r.repo = p.repo AND r.number = p.number AND d.status = 'pending')
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT p.repo, p.number, p.title, p.is_draft, p.archived, {pending}
              FROM prs p
-             -- lower() on both sides is `is_login`'s rule.
-             WHERE p.open AND lower(p.author) = lower(?1)
-                   AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
+             WHERE {MINE}
              ORDER BY p.repo, p.number",
-        )?;
+            pending = pending_drafts()
+        ))?;
         let rows = stmt
             .query_map(params![me, since], |row| {
                 Ok((
@@ -245,6 +275,27 @@ impl Store {
                 },
             )
             .collect()
+    }
+
+    /// The pending drafts of the PRs [`Store::owed_reviews`] and
+    /// [`Store::my_prs`] list with `since`, each counted as they count it,
+    /// leaving out archived ones unless `with_archived`: what the lists
+    /// show adds up to this.
+    pub fn listed_pending_drafts(
+        &self,
+        me: &str,
+        since: Option<&str>,
+        with_archived: bool,
+    ) -> Result<u32> {
+        // Every page's top bar reads it, so it's cached as the lists are.
+        Ok(self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT coalesce(sum({pending}), 0) FROM prs p
+                 WHERE (({OWED}) OR ({MINE})) AND (?3 OR NOT p.archived)",
+                pending = pending_drafts()
+            ))?
+            .query_row(params![me, since, with_archived], |row| row.get(0))?)
     }
 
     /// What the index shows of `key` beyond its list entry, for `me`.
@@ -327,12 +378,12 @@ impl Store {
         })
     }
 
-    /// The drafts of `key`'s latest review that succeeded, by status.
+    /// The drafts of `key`'s current run, by status: see [`current_run`].
     fn decided(&self, key: &PrKey, me: &str) -> Result<Option<Decided>> {
         let repo = key.repo.to_string();
         Ok(self
             .conn
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT r.id,
                         count(*) FILTER (WHERE d.status = 'pending'),
                         count(*) FILTER (WHERE d.status = 'accepted'),
@@ -351,12 +402,10 @@ impl Store {
                                       AND n.status IN ('queued', 'running')
                                       AND (n.queued_at, n.id) > (r.queued_at, r.id))
                  FROM runs r LEFT JOIN drafts d ON d.run_id = r.id
-                 WHERE r.id = (SELECT id FROM runs
-                               WHERE repo = ?1 AND number = ?2 AND status = 'succeeded'
-                                     AND kind IN (?4, ?5)
-                               ORDER BY queued_at DESC, id DESC LIMIT 1)
+                 WHERE r.id = {current}
                  GROUP BY r.id",
-            )?
+                current = current_run("?1", "?2")
+            ))?
             .query_row(
                 params![
                     repo,
@@ -452,11 +501,15 @@ fn key(repo: &str, number: u32) -> Result<PrKey> {
 mod tests {
     use sanic_core::{
         pr::{Placement, PrSnapshot, Review, ReviewState as GithubState},
-        run::{ReviewRequest, ReviewResult, ReviewTrigger, Verdict},
+        run::{
+            Basis, Confidence, DraftComment, DraftRevision, InlineComment, ReviewRequest,
+            ReviewResult, ReviewTrigger, Severity, Side, Verdict,
+        },
         trigger::Trigger,
     };
 
     use super::*;
+    use crate::{DraftStatus, Regeneration};
 
     fn snapshot(number: u32, author: &str) -> PrSnapshot {
         PrSnapshot {
@@ -584,6 +637,165 @@ mod tests {
                 error: Some("index out of bounds".into()),
             })
         );
+    }
+
+    /// `result`, with comments `bodies` on lines 1, 2, …
+    fn commented(bodies: &[&str]) -> ReviewResult {
+        let comments = (1..)
+            .zip(bodies)
+            .map(|(line, body)| DraftComment {
+                comment: InlineComment {
+                    path: "src/lib.rs".into(),
+                    line,
+                    start_line: None,
+                    side: Side::Right,
+                    body: (*body).into(),
+                    severity: Severity::Minor,
+                    confidence: Confidence::High,
+                    note: None,
+                },
+                unanchored: false,
+            })
+            .collect();
+        ReviewResult {
+            comments,
+            session_id: Some("sess".into()),
+            ..result()
+        }
+    }
+
+    #[test]
+    fn pending_drafts_count_only_each_prs_current_run() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut owed = snapshot(2, "alice");
+        owed.review_requested = true;
+        let mine = snapshot(3, "me");
+        store.record(&owed, "me", "default", &[]).unwrap();
+        store.record(&mine, "me", "default", &[]).unwrap();
+        let counts = |store: &Store| {
+            let owed = store.owed_reviews("me", None).unwrap()[0].pending_drafts;
+            let mine = store.my_prs("me", None).unwrap()[0].pending_drafts;
+            let total = store.listed_pending_drafts("me", None, false).unwrap();
+            (owed, mine, total)
+        };
+
+        let review = store.queue_review(&request(&owed)).unwrap().unwrap();
+        store.claim_run(review.id).unwrap();
+        store
+            .finish_review(review.id, &commented(&["A", "B"]))
+            .unwrap();
+        let yours = store.queue_review(&request(&mine)).unwrap().unwrap();
+        store.claim_run(yours.id).unwrap();
+        store.finish_review(yours.id, &result()).unwrap();
+        // The summary and both comments; your PR's summary.
+        assert_eq!(counts(&store), (3, 1, 4));
+
+        // Revising one draft copies the rest into a new run, which is now
+        // the current one: nothing is counted twice.
+        let ids: Vec<i64> = store
+            .drafts(review.id)
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        let Regeneration::Queued(one) = store
+            .queue_draft_regeneration(review.id, ids[2], "reword", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        store.claim_run(one.id).unwrap();
+        // While it runs, the review is still the current run.
+        assert_eq!(counts(&store), (3, 1, 4));
+        store
+            .finish_draft_revision(
+                one.id,
+                one.revision.as_ref().unwrap(),
+                &DraftRevision::Dropped {
+                    reason: "wrong".into(),
+                },
+                Some("sess"),
+                "t",
+            )
+            .unwrap();
+        // B dropped, so rejected: the summary and A are left.
+        assert_eq!(counts(&store), (2, 1, 3));
+
+        // A whole regeneration keeps them, and is current in its turn.
+        let Regeneration::Queued(whole) = store
+            .queue_regeneration(one.id, "again", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        store.claim_run(whole.id).unwrap();
+        let kept: Vec<i64> = store.drafts(one.id).unwrap().iter().map(|d| d.id).collect();
+        store
+            .finish_revision(
+                whole.id,
+                &commented(&["A", "C"]),
+                whole.revision.as_ref().unwrap(),
+                &Basis {
+                    summary: Some(kept[0]),
+                    comments: vec![Some(kept[1]), None],
+                },
+            )
+            .unwrap();
+        assert_eq!(counts(&store), (3, 1, 4));
+        // Deciding on the current run's drafts is what counts; the older
+        // runs' are left as they were.
+        let current = store.drafts(whole.id).unwrap()[1].id;
+        store
+            .set_draft_status(current, DraftStatus::Accepted)
+            .unwrap();
+        assert_eq!(counts(&store), (2, 1, 3));
+        store
+            .set_draft_status(ids[1], DraftStatus::Rejected)
+            .unwrap();
+        assert_eq!(counts(&store), (2, 1, 3));
+
+        // A newer review that hasn't finished doesn't take over.
+        let mut pushed = request(&owed);
+        pushed.head_sha = "h2".into();
+        let newer = store.queue_review(&pushed).unwrap().unwrap();
+        store.claim_run(newer.id).unwrap();
+        assert_eq!(counts(&store), (2, 1, 3));
+        // Once it succeeds it does, and the older head's drafts drop out.
+        store.finish_review(newer.id, &result()).unwrap();
+        assert_eq!(counts(&store), (1, 1, 2));
+    }
+
+    #[test]
+    fn the_total_is_of_the_prs_the_lists_show() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut owed = snapshot(2, "alice");
+        owed.review_requested = true;
+        owed.updated_at = Some("2026-09-01T00:00:00Z".into());
+        let mut mine = snapshot(3, "me");
+        mine.updated_at = Some("2026-09-20T00:00:00Z".into());
+        // Neither yours nor one you review: never listed.
+        let other = snapshot(4, "bob");
+        for snap in [&owed, &mine, &other] {
+            store.record(snap, "me", "default", &[]).unwrap();
+            let run = store.queue_review(&request(snap)).unwrap().unwrap();
+            store.claim_run(run.id).unwrap();
+            store.finish_review(run.id, &commented(&["A"])).unwrap();
+        }
+        let total = |store: &Store, since: Option<&str>, archived: bool| {
+            store.listed_pending_drafts("me", since, archived).unwrap()
+        };
+        assert_eq!(total(&store, None, false), 4);
+        // What the recency window leaves out of the lists.
+        assert_eq!(total(&store, Some("2026-09-10T00:00:00Z"), false), 2);
+        // Archived ones only when they're shown.
+        store.set_archived(&mine.key, true).unwrap();
+        assert_eq!(total(&store, None, false), 2);
+        assert_eq!(total(&store, None, true), 4);
+        store.set_archived(&mine.key, false).unwrap();
+        // A closed PR drops out of the lists, and of the total.
+        store.mark_closed(&owed.key).unwrap();
+        assert!(store.owed_reviews("me", None).unwrap().is_empty());
+        assert_eq!(total(&store, None, false), 2);
     }
 
     #[test]
