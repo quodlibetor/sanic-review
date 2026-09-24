@@ -508,14 +508,20 @@ embedded in the binary, so nothing is fetched at runtime.
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by
   what they ask of you:
-  - reviews you owe: **Needs you** (pending drafts, a review you haven't
-    looked at, comments to answer, or a run that failed, crashed or is held
-    by `--manual-reviews`), **In flight** (waiting out the quiet period,
-    queued or running) and **Nothing to do now**, folded (skipped, archived,
-    or reviewed with nothing left);
-  - your PRs: **Needs you** (comments to answer, changes requested, or
-    drafts), **Ready** (approved or mergeable), **Waiting on reviewers**,
-    and, when shown, **Archived**.
+  - reviews you owe: **Needs you** (pending drafts, accepted drafts not
+    yet posted, every draft rejected with no review of yours on that
+    commit, a review you haven't looked at, comments to answer, or a run
+    that failed, crashed or is held by `--manual-reviews`), **In flight**
+    (waiting out the quiet period, queued or running) and **Nothing to do
+    now**, folded (skipped, archived, posted, or reviewed with nothing
+    left). Drafts count from the latest review that succeeded, the one the
+    PR page shows;
+  - your PRs: **Needs you** (comments to answer, changes requested,
+    drafts to decide on or post, or an approval held up by failing CI or
+    conflicts), **Ready** (mergeable, or approved and waiting only on CI
+    or its base), **Waiting on reviewers** (not approved, or approved but
+    blocked by something else GitHub requires), and, when shown,
+    **Archived**.
 
   Within a group, PRs with a review you haven't looked at come first, marked
   with a dot. Each row leads with its one next thing (`3 drafts`, `failed`,
