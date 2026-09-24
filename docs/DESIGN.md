@@ -551,6 +551,11 @@ user" goes, so the posted text stays what the author should read. A note
 is stored with its draft. A regeneration is shown each draft's note, and a
 draft it keeps word for word keeps its note unless it gives a new one.
 
+The agent's text is Markdown, which the dashboard shows as GitHub renders
+it (see Markdown under Dashboard), so the instructions tell the agent to
+put code identifiers in backticks: bare, `Vec<u8>` loses `<u8>` as an HTML
+tag, and a posted `@Override` notifies whoever has that login.
+
 Each run kind gets its own schema with only the fields it uses: a `review`
 run's has `summary`, `suggested_verdict` and `comments`, so the agent isn't
 invited to draft replies or fixes on someone else's PR.
