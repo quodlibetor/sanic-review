@@ -355,6 +355,15 @@ details.grp[open] > summary .group-h::before {
   background: var(--raise);
 }
 
+/* With the script, clicking a row opens its PR; its actions are their own. */
+.js .ib[data-href] {
+  cursor: pointer;
+}
+
+.js .ib > .a {
+  cursor: default;
+}
+
 .ib.selected {
   background: var(--select);
 }

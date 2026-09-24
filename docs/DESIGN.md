@@ -736,8 +736,12 @@ embedded in the binary, so nothing is fetched at runtime.
   archived PRs, `i` opens the ignore editor, `c` the chat commands, and
   on the index `v` and `d` open the selected row's reviewers and lead
   popovers, which `Esc` closes.
-  `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
-  skip a folded group. `q` closes the help, or else goes back to
+  `Enter` opens the selected PR, and `j`/`k` skip a folded group.
+  Clicking an index row opens its PR, as its title does, unless the click
+  is on something of its own (a link, a button or other control, an
+  action, or a popover or its opener) or ends a text selection; with Ctrl,
+  Cmd or Shift, or a middle click, it opens in a new tab. The title stays a
+  link. Clicking a draft selects it. `q` closes the help, or else goes back to
   the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`
   cancels; on a result page `Esc` takes its way back. Keys are
   ignored while you type in a draft; `Esc` leaves it.

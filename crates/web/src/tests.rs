@@ -504,6 +504,26 @@ async fn index_lists_owed_reviews_and_your_prs_like_the_tui() {
 }
 
 #[tokio::test]
+async fn an_index_row_opens_the_page_its_title_links_to() {
+    let f = fixture(false).await;
+    let page = f.get("/").await.body;
+    let rows: Vec<&str> = page.split(" data-row ").skip(1).collect();
+    assert!(!rows.is_empty(), "{page}");
+    // The script opens a row's `data-href` on a click outside its own
+    // targets, so it's the title's link, which stays a real link.
+    for row in rows {
+        let (_, rest) = row
+            .split_once(r#"data-href=""#)
+            .unwrap_or_else(|| panic!("a row without data-href: {row}"));
+        let href = &rest[..rest.find('"').unwrap()];
+        assert!(
+            row.contains(&format!(r#"<span class="t"><a href="{href}""#)),
+            "{row}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
     let f = fixture(true).await;
     // PR 7's latest run goes back to queued, which --manual-reviews holds.

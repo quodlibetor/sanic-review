@@ -546,10 +546,29 @@
       }
     });
   }
-  // Clicking a row, not one of its links, selects it.
-  document.addEventListener("click", function (e) {
+  // What in a row is its own target, so a click there isn't the row's.
+  const OWN_TARGET = "a, button, textarea, input, select, label, summary, .rb, .pp, .a";
+  // Clicking a row, not one of its own targets, selects it; on the index it
+  // also opens the PR, as its title does, and a middle click or one with
+  // Ctrl, Cmd or Shift opens it in a new tab. Dragging to select text opens
+  // nothing.
+  function rowClick(e) {
     const row = e.target.closest("[data-row], .draft");
-    if (!row || e.target.closest("a, button, textarea, input, summary, .rb, .pp")) return;
+    if (!row || e.target.closest(OWN_TARGET)) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+    const href = page === "index" && row.dataset.href;
+    if (e.type === "auxclick") {
+      if (e.button !== 1 || !href) return;
+      e.preventDefault();
+      window.open(href, "_blank", "noopener");
+      return;
+    }
+    if (e.button !== 0) return;
+    if (href && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+      window.open(href, "_blank", "noopener");
+      return;
+    }
     lists().forEach(function (list, i) {
       if (list.contains(row)) {
         focus = i;
@@ -557,7 +576,10 @@
       }
     });
     draw(false);
-  });
+    if (href && !e.altKey) go(href);
+  }
+  document.addEventListener("click", rowClick);
+  document.addEventListener("auxclick", rowClick);
   // Copy buttons put their command on the clipboard.
   document.addEventListener("click", function (e) {
     const button = e.target.closest("button[data-copy]");
