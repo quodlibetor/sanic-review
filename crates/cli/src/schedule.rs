@@ -468,7 +468,7 @@ mod tests {
     fn store() -> Arc<Mutex<Store>> {
         let mut store = Store::open_in_memory().unwrap();
         store
-            .record(&snapshot("alice", true), "default", &[])
+            .record(&snapshot("alice", true), "me", "default", &[])
             .unwrap();
         Arc::new(Mutex::new(store))
     }
@@ -566,7 +566,7 @@ mod tests {
         store
             .lock()
             .unwrap()
-            .record(&draft, "default", &[])
+            .record(&draft, "me", "default", &[])
             .unwrap();
         let task = tokio::spawn(schedule(
             rx,
@@ -586,7 +586,7 @@ mod tests {
         store
             .lock()
             .unwrap()
-            .record(&draft, "default", &[])
+            .record(&draft, "me", "default", &[])
             .unwrap();
         let ready = Trigger::ReadyForReview {
             head_sha: "h1".into(),
@@ -736,7 +736,11 @@ mod tests {
             review("r1", "renovate[bot]", "h1", true),
             review("r2", "bob", "h0", false),
         ];
-        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .record(&snap, "me", "default", &[])
+            .unwrap();
         let task = tokio::spawn(schedule(
             rx,
             Arc::clone(&store),
@@ -753,14 +757,22 @@ mod tests {
 
         // Now bob reviews the head: nothing more is queued for it.
         snap.reviews.push(review("r3", "bob", "h1", false));
-        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .record(&snap, "me", "default", &[])
+            .unwrap();
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(QUIET * 2).await;
         assert!(runs.try_recv().is_err());
 
         // A push makes it eligible again.
         snap.head_sha = "h2".into();
-        store.lock().unwrap().record(&snap, "default", &[]).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .record(&snap, "me", "default", &[])
+            .unwrap();
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
         assert_eq!(runs.recv().await.unwrap().request.head_sha, "h2");
         drop(tx);

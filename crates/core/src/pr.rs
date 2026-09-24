@@ -171,6 +171,15 @@ impl PrSnapshot {
     pub fn is_authored_by(&self, login: &str) -> bool {
         is_login(&self.author, login)
     }
+
+    /// Whether `login` reviews this PR: their review is requested, or
+    /// they've left one in any state. Submitting a review clears the
+    /// request, and a push can dismiss the review, so neither alone would
+    /// do. Triggers and the reviews you owe share this rule.
+    #[must_use]
+    pub fn is_reviewer(&self, login: &str) -> bool {
+        self.review_requested || self.reviews.iter().any(|r| is_login(&r.author, login))
+    }
 }
 
 /// Whether `login` and `other` name the same GitHub account: logins

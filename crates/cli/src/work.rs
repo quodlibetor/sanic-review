@@ -524,7 +524,7 @@ mod tests {
             merge_state: None,
             checks: None,
         };
-        store.record(&snapshot, "p", &[]).unwrap();
+        store.record(&snapshot, "me", "p", &[]).unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
         assert!(store.claim_run(run.id).unwrap());
         let store = Arc::new(Mutex::new(store));
@@ -654,7 +654,7 @@ mod tests {
             merge_state: None,
             checks: None,
         };
-        store.record(&snapshot, "p", &[]).unwrap();
+        store.record(&snapshot, "me", "p", &[]).unwrap();
         let source = store.queue_review(&source.request).unwrap().unwrap();
         store.claim_run(source.id).unwrap();
         let original = ReviewResult {
@@ -773,7 +773,7 @@ mod tests {
             merge_state: None,
             checks: None,
         };
-        store.record(&snapshot, "p", &[]).unwrap();
+        store.record(&snapshot, "me", "p", &[]).unwrap();
         let store = Arc::new(Mutex::new(store));
         let request = |head: &str| sanic_core::run::ReviewRequest {
             key: key.clone(),

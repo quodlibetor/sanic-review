@@ -40,7 +40,7 @@ fn pr_commands_update_the_store() {
         number: 7,
     };
     let mut store = Store::open(&dir.path().join("state.db")).unwrap();
-    store.record(&snapshot(&key), "p", &[]).unwrap();
+    store.record(&snapshot(&key), "me", "p", &[]).unwrap();
     let run = |command: &str, url: &str| {
         sanic_review()
             .args([command, url, "--data-dir"])

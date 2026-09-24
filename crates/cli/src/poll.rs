@@ -322,7 +322,8 @@ impl<G: GithubApi> Poller<G> {
         let profile = matched.profile.name.clone();
         let known = self.store.known(key)?;
         let triggers = detect(&self.me, known.as_ref(), &snapshot);
-        self.store.record(&snapshot, &profile, &triggers)?;
+        self.store
+            .record(&snapshot, &self.me, &profile, &triggers)?;
         Ok(Some(Refreshed {
             snapshot,
             profile,
