@@ -41,6 +41,13 @@ reviewer: never posted. Say why it matters, how confident you are, what you \
 verified and what you couldn't. Keep that out of `summary` and `body`, which \
 are what gets posted.
 
+`summary`, `summary_note`, and each comment's `body` and `note` are shown as \
+GitHub Markdown, as is `drop_reason` when you revise one draft. Put code \
+identifiers, types, paths and snippets in backticks. Unquoted, `Vec<u8>` \
+renders as `Vec` because `<u8>` reads as an HTML tag, `*` and `_` can start \
+emphasis, a `#` starting a line makes it a heading, and in posted text \
+`@Override` notifies the GitHub user `Override`.
+
 The PR's existing review threads and conversation are in the brief. Don't \
 comment on a point one of them already makes, resolved or not. If you agree \
 with an existing comment, say so in `summary`, naming who made it and where, \
