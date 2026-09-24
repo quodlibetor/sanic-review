@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use sanic_core::{
     clock::Clock,
     config::{CheckoutResolver, Config, Vcs},
-    pr::{Comment, PrKey, PrSnapshot, Review, ReviewState, Thread},
+    pr::{Comment, Placement, PrKey, PrSnapshot, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
         Basis, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -195,6 +195,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
         author: author.into(),
         body: "hm".into(),
         created_at: at.into(),
+        url: None,
         by_bot: false,
         reacted_at: None,
     };
@@ -206,6 +207,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
                 path: Some("src/lib.rs".into()),
                 line: Some(2),
                 resolved: false,
+                place: Placement::default(),
                 comments: vec![
                     said("c1", "me", "2026-09-20T00:00:00Z"),
                     said("c2", "alice", "2026-09-21T00:00:00Z"),

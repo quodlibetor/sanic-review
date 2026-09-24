@@ -339,7 +339,7 @@ mod tests {
     use color_eyre::eyre::{Result, eyre};
     use sanic_core::{
         config::{CheckoutResolver, Vcs},
-        pr::{CONVERSATION_THREAD, Comment, Thread},
+        pr::{CONVERSATION_THREAD, Comment, Placement, Thread},
         repo::RepoName,
     };
     use sanic_github::Notification;
@@ -453,6 +453,7 @@ mod tests {
                 path: None,
                 line: None,
                 resolved: false,
+                place: Placement::default(),
                 comments: vec![],
             }],
             files: Some(files.iter().map(|f| (*f).into()).collect()),
@@ -655,6 +656,7 @@ mod tests {
             author: "me".into(),
             body: "q".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            url: None,
             by_bot: false,
             reacted_at: None,
         });
@@ -668,6 +670,7 @@ mod tests {
             author: "alice".into(),
             body: "a".into(),
             created_at: "2026-01-02T00:00:00Z".into(),
+            url: None,
             by_bot: false,
             reacted_at: None,
         });

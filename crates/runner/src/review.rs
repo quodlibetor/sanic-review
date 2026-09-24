@@ -237,7 +237,9 @@ impl ReviewRunner {
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
         let brief = match &run.revision {
-            Some(revision) => prompt::revision(&revision.instruction, &revision.baseline),
+            Some(revision) => {
+                prompt::revision(&revision.instruction, &revision.baseline, &ctx.threads)
+            }
             None => prompt::brief(&run.request, ctx, &diff, &diff_path),
         };
         write(&run_dir.join("system.md"), &system_prompt).await?;

@@ -4,7 +4,7 @@ use std::fmt;
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::repo::RepoName;
+use crate::{repo::RepoName, run::Side};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PrKey {
@@ -146,10 +146,30 @@ impl ReviewState {
 pub struct Thread {
     pub id: String,
     pub path: Option<String>,
+    /// Its last line on [`Placement::head`]; `None` once it's outdated.
     pub line: Option<u32>,
     pub resolved: bool,
+    /// Where on the diff it sits beyond `line`. The conversation's is empty.
+    pub place: Placement,
     /// Oldest first.
     pub comments: Vec<Comment>,
+}
+
+/// Where an inline review thread sits, as GitHub placed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    /// The first line of a multi-line thread, on `head`.
+    pub start_line: Option<u32>,
+    pub side: Option<Side>,
+    /// The PR head the thread's `line` and `start_line` are lines of: the
+    /// head when it was fetched.
+    pub head: Option<String>,
+    /// Newer commits changed its lines, so it has no `line` on `head`.
+    pub outdated: bool,
+    /// Its lines in `original_commit`, where it was left.
+    pub original_start_line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub original_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +178,8 @@ pub struct Comment {
     pub author: String,
     pub body: String,
     pub created_at: String,
+    /// Its page on GitHub, when GitHub gave one.
+    pub url: Option<String>,
     /// Left by a bot account, which never needs an answer.
     pub by_bot: bool,
     /// When you reacted to it with an emoji, which counts as answering it.

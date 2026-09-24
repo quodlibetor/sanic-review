@@ -250,7 +250,7 @@ fn key(repo: &str, number: u32) -> Result<PrKey> {
 #[cfg(test)]
 mod tests {
     use sanic_core::{
-        pr::{PrSnapshot, Review, ReviewState as GithubState},
+        pr::{Placement, PrSnapshot, Review, ReviewState as GithubState},
         run::{ReviewRequest, ReviewResult, ReviewTrigger, Verdict},
         trigger::Trigger,
     };
@@ -497,6 +497,7 @@ mod tests {
             author: author.into(),
             body: String::new(),
             created_at: at.into(),
+            url: None,
             by_bot: false,
             reacted_at: None,
         };
@@ -509,6 +510,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            place: Placement::default(),
             comments: vec![comment("bob", "2026-01-02T00:00:00Z")],
         }];
         let mut owed = snapshot(2, "alice");

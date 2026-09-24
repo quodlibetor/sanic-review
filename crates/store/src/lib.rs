@@ -13,6 +13,7 @@ use color_eyre::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
     pr::{PrKey, PrSnapshot},
+    run::Side,
     state::{PrState, ReviewFact, StateFacts},
     trigger::{Known, Trigger},
 };
@@ -34,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_regenerate.sql"),
     include_str!("migrations/0013_draft_based_on.sql"),
     include_str!("migrations/0014_pr_reviewer.sql"),
+    include_str!("migrations/0015_thread_placement.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -491,27 +493,43 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
     let repo = snap.key.repo.to_string();
     let number = snap.key.number;
     for thread in &snap.threads {
+        let place = &thread.place;
         tx.execute(
-            "INSERT INTO threads (repo, number, thread_id, path, line, resolved)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO threads (repo, number, thread_id, path, line, resolved, start_line,
+                                  side, head_sha, outdated, original_start_line,
+                                  original_line, original_commit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT (repo, number, thread_id) DO UPDATE SET
-                 path = excluded.path, line = excluded.line, resolved = excluded.resolved",
+                 path = excluded.path, line = excluded.line, resolved = excluded.resolved,
+                 start_line = excluded.start_line, side = excluded.side,
+                 head_sha = excluded.head_sha, outdated = excluded.outdated,
+                 original_start_line = excluded.original_start_line,
+                 original_line = excluded.original_line,
+                 original_commit = excluded.original_commit",
             params![
                 repo,
                 number,
                 thread.id,
                 thread.path,
                 thread.line,
-                thread.resolved
+                thread.resolved,
+                place.start_line,
+                place.side.map(Side::as_str),
+                place.head,
+                place.outdated,
+                place.original_start_line,
+                place.original_line,
+                place.original_commit
             ],
         )?;
         for c in &thread.comments {
             tx.execute(
                 "INSERT INTO comments (id, repo, number, thread_id, author, body, created_at,
-                                       by_bot, reacted_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                       by_bot, reacted_at, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT (id) DO UPDATE SET body = excluded.body,
-                     by_bot = excluded.by_bot, reacted_at = excluded.reacted_at",
+                     by_bot = excluded.by_bot, reacted_at = excluded.reacted_at,
+                     url = excluded.url",
                 params![
                     c.id,
                     repo,
@@ -521,7 +539,8 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
                     c.body,
                     c.created_at,
                     c.by_bot,
-                    c.reacted_at
+                    c.reacted_at,
+                    c.url
                 ],
             )?;
         }
@@ -552,7 +571,7 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use sanic_core::{
-        pr::{Comment, Review, ReviewState, Thread},
+        pr::{Comment, Placement, Review, ReviewState, Thread},
         repo::RepoName,
     };
 
@@ -587,11 +606,13 @@ mod tests {
                 path: Some("src/lib.rs".into()),
                 line: Some(3),
                 resolved: false,
+                place: Placement::default(),
                 comments: vec![Comment {
                     id: "c1".into(),
                     author: "bob".into(),
                     body: "why?".into(),
                     created_at: "2026-01-01T00:00:00Z".into(),
+                    url: None,
                     by_bot: false,
                     reacted_at: None,
                 }],
