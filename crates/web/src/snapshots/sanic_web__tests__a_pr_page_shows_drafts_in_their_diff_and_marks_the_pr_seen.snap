@@ -130,6 +130,19 @@ expression: "readable(&f, &page.body)"
 <textarea name="body" rows="4">Mostly fine.</textarea>
 <button class="btn save" type="submit">Save</button>
 </form>
+<details class="revise">
+<summary class="btn" title="Revise just this draft with the agent, from your note">Revise…<span class="k">a</span>
+</summary>
+<form method="post" action="/drafts/1/revise">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="instruction" rows="2" required placeholder="e.g. not true because …; focus on the fix; reword">
+</textarea>
+<div class="go">
+<button class="btn go" type="submit">Revise with the agent</button>
+<span class="dim">Spends tokens. The result is a new run: this draft revised or dropped, the others as they stand.</span>
+</div>
+</form>
+</details>
 </article>
 <article class="draft dc pending" id="draft-2">
 <div class="h">
@@ -193,6 +206,19 @@ expression: "readable(&f, &page.body)"
 <textarea name="body" rows="4">Why `m`?</textarea>
 <button class="btn save" type="submit">Save</button>
 </form>
+<details class="revise">
+<summary class="btn" title="Revise just this draft with the agent, from your note">Revise…<span class="k">a</span>
+</summary>
+<form method="post" action="/drafts/2/revise">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="instruction" rows="2" required placeholder="e.g. not true because …; focus on the fix; reword">
+</textarea>
+<div class="go">
+<button class="btn go" type="submit">Revise with the agent</button>
+<span class="dim">Spends tokens. The result is a new run: this draft revised or dropped, the others as they stand.</span>
+</div>
+</form>
+</details>
 </article>
 <article class="draft dc pending" id="draft-3">
 <div class="h">
@@ -216,6 +242,19 @@ expression: "readable(&f, &page.body)"
 <textarea name="body" rows="4">This file isn't in the diff.</textarea>
 <button class="btn save" type="submit">Save</button>
 </form>
+<details class="revise">
+<summary class="btn" title="Revise just this draft with the agent, from your note">Revise…<span class="k">a</span>
+</summary>
+<form method="post" action="/drafts/3/revise">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="instruction" rows="2" required placeholder="e.g. not true because …; focus on the fix; reword">
+</textarea>
+<div class="go">
+<button class="btn go" type="submit">Revise with the agent</button>
+<span class="dim">Spends tokens. The result is a new run: this draft revised or dropped, the others as they stand.</span>
+</div>
+</form>
+</details>
 </article>
 </section>
 <section class="chat" id="chat">
@@ -255,7 +294,7 @@ expression: "readable(&f, &page.body)"
 </section>
 <p class="help-foot">
 <span class="k">j</span>
-<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">f</span> files · <span class="k">p</span> preview · <span class="k">r</span>
+<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">a</span> revise · <span class="k">f</span> files · <span class="k">p</span> preview · <span class="k">r</span>
 <span class="k">x</span>
 <span class="k">i</span>
 <span class="k">c</span> act on the PR · <span class="k">q</span> index</p>
@@ -347,6 +386,12 @@ expression: "readable(&f, &page.body)"
 <kbd>s</kbd>
 </th>
 <td>in the files changed: one column, or old beside new</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>on a PR page: revise the selected draft with the agent, from a note</td>
 </tr>
 <tr>
 <th>

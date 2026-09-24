@@ -361,38 +361,44 @@ impl sanic_web::Control for DashboardControl {
         Ok(())
     }
 
-    fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>> {
+    fn regenerate(
+        &self,
+        run_id: i64,
+        draft: Option<i64>,
+        instruction: &str,
+    ) -> Result<Result<i64, Refusal>> {
         regenerate(
             &self.store,
             &self.data_dir,
             &self.started,
-            run_id,
+            (run_id, draft),
             instruction,
         )
     }
 }
 
-/// Queues a regeneration of run `source` and starts it, past any
-/// `--manual-reviews` hold, or says why not.
+/// Queues a regeneration of run `source`, or of just `draft` of it, and
+/// starts it, past any `--manual-reviews` hold, or says why not.
 fn regenerate(
     store: &Mutex<Store>,
     data_dir: &Path,
     started: &mpsc::UnboundedSender<QueuedRun>,
-    source: i64,
+    (source, draft): (i64, Option<i64>),
     instruction: &str,
 ) -> Result<Result<i64, Refusal>> {
-    let queued = store
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .queue_regeneration(source, instruction, |review| {
-            sanic_runner::chat::worktree_path(data_dir, review).exists()
-        })?;
+    let in_use = |review| sanic_runner::chat::worktree_path(data_dir, review).exists();
+    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+    let queued = match draft {
+        Some(draft) => store.queue_draft_regeneration(source, draft, instruction, in_use)?,
+        None => store.queue_regeneration(source, instruction, in_use)?,
+    };
+    drop(store);
     match queued {
         Regeneration::Queued(run) => {
             let id = run.id;
             info!(url = %run.request.key.url(), run = id, source_run = source, "regenerating a review");
             // Only fails once `serve` is stopping.
-            let _ = started.send(run);
+            let _ = started.send(*run);
             Ok(Ok(id))
         }
         Regeneration::Refused(why) => {
@@ -1173,7 +1179,7 @@ mod tests {
         let store = Mutex::new(store);
         let (started, mut started_rx) = mpsc::unbounded_channel();
 
-        let id = regenerate(&store, dir.path(), &started, source.id, "be terser")
+        let id = regenerate(&store, dir.path(), &started, (source.id, None), "be terser")
             .unwrap()
             .unwrap();
         let run = started_rx.try_recv().unwrap();
@@ -1181,15 +1187,58 @@ mod tests {
         assert_eq!(run.revision.unwrap().instruction, "be terser");
         // Refusals come back as such, with nothing started.
         assert_eq!(
-            regenerate(&store, dir.path(), &started, source.id, "again").unwrap(),
+            regenerate(&store, dir.path(), &started, (source.id, None), "again").unwrap(),
             Err(Refusal::Underway { run: id })
         );
         std::fs::create_dir_all(sanic_runner::chat::worktree_path(dir.path(), source.id)).unwrap();
         assert_eq!(
-            regenerate(&store, dir.path(), &started, source.id, "again").unwrap(),
+            regenerate(&store, dir.path(), &started, (source.id, None), "again").unwrap(),
             Err(Refusal::WorktreeInUse)
         );
         assert!(started_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn revising_one_draft_starts_a_regeneration_of_just_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let source = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        store.claim_run(source.id).unwrap();
+        let result = sanic_core::run::ReviewResult {
+            summary: "s".into(),
+            summary_note: None,
+            verdict: sanic_core::run::Verdict::None,
+            comments: vec![],
+            session_id: Some("sess".into()),
+            transcript_path: "t".into(),
+        };
+        store.finish_review(source.id, &result).unwrap();
+        let summary = store.drafts(source.id).unwrap()[0].id;
+        let store = Mutex::new(store);
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+
+        let id = regenerate(
+            &store,
+            dir.path(),
+            &started,
+            (source.id, Some(summary)),
+            "reword",
+        )
+        .unwrap()
+        .unwrap();
+        let run = started_rx.try_recv().unwrap();
+        assert_eq!(run.id, id);
+        let revision = run.revision.unwrap();
+        assert_eq!(revision.draft, Some(summary));
+        assert_eq!(revision.instruction, "reword");
+        assert_eq!(
+            regenerate(&store, dir.path(), &started, (source.id, Some(9999)), "x").unwrap(),
+            Err(Refusal::NoSuchDraft)
+        );
     }
 
     #[test]

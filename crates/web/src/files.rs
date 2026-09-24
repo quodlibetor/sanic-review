@@ -108,6 +108,8 @@ pub struct Files<'a> {
     /// The mirror has the run's head, so the unchanged lines the diff
     /// leaves out can be shown.
     pub expandable: bool,
+    /// Whether the drafts can be revised with the agent.
+    pub revise: &'a pr::Revise,
 }
 
 impl Files<'_> {
@@ -199,7 +201,7 @@ pub fn section(f: &Files<'_>) -> Markup {
             }
             div.fv-top {
                 @for draft in f.drafts.iter().filter(|d| !placed.contains(&d.id)) {
-                    (pr::draft_card(f.app, draft, Some(f.diff), f.existing))
+                    (pr::draft_card(f.app, draft, Some(f.diff), f.existing, f.revise))
                 }
             }
             div.fv-body {
@@ -624,7 +626,7 @@ impl<'a> Rows<'a> {
                             (threads::thread_box(f.existing.at(), thread))
                         }
                         @for draft in drafts {
-                            (pr::draft_card(f.app, draft, Some(f.diff), f.existing))
+                            (pr::draft_card(f.app, draft, Some(f.diff), f.existing, f.revise))
                         }
                     }
                 }
@@ -758,6 +760,7 @@ pub async fn file(
         layout: Layout::parse(query.layout.as_deref()),
         layout_href: &no_links,
         expandable,
+        revise: &loaded.revise,
     };
     Ok(table(&f, file, &placed(&loaded.diff, &loaded.drafts)))
 }
@@ -879,6 +882,7 @@ pub async fn context(
         layout,
         layout_href: &no_links,
         expandable: true,
+        revise: &loaded.revise,
     };
     let shown = shown(&f, &query.path, &lines, (from, to), gap.offset);
     let rest = rest.map_or_else(
@@ -957,12 +961,13 @@ struct Loaded {
     drafts: Vec<DraftRow>,
     threads: Vec<Thread>,
     diff: DiffIndex,
+    revise: pr::Revise,
 }
 
 impl Loaded {
     fn load(app: &App, key: &PrKey, run_id: i64) -> Result<Self, Error> {
         let missing = || Error::NotFound(format!("{} has no run {run_id}", key.url()));
-        let (run, pr_head, drafts, threads) = {
+        let (run, pr_head, drafts, threads, revise) = {
             let store = app.store();
             let load = || -> color_eyre::Result<_> {
                 let Some(pr) = store.pr_page(key)? else {
@@ -972,7 +977,14 @@ impl Loaded {
                     return Ok(None);
                 };
                 let drafts = store.draft_rows(run.id)?;
-                Ok(Some((run, pr.head_sha, drafts, store.threads(key)?)))
+                let revise = pr::Revise::load(&store, key, &run)?;
+                Ok(Some((
+                    run,
+                    pr.head_sha,
+                    drafts,
+                    store.threads(key)?,
+                    revise,
+                )))
             };
             load().map_err(Error::pr(key))?.ok_or_else(missing)?
         };
@@ -984,6 +996,7 @@ impl Loaded {
             drafts,
             threads,
             diff,
+            revise,
         })
     }
 }

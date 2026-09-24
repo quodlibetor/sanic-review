@@ -1,6 +1,8 @@
 //! A PR's page: the agent's summary and drafts, and what you can do with
 //! them and the PR.
 
+use std::collections::HashMap;
+
 use axum::{
     Form,
     extract::{Path, Query, State},
@@ -99,6 +101,10 @@ pub async fn page(
             .is_some(),
         _ => false,
     };
+    let revise = match &shown {
+        Some(run) => Revise::new(run, &runs, revisable),
+        None => Revise::default(),
+    };
     let views = Views::new(&app, &key, &query, shown.as_ref(), diff.is_some()).await;
     let header = Header {
         pr: &pr,
@@ -113,7 +119,7 @@ pub async fn page(
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
-            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads, &views))
+            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads, &views, &revise))
         } @else if runs.is_empty() {
             p.dim { "No reviews yet." }
         } @else {
@@ -124,7 +130,8 @@ pub async fn page(
         p.help-foot {
             (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
             (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
-            " reject · " (keycap("u")) " undo · " (keycap("f")) " files · "
+            " reject · " (keycap("u")) " undo · " (keycap("a")) " revise · "
+            (keycap("f")) " files · "
             (keycap("p")) " preview · "
             (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c")) " act on the PR · "
             (keycap("q")) " index"
@@ -256,7 +263,11 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                         " at " code { (short(&run.head_sha)) } " · "
                         (when(run.finished_at.as_deref().unwrap_or(&run.queued_at))) " · "
                         span.(run_class(&run.status)) { (run.status) }
-                        @if let Some(source) = run.source_run {
+                        @if let (Some(draft), Some(of)) = (run.draft_id, run.draft_run) {
+                            " · revises "
+                            a href={ (href) "?run=" (of) "#draft-" (draft) } { "draft #" (draft) }
+                            " of run " (number(of))
+                        } @else if let Some(source) = run.source_run {
                             " · revises "
                             a href={ (href) "?run=" (source) } { "run " (number(source)) }
                         }
@@ -371,6 +382,45 @@ impl Views {
     }
 }
 
+/// Whether a run's drafts can each be revised with the agent, and how the
+/// revisions of them asked for so far went.
+#[derive(Debug, Default)]
+pub struct Revise {
+    /// The run succeeded and has an agent session to resume.
+    open: bool,
+    /// The latest regeneration of each draft on its own, by draft.
+    runs: HashMap<i64, ReviewRun>,
+}
+
+impl Revise {
+    /// For `run`'s drafts, from its PR's `runs`; `revisable` if it has a
+    /// session to resume.
+    pub fn new(run: &ReviewRun, runs: &[ReviewRun], revisable: bool) -> Self {
+        let mut latest = HashMap::new();
+        // Newest first, so the first of each draft's is its latest.
+        for other in runs {
+            if let Some(draft) = other.draft_id {
+                latest.entry(draft).or_insert_with(|| other.clone());
+            }
+        }
+        Self {
+            open: revisable && run.status == "succeeded",
+            runs: latest,
+        }
+    }
+
+    /// As [`Revise::new`], reading what it needs from the store.
+    pub fn load(
+        store: &sanic_store::Store,
+        key: &PrKey,
+        run: &ReviewRun,
+    ) -> color_eyre::Result<Self> {
+        let revisable = store.session_run(run.id)?.is_some();
+        Ok(Self::new(run, &store.review_runs(key)?, revisable))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn drafts_section(
     app: &App,
     pr: &PrPage,
@@ -379,6 +429,7 @@ fn drafts_section(
     diff: Option<&DiffIndex>,
     threads: &[Thread],
     views: &Views,
+    revise: &Revise,
 ) -> Markup {
     let existing = Existing {
         key: &pr.key,
@@ -454,11 +505,12 @@ fn drafts_section(
                     layout: views.layout,
                     layout_href: &|layout| views.href_with(&pr.key, View::Files, layout),
                     expandable: views.expandable,
+                    revise,
                 }))
             }
             _ => {
                 section #drafts {
-                    @for draft in drafts { (draft_card(app, draft, diff, existing)) }
+                    @for draft in drafts { (draft_card(app, draft, diff, existing, revise)) }
                 }
             }
         }
@@ -467,12 +519,14 @@ fn drafts_section(
 
 /// One draft: its anchor and decision, the diff around it, the existing
 /// threads it overlaps, and its body, which a click or `e` turns into a
-/// box that saves as you leave it.
+/// box that saves as you leave it; then its private note, and a way to
+/// revise it with the agent.
 pub fn draft_card(
     app: &App,
     draft: &DraftRow,
     diff: Option<&DiffIndex>,
     existing: Existing<'_>,
+    revise: &Revise,
 ) -> Markup {
     let editable = matches!(draft.status.as_str(), "pending" | "accepted" | "rejected");
     let edit = format!("/drafts/{}/edit", draft.id);
@@ -488,6 +542,10 @@ pub fn draft_card(
         Vec::new()
     };
     let accepted = accepted_label(draft, chosen(draft, existing), !overlapping.is_empty());
+    let dropped = draft
+        .drop_reason
+        .as_deref()
+        .filter(|_| draft.status == "rejected");
     html! {
         article.draft.dc.(draft.status).summary[draft.kind == "summary"] #{ "draft-" (draft.id) } {
             div.h {
@@ -536,9 +594,15 @@ pub fn draft_card(
                                 }
                                 other => {
                                     span.st.(other) {
-                                        @if other == "accepted" { (accepted) } @else { "✕ rejected" }
+                                        @if other == "accepted" { (accepted) }
+                                        @else if dropped.is_some() { "✕ dropped by the agent" }
+                                        @else { "✕ rejected" }
                                     }
-                                    button.btn name="status" value="pending" { "Undo" (keycap("u")) }
+                                    button.btn name="status" value="pending"
+                                        title=[dropped.map(|_| "Put it back, pending")] {
+                                        @if dropped.is_some() { "Restore" } @else { "Undo" }
+                                        (keycap("u"))
+                                    }
                                 }
                             }
                         }
@@ -565,7 +629,80 @@ pub fn draft_card(
                     button.btn.save type="submit" { "Save" }
                 }
             }
-            @if open { @if let Some(note) = &draft.note { (private_note(note)) } }
+            (card_foot(app, draft, editable, dropped, revise))
+        }
+    }
+}
+
+/// Under a draft: its private note, unless it's folded, why the agent
+/// dropped it, and revising it with the agent while it's `decidable`.
+fn card_foot(
+    app: &App,
+    draft: &DraftRow,
+    decidable: bool,
+    dropped: Option<&str>,
+    revise: &Revise,
+) -> Markup {
+    let open = draft.status != "rejected";
+    let revision = revise.runs.get(&draft.id);
+    let underway = revision.is_some_and(|run| matches!(run.status.as_str(), "queued" | "running"));
+    html! {
+        @if open { @if let Some(note) = &draft.note { (private_note(note)) } }
+        @if let Some(reason) = dropped {
+            div.dropped {
+                b { "The agent dropped this draft" } span.dim { " (it's kept, rejected)" } ": "
+                span.why { (reason) }
+            }
+        }
+        @if let Some(run) = revision { (revision_state(&draft.key, run)) }
+        @if revise.open && decidable && !underway { (revise_form(app, draft)) }
+    }
+}
+
+/// How the latest revision of a draft on its own went, linking the run
+/// with the result.
+fn revision_state(key: &PrKey, run: &ReviewRun) -> Markup {
+    let href = format!("{}?run={}", pr_href(key), run.id);
+    html! {
+        div.revising.(run_class(&run.status)) {
+            @match run.status.as_str() {
+                "queued" | "running" => {
+                    "The agent is revising this draft: " a href=(href) { "its run" } " is "
+                    (run.status) ". The result is a new run; reload to see it."
+                }
+                "succeeded" => { "Revised with the agent in " a href=(href) { "a later run" } "." }
+                status => {
+                    "Revising this draft " (status) " in " a href=(href) { "its run" }
+                    @if let Some(error) = &run.error { ": " span.error { (first_line(error)) } }
+                    "."
+                }
+            }
+        }
+    }
+}
+
+/// "Revise…": a box for your note to the agent about this draft, e.g. why
+/// it's wrong or what to focus on, which starts a regeneration of just
+/// this draft.
+fn revise_form(app: &App, draft: &DraftRow) -> Markup {
+    let action = format!("/drafts/{}/revise", draft.id);
+    html! {
+        details.revise {
+            summary.btn title="Revise just this draft with the agent, from your note" {
+                "Revise…" (keycap("a"))
+            }
+            form method="post" action=(action) {
+                (csrf_field(app))
+                textarea name="instruction" rows="2" required
+                    placeholder="e.g. not true because …; focus on the fix; reword" {}
+                div.go {
+                    button.btn.go type="submit" { "Revise with the agent" }
+                    span.dim {
+                        "Spends tokens. The result is a new run: this draft revised or dropped, "
+                        "the others as they stand."
+                    }
+                }
+            }
         }
     }
 }
@@ -762,6 +899,45 @@ pub async fn edit_draft(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ReviseForm {
+    instruction: String,
+}
+
+/// Revises draft `id` alone with the agent, from your note: `serve`
+/// starts a regeneration of it through
+/// [`Control::regenerate`](crate::Control::regenerate). Back on the
+/// draft, which says it's being revised; or why it wasn't.
+pub async fn revise_draft(
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<ReviseForm>,
+) -> Result<Response, Error> {
+    let instruction = form.instruction.replace("\r\n", "\n");
+    if instruction.trim().is_empty() {
+        return Err(Error::Refused(
+            "say what to change: the note is empty".into(),
+        ));
+    }
+    let draft = app
+        .store()
+        .draft_row(id)?
+        .ok_or_else(|| Error::NotFound(format!("there's no draft {id}")))?;
+    let key = &draft.key;
+    let started = app
+        .control
+        .regenerate(draft.run_id, Some(id), &instruction)
+        .map_err(Error::pr(key))?;
+    match started {
+        Ok(run) => {
+            info!(url = %key.url(), source_run = draft.run_id, draft = id, run, "draft revision requested from the dashboard");
+            let back = format!("{}?run={}#draft-{id}", pr_href(key), draft.run_id);
+            Ok(Redirect::to(&back).into_response())
+        }
+        Err(why) => Err(Error::Refused(format!("Draft {id} wasn't revised: {why}."))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StatusForm {
     status: String,
 }
@@ -792,7 +968,7 @@ fn decided(
     headers: &HeaderMap,
     change: impl FnOnce(&sanic_store::Store) -> color_eyre::Result<bool>,
 ) -> Result<Response, Error> {
-    let (draft, threads, head, pr_head) = {
+    let (draft, threads, head, pr_head, revise) = {
         let store = app.store();
         let Some(draft) = store.draft_row(id)? else {
             return Err(Error::NotFound(format!("there's no draft {id}")));
@@ -806,17 +982,18 @@ fn decided(
         }
         let load = || -> color_eyre::Result<_> {
             let draft = store.draft_row(id)?.unwrap_or(draft);
-            let head = store
-                .review_runs(&key)?
-                .into_iter()
-                .find(|run| run.id == draft.run_id)
-                .map(|run| run.head_sha)
-                .unwrap_or_default();
+            let runs = store.review_runs(&key)?;
+            let run = runs.iter().find(|run| run.id == draft.run_id).cloned();
+            let revise = match &run {
+                Some(run) => Revise::new(run, &runs, store.session_run(run.id)?.is_some()),
+                None => Revise::default(),
+            };
+            let head = run.map(|run| run.head_sha).unwrap_or_default();
             let pr_head = store
                 .pr_page(&key)?
                 .map(|pr| pr.head_sha)
                 .unwrap_or_default();
-            Ok((draft, store.threads(&key)?, head, pr_head))
+            Ok((draft, store.threads(&key)?, head, pr_head, revise))
         };
         load().map_err(Error::pr(&key))?
     };
@@ -828,7 +1005,7 @@ fn decided(
             head: &head,
             pr_head: &pr_head,
         };
-        return Ok(draft_card(app, &draft, diff.as_ref(), existing).into_response());
+        return Ok(draft_card(app, &draft, diff.as_ref(), existing, &revise).into_response());
     }
     let back = format!("{}?run={}#draft-{id}", pr_href(&draft.key), draft.run_id);
     Ok(Redirect::to(&back).into_response())

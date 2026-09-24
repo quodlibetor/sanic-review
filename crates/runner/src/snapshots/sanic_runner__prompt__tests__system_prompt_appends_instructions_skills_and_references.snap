@@ -22,7 +22,7 @@ You're running non-interactively inside sanic-review, with read-only tools. You 
 
 The instructions and skills below may be written for an interactive session. Map their steps onto this one:
 - Presenting findings for triage, or explaining them to the user: put that in each draft's private `note` (`summary_note` for the summary).
-- Revising from the user's verdicts: the reviewer's revision requests arrive later, in a prompt that resumes this session.
+- Revising from the user's verdicts: the reviewer's revision requests, for the whole review or one draft, arrive later, in a prompt that resumes this session.
 - Delivering, posting or confirming: stop at the drafts.
 - Steps that need tools you don't have: skip them silently. They aren't failures; don't report them.
 

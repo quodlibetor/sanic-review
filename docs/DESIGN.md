@@ -455,6 +455,22 @@ Rules:
    regeneration use that path too. A regeneration cancelled by `serve` exiting,
    or left unfinished by a crash, fails rather than starting again unasked.
    The dashboard asks for one through `sanic_web::Control::regenerate`.
+   **Revising one draft** is a regeneration too, scoped to that draft of
+   the run, with your note on it as the instruction. It's queued, refused
+   and run as a whole one is, and also refused when the draft isn't the
+   run's or is posted. Its prompt is your note, fenced as your words, then
+   that draft as it stands (text, edit, status and note), then the threads
+   as they stand now; the agent is told to apply the note rather than argue
+   it, and to drop the draft where you're right that it's wrong. Its schema
+   takes exactly one of the draft's replacement (`comment`, as in a review,
+   or `summary` and `summary_note`) or a `drop_reason`. The new run's drafts
+   are the revised run's, in order, as they stand when it finishes, each
+   based on the one it copies, so edits and decisions made meanwhile are
+   kept; the draft asked about is replaced in its place by the agent's
+   answer, pending and based on it (word for word what it was, it's kept as
+   a whole regeneration keeps one). A dropped draft is copied rejected,
+   with the agent's reason, which the card shows until you decide on it
+   again; restoring it puts it back to pending.
    Each run keeps `system.md`, `prompt.md`, `pr.diff`, `transcript.jsonl`
    and `stderr.log` under `runs/<id>/` in the data dir. Its worktree is
    always `worktrees/<id>/`, since resuming a session needs the same working
@@ -513,8 +529,8 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
-| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft |
+| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
@@ -613,8 +629,9 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   under it the description and the review runs folded away, the runs'
   summary saying which one's drafts are shown ("Run 2 of 3", when it
   finished and the commit it reviewed). The list numbers the runs the same
-  way, and a regeneration says which run it revises, linked, and your
-  instruction's first line (all of it on hover). Then a bar that stays in
+  way, and a regeneration says which run it revises, linked, or for one
+  draft, which draft of which run, and your instruction's first line (all
+  of it on hover). Then a bar that stays in
   view: the tally of accepted, pending and rejected drafts, the verdict
   and Preview. Then the drafts of the latest run that succeeded (or of any
   run you pick). Each comment draft shows the lines around its anchor from
@@ -703,6 +720,16 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   `sanic_web::Control::regenerate`, then shows the new run, saying it's
   queued or running until it has drafts, or the card again with why it
   was refused.
+- **Revise one draft.** Each draft of such a run has "Revise…" (`a`),
+  which opens a short box for your note on it, e.g. "not true because X",
+  "focus on the fix" or "reword", and says it spends tokens and makes a new
+  run. Its post has `serve` regenerate just that draft through
+  `sanic_web::Control::regenerate`, and comes back to the draft, which then
+  says the agent is revising it, links the run, and offers no second
+  revision; afterwards it says how it went, linking the run with the
+  result. That run is then the PR page's latest, with the revised draft
+  pending and "revised from #N". A draft the agent dropped shows "dropped
+  by the agent" with its reason, and Restore (`u`) in place of Undo.
 - **Confirms.** Asking before acting, and saying how a submit went, use one
   card: what it is, the question or outcome, the PR by title with its
   `owner/name#N`, author and head, why (a failed run's whole error, who
@@ -829,7 +856,8 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   opens the review-now confirm, `x` archives or unarchives, `X` shows
   archived PRs, `i` opens the ignore editor, `c` the chat commands, `f`
   switches a PR page between its drafts and the files changed, `s` the
-  files changed between unified and split, and
+  files changed between unified and split, `a` opens the selected draft's
+  Revise box, and
   on the index `v` and `d` open the selected row's reviewers and lead
   popovers, which `Esc` closes.
   `Enter` opens the selected PR, and `j`/`k` skip a folded group.

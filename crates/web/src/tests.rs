@@ -47,8 +47,9 @@ struct FakeServe {
     refreshed: Mutex<Vec<PrKey>>,
     /// `skip_titles` patterns added, with the profile each went to.
     skipped: Mutex<Vec<(String, Option<String>)>>,
-    /// The runs asked to be revised, with their instructions.
-    revised: Mutex<Vec<(i64, String)>>,
+    /// The runs asked to be revised, with the draft if it's only that
+    /// one, and their instructions.
+    revised: Mutex<Vec<(i64, Option<i64>, String)>>,
     /// The run a revision starts; without one, it's refused.
     revision: Mutex<Option<i64>>,
     /// The recency window, as `serve` publishes it.
@@ -77,12 +78,13 @@ impl Control for FakeServe {
     fn regenerate(
         &self,
         run_id: i64,
+        draft: Option<i64>,
         instruction: &str,
     ) -> color_eyre::Result<Result<i64, sanic_store::Refusal>> {
         self.revised
             .lock()
             .unwrap()
-            .push((run_id, instruction.to_owned()));
+            .push((run_id, draft, instruction.to_owned()));
         Ok(self
             .revision
             .lock()
@@ -2073,13 +2075,142 @@ async fn agent_asks_for_an_instruction_and_then_asks_serve_to_revise() {
     assert_eq!(
         *f.serve.revised.lock().unwrap(),
         [
-            (f.run, "be\nterser".to_owned()),
-            (f.run, "be terser".to_owned())
+            (f.run, None, "be\nterser".to_owned()),
+            (f.run, None, "be terser".to_owned())
         ]
     );
     // Only runs of that PR.
     let other = format!("/pr/org/repo/8/runs/{}/regenerate", f.run);
     assert_eq!(f.get(&other).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn revise_asks_serve_to_regenerate_just_that_draft() {
+    let f = fixture(false).await;
+    let draft = f.drafts[1];
+    let uri = format!("/drafts/{draft}/revise");
+    // Each draft of a run with a session offers it.
+    let page = f.get("/pr/org/repo/7").await.body;
+    for id in f.drafts {
+        assert!(
+            card_of_draft(&page, id).contains(&format!("/drafts/{id}/revise")),
+            "{id}"
+        );
+    }
+    // Not without the token, nor with an empty note.
+    let reply = f
+        .send(
+            form(&uri)
+                .body(encode(&[("instruction", "reword")]))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = f.post(&uri, &[("instruction", " ")]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(f.serve.revised.lock().unwrap().is_empty());
+    // serve's refusal is shown.
+    let reply = f.post(&uri, &[("instruction", "reword")]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(
+        reply
+            .body
+            .contains("wasn&#39;t revised: the run has no agent session to resume.")
+            || reply
+                .body
+                .contains("wasn't revised: the run has no agent session to resume."),
+        "{}",
+        reply.body
+    );
+    // Started, it's back to the draft, on the run it's of.
+    *f.serve.revision.lock().unwrap() = Some(42);
+    let reply = f
+        .post(&uri, &[("instruction", "not true because\r\nit's checked")])
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        reply.headers[header::LOCATION],
+        format!("/pr/org/repo/7?run={}#draft-{draft}", f.run).as_str()
+    );
+    assert_eq!(
+        f.serve.revised.lock().unwrap()[1],
+        (
+            f.run,
+            Some(draft),
+            "not true because\nit's checked".to_owned()
+        )
+    );
+    assert_eq!(
+        f.post("/drafts/999/revise", &[("instruction", "x")])
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_draft_being_revised_says_so_and_a_dropped_one_can_be_restored() {
+    let f = fixture(false).await;
+    let draft = f.drafts[1];
+    let run = {
+        let mut store = f.dashboard.app.store();
+        let sanic_store::Regeneration::Queued(run) = store
+            .queue_draft_regeneration(f.run, draft, "not true", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        run
+    };
+    // While it's queued, its card says so and offers no second revision.
+    let page = f.get("/pr/org/repo/7").await.body;
+    let card = card_of_draft(&page, draft);
+    assert!(card.contains("The agent is revising this draft"), "{card}");
+    assert!(card.contains(&format!("?run={}", run.id)), "{card}");
+    assert!(!card.contains("/revise"), "{card}");
+    assert!(card_of_draft(&page, f.drafts[0]).contains("/revise"));
+
+    // It drops it: the new run has it rejected, with why.
+    {
+        let mut store = f.dashboard.app.store();
+        store.claim_run(run.id).unwrap();
+        store
+            .finish_draft_revision(
+                run.id,
+                run.revision.as_ref().unwrap(),
+                &sanic_core::run::DraftRevision::Dropped {
+                    reason: "DROPPED: the caller checks it.".into(),
+                },
+                Some("sess-8"),
+                "t",
+            )
+            .unwrap();
+    }
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(page.contains("revises <a"), "{page}");
+    let dropped = f.dashboard.app.store().draft_rows(run.id).unwrap()[1].id;
+    let card = card_of_draft(&page, dropped);
+    assert!(card.contains("dropped by the agent"), "{card}");
+    assert!(card.contains("DROPPED: the caller checks it."), "{card}");
+    assert!(card.contains("Restore"), "{card}");
+    // The run it was revised from links the result.
+    let before = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await.body;
+    assert!(
+        card_of_draft(&before, draft).contains("Revised with the agent in"),
+        "{before}"
+    );
+
+    let reply = f
+        .post(
+            &format!("/drafts/{dropped}/status"),
+            &[("status", "pending")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    let page = f.get("/pr/org/repo/7").await.body;
+    let card = card_of_draft(&page, dropped);
+    assert!(!card.contains("DROPPED"), "{card}");
+    assert!(card.contains("Why `m`?"), "{card}");
 }
 
 #[tokio::test]

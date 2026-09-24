@@ -108,6 +108,10 @@ pub struct Revision {
     pub instruction: String,
     /// `revises`' drafts as they stood, edits and choices included.
     pub baseline: Vec<BaselineDraft>,
+    /// The one draft of `revises` to revise, when it's only that one: the
+    /// new run's other drafts are `revises`' as they stand when it
+    /// finishes.
+    pub draft: Option<i64>,
 }
 
 /// A draft the revision starts from, as the agent is shown it.
@@ -197,6 +201,80 @@ impl RevisedOutput {
             },
         )
     }
+}
+
+/// The structured output of a regeneration of one draft: its
+/// replacement, as `comment` for a comment or `summary` (with its
+/// `summary_note`) for the summary, or else why it should be dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftOutput {
+    #[serde(default)]
+    pub comment: Option<InlineComment>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub summary_note: Option<String>,
+    #[serde(default)]
+    pub drop_reason: Option<String>,
+}
+
+impl DraftOutput {
+    /// What it says to do with a draft of `kind`, if it says exactly one
+    /// thing that fits; `anchors` says whether a comment's anchor is on
+    /// the diff. A blank `drop_reason` is none, as `null` is.
+    #[must_use]
+    pub fn for_kind(
+        mut self,
+        kind: &str,
+        anchors: impl FnOnce(&InlineComment) -> bool,
+    ) -> Option<DraftRevision> {
+        self.drop_reason = self.drop_reason.filter(|r| !r.trim().is_empty());
+        match (kind, self) {
+            (
+                "comment",
+                Self {
+                    comment: Some(comment),
+                    summary: None,
+                    drop_reason: None,
+                    ..
+                },
+            ) => Some(DraftRevision::Comment(DraftComment {
+                unanchored: !anchors(&comment),
+                comment,
+            })),
+            (
+                "summary",
+                Self {
+                    comment: None,
+                    summary: Some(body),
+                    summary_note: note,
+                    drop_reason: None,
+                },
+            ) => Some(DraftRevision::Summary { body, note }),
+            (
+                _,
+                Self {
+                    comment: None,
+                    summary: None,
+                    drop_reason: Some(reason),
+                    ..
+                },
+            ) => Some(DraftRevision::Dropped { reason }),
+            _ => None,
+        }
+    }
+}
+
+/// What a regeneration of one draft answered, ready to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftRevision {
+    /// The summary, revised.
+    Summary { body: String, note: Option<String> },
+    /// The comment, revised, and checked against the diff.
+    Comment(DraftComment),
+    /// It should go, and why, for you.
+    Dropped { reason: String },
 }
 
 /// Which baseline draft a revision's summary and each comment, in order,
@@ -358,6 +436,49 @@ mod tests {
             ReviewTrigger::Requested
         );
         assert_eq!(push("a").merge(push("b")), push("a"));
+    }
+
+    #[test]
+    fn a_draft_revision_says_exactly_one_thing_that_fits_the_draft() {
+        let parse = |json: &str| serde_json::from_str::<DraftOutput>(json).unwrap();
+        let comment = r#"{"comment": {"path": "a.rs", "line": 3, "side": "RIGHT",
+            "body": "b", "severity": "nit", "confidence": "high", "note": "n"}}"#;
+        let Some(DraftRevision::Comment(revised)) = parse(comment).for_kind("comment", |_| false)
+        else {
+            panic!("not a comment");
+        };
+        assert!(revised.unanchored);
+        assert_eq!(revised.comment.note.as_deref(), Some("n"));
+        assert_eq!(parse(comment).for_kind("summary", |_| true), None);
+        assert_eq!(
+            parse(r#"{"summary": "s", "summary_note": "why"}"#).for_kind("summary", |_| true),
+            Some(DraftRevision::Summary {
+                body: "s".into(),
+                note: Some("why".into())
+            })
+        );
+        assert_eq!(
+            parse(r#"{"drop_reason": "wrong", "comment": null}"#).for_kind("comment", |_| true),
+            Some(DraftRevision::Dropped {
+                reason: "wrong".into()
+            })
+        );
+        // A blank reason is no reason.
+        assert_eq!(
+            parse(r#"{"summary": "s", "drop_reason": " "}"#).for_kind("summary", |_| true),
+            Some(DraftRevision::Summary {
+                body: "s".into(),
+                note: None
+            })
+        );
+        assert_eq!(
+            parse(r#"{"drop_reason": ""}"#).for_kind("comment", |_| true),
+            None
+        );
+        // Both, or neither, is no answer.
+        let both = r#"{"summary": "s", "drop_reason": "wrong"}"#;
+        assert_eq!(parse(both).for_kind("summary", |_| true), None);
+        assert_eq!(parse("{}").for_kind("comment", |_| true), None);
     }
 
     #[test]

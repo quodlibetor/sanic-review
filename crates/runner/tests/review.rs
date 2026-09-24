@@ -15,9 +15,12 @@ use std::{
 use common::{key, remote};
 use sanic_core::{
     config::RunnerSettings,
-    run::{BaselineDraft, PrContext, QueuedRun, ReviewRequest, ReviewTrigger, Revision, Verdict},
+    run::{
+        BaselineDraft, DraftRevision, PrContext, QueuedRun, ReviewRequest, ReviewResult,
+        ReviewTrigger, Revision, Verdict,
+    },
 };
-use sanic_runner::review::{AgentProfile, ReviewRunner, RunSettings};
+use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -44,6 +47,14 @@ fn fake_claude(dir: &Path, script_body: &str, output: &str) -> PathBuf {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     script
+}
+
+/// The review a run answered with, rather than a revised draft.
+fn review_result(reviewed: Reviewed) -> ReviewResult {
+    match reviewed {
+        Reviewed::Review { result, .. } => result,
+        Reviewed::Draft { revised, .. } => panic!("revised a draft: {revised:?}"),
+    }
 }
 
 fn transcript(result: &serde_json::Value) -> String {
@@ -159,8 +170,8 @@ async fn review_flags_comments_outside_the_diff() {
         )
         .await
         .unwrap()
-        .expect("not cancelled")
-        .result;
+        .expect("not cancelled");
+    let result = review_result(result);
     assert_eq!(result.summary, "One nit.");
     assert_eq!(result.verdict, Verdict::Comment);
     assert_eq!(result.session_id.as_deref(), Some("sess-1"));
@@ -218,14 +229,15 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
             edited: true,
             note: None,
         }],
+        draft: None,
     });
     let result = s
         .runner
         .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
         .await
         .unwrap()
-        .expect("not cancelled")
-        .result;
+        .expect("not cancelled");
+    let result = review_result(result);
     // Its own result, checked against the diff like any review's.
     assert_eq!(result.summary, "Terser.");
     assert!(result.comments[0].unanchored);
@@ -295,6 +307,146 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
         .unwrap_err();
     assert!(format!("{err:#}").contains("in use"), "{err:#}");
     assert!(worktree.join("chat").exists());
+}
+
+/// A regeneration of draft 11 alone, with `note`, answered with `answer`.
+fn revising_one_draft(answer: &serde_json::Value, note: &str) -> Setup {
+    let mut s = setup("", &success(answer), Duration::from_secs(30));
+    s.run.id = 4;
+    s.run.revision = Some(Revision {
+        source_run: 3,
+        revises: 3,
+        session_id: "sess-0".into(),
+        instruction: note.into(),
+        baseline: vec![
+            BaselineDraft {
+                id: 10,
+                kind: "summary".into(),
+                path: None,
+                line: None,
+                start_line: None,
+                side: None,
+                text: "Mostly fine.".into(),
+                status: "pending".into(),
+                edited: false,
+                note: None,
+            },
+            BaselineDraft {
+                id: 11,
+                kind: "comment".into(),
+                path: Some("lib.rs".into()),
+                line: Some(2),
+                start_line: None,
+                side: Some("RIGHT".into()),
+                text: "This is off by one, as you put it.".into(),
+                status: "pending".into(),
+                edited: true,
+                note: Some("Checked the loop bounds.".into()),
+            },
+        ],
+        draft: Some(11),
+    });
+    s
+}
+
+#[tokio::test]
+async fn a_draft_is_revised_on_its_own_in_the_reviews_session() {
+    let answer = json!({
+        "comment": {
+            "path": "lib.rs", "line": 2, "side": "RIGHT", "body": "Use `<=` here.",
+            "severity": "minor", "confidence": "high", "note": "Now leads with the fix."
+        }
+    });
+    let s = revising_one_draft(&answer, "focus on the fix");
+    let reviewed = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let Reviewed::Draft {
+        revised: DraftRevision::Comment(revised),
+        session_id,
+        ..
+    } = reviewed
+    else {
+        panic!("{reviewed:?}");
+    };
+    assert_eq!(revised.comment.body, "Use `<=` here.");
+    assert!(!revised.unanchored);
+    assert_eq!(session_id.as_deref(), Some("sess-1"));
+
+    let fake = s.fake.path();
+    let args = read(fake, "args");
+    let args: Vec<&str> = args.lines().collect();
+    assert!(
+        args.windows(2).any(|a| a == ["--resume", "sess-0"]),
+        "{args:?}"
+    );
+    // The schema asks for one comment or a reason to drop it, nothing else.
+    let schema = args
+        .windows(2)
+        .find(|a| a[0] == "--json-schema")
+        .map(|a| a[1])
+        .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(schema).unwrap();
+    let mut fields: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["comment", "drop_reason"]);
+    // Your note, then that draft as it stands, and not the others.
+    let stdin = read(fake, "stdin");
+    assert!(
+        stdin.starts_with("The reviewer asked you to revise one of your drafts"),
+        "{stdin}"
+    );
+    assert!(stdin.contains("```text\nfocus on the fix\n```"), "{stdin}");
+    assert!(
+        stdin.contains("\"text\": \"This is off by one, as you put it.\""),
+        "{stdin}"
+    );
+    assert!(stdin.contains("Checked the loop bounds."), "{stdin}");
+    assert!(!stdin.contains("Mostly fine."), "{stdin}");
+    let system = read(&s.data.path().join("runs/4"), "system.md");
+    assert!(system.contains("# Where you're running"), "{system}");
+}
+
+#[tokio::test]
+async fn a_draft_the_agent_drops_comes_back_with_why() {
+    let s = revising_one_draft(
+        &json!({ "drop_reason": "You're right: the loop is inclusive." }),
+        "not true because the loop is inclusive",
+    );
+    let reviewed = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    assert!(
+        matches!(
+            &reviewed,
+            Reviewed::Draft { revised: DraftRevision::Dropped { reason }, .. }
+                if reason == "You're right: the loop is inclusive."
+        ),
+        "{reviewed:?}"
+    );
+
+    // An answer that does neither fails the run.
+    let s = revising_one_draft(&json!({}), "reword");
+    let err = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("neither revises nor drops"),
+        "{err:#}"
+    );
 }
 
 #[tokio::test]

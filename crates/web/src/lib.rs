@@ -79,11 +79,17 @@ pub trait Control: Send + Sync {
     /// the command that chats with a review's agent.
     fn run_settings(&self, profile: &str) -> Result<RunSettings>;
 
-    /// Revises run `run_id`'s review with `instruction`: a new `regenerate`
-    /// run resumes its agent session, and its drafts are the new run's own.
-    /// It starts now, even under `--manual-reviews`. Returns the new run's
-    /// id, or why it can't; [`Refusal`] says why in words.
-    fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>>;
+    /// Revises run `run_id`'s review with `instruction`, or with `draft`
+    /// only that draft of it: a new `regenerate` run resumes its agent
+    /// session, and its drafts are the new run's own. It starts now, even
+    /// under `--manual-reviews`. Returns the new run's id, or why it
+    /// can't; [`Refusal`] says why in words.
+    fn regenerate(
+        &self,
+        run_id: i64,
+        draft: Option<i64>,
+        instruction: &str,
+    ) -> Result<Result<i64, Refusal>>;
 
     /// Picks the recency window for the lists and the poller in place of
     /// `poll.updated_within_days`, or with `None` goes back to it. It's
@@ -266,6 +272,7 @@ impl Dashboard {
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
             .route("/drafts/{id}/thread", post(pr::choose_thread))
+            .route("/drafts/{id}/revise", post(pr::revise_draft))
             .route("/assets/{file}", get(assets::asset))
             .route("/favicon.ico", get(assets::favicon_ico))
             .layer(middleware::from_fn_with_state(

@@ -154,6 +154,12 @@ expression: "readable(&f, &page.body)"
 </tr>
 <tr>
 <th>
+<kbd>a</kbd>
+</th>
+<td>on a PR page: revise the selected draft with the agent, from a note</td>
+</tr>
+<tr>
+<th>
 <kbd>?, Esc</kbd>
 </th>
 <td>show, close this help</td>

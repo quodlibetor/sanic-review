@@ -1606,6 +1606,64 @@ main:has(> .prh) {
   white-space: pre-wrap;
 }
 
+/* Revising one draft with the agent: a button that opens a short box for
+   your note. */
+.dc details.revise {
+  margin-top: 0.4rem;
+}
+
+.dc details.revise > summary {
+  list-style: none;
+}
+
+.dc details.revise > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dc details.revise form {
+  margin-top: 0.35rem;
+}
+
+.dc details.revise textarea {
+  width: 100%;
+  margin: 0;
+  padding: 0.2rem 0.4rem;
+}
+
+.dc details.revise div.go {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  align-items: baseline;
+  margin-top: 0.3rem;
+  font-size: 12px;
+}
+
+.dc .revising,
+.dc .dropped {
+  margin-top: 0.4rem;
+  font-size: 13px;
+}
+
+.dc .revising.running,
+.dc .revising.held {
+  color: var(--held);
+}
+
+.dc .revising.bad {
+  color: var(--bad);
+}
+
+.dc .dropped {
+  color: var(--fg);
+  border-left: 2px solid var(--held);
+  padding-left: 0.5rem;
+}
+
+.dc .dropped .why {
+  white-space: pre-wrap;
+}
+
 /* A draft's box reads as the text it replaces: the same font, colours and
    place, its border inside the body's padding so nothing moves. The
    script grows it to fit, so it doesn't scroll. */
