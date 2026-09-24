@@ -1,0 +1,16 @@
+---
+source: crates/cli/src/tui.rs
+expression: "draw(&mut app, 80, 12).backend()"
+---
+"┌ Your PRs (2 · 1 archived) ───────────────────────────────────────────────────┐"
+"│changes · 1 new      https://github.com/org/api/pull/470  Speed up search     │"
+"│mergeable            https://github.com/org/web/pull/80  [draft] New settings │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+" Reviews you owe (5) │ Activity │ Log                                           "
+" ? help · o dashboard · q quit          1 queued · 0 running · 3 pending drafts "

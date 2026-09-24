@@ -23,6 +23,7 @@ sanic-github.workspace = true
 sanic-runner.workspace = true
 sanic-store.workspace = true
 sanic-web.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 tokio.workspace = true

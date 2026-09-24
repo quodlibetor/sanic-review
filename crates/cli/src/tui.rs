@@ -3,8 +3,9 @@
 //!
 //! It runs on its own thread with its own read-only store connection, and
 //! rereads the store on an interval. Its only actions are asking `serve`
-//! to rerun a review and to archive or unarchive a PR, and opening the
-//! dashboard in a browser; nothing in it edits drafts.
+//! to rerun a review, to archive or unarchive a PR and to save the panes'
+//! layout, and opening the dashboard in a browser; nothing in it edits
+//! drafts.
 
 use std::{
     collections::HashMap,
@@ -43,10 +44,15 @@ use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
-use self::ignore::{IgnoreEditor, Outcome};
+pub use self::layout::Sizes;
+use self::{
+    ignore::{IgnoreEditor, Outcome},
+    layout::Size,
+};
 use crate::{chat, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
 
 mod ignore;
+mod layout;
 
 /// How often the store is reread.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -72,6 +78,7 @@ impl Tui {
             let stop = Arc::clone(&stop);
             move || {
                 let mut app = App::new(shared.manual_reviews);
+                app.set_sizes(load_layout(&store));
                 let result = run(&mut terminal, &mut app, &store, &shared, &stop);
                 ratatui::restore();
                 let _ = tx.send(result);
@@ -148,6 +155,18 @@ fn chat(terminal: &mut DefaultTerminal, shared: &Shared, key: &PrKey) -> Result<
             format!("chat about {} failed: {err}", key.url())
         }
     })
+}
+
+/// Saves the panes' layout for the next start; `serve` does it, since the
+/// UI's connection is read-only.
+pub fn save_layout(store: &Store, sizes: Sizes) -> Result<()> {
+    layout::save(store, sizes)
+}
+
+/// The layout [`save_layout`] saved last, or every pane fitting its
+/// content.
+pub fn load_layout(store: &Store) -> Sizes {
+    layout::load(store)
 }
 
 impl Drop for Tui {
@@ -453,7 +472,60 @@ impl Pane {
         };
         Self::ALL[i % n]
     }
+
+    /// Its name, split around the letter that jumps to it.
+    fn name(self) -> (&'static str, char, &'static str) {
+        match self {
+            Self::Owed => ("Revie", 'w', "s you owe"),
+            Self::Mine => ("Your ", 'P', "Rs"),
+            Self::Activity => ("", 'A', "ctivity"),
+            Self::Log => ("", 'L', "og"),
+        }
+    }
+
+    fn label(self) -> String {
+        let (before, letter, after) = self.name();
+        format!("{before}{letter}{after}")
+    }
+
+    /// The key that jumps to it.
+    fn key(self) -> char {
+        self.name().1.to_ascii_lowercase()
+    }
+
+    fn with_key(key: char) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == key)
+    }
+
+    /// Its name and `suffix` for a title or a tab, the jump letter
+    /// highlighted.
+    fn title(self, suffix: &str, style: Style) -> Vec<Span<'static>> {
+        let (before, letter, after) = self.name();
+        vec![
+            Span::styled(format!(" {before}"), style),
+            Span::styled(letter.to_string(), style.patch(JUMP_LETTER)),
+            Span::styled(format!("{after}{suffix} "), style),
+        ]
+    }
 }
+
+/// Keys that act on the focused pane's rows, which a collapsed pane
+/// doesn't show.
+fn acts_on_rows(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Char('j' | 'k' | 'g' | 'G' | 'r' | 'x' | 'i' | 'c' | 'o')
+            | KeyCode::Down
+            | KeyCode::Up
+            | KeyCode::Home
+            | KeyCode::End
+    )
+}
+
+/// How a pane's jump letter stands out in its title and its tab.
+const JUMP_LETTER: Style = Style::new()
+    .fg(Color::Yellow)
+    .add_modifier(Modifier::UNDERLINED);
 
 pub struct App {
     /// Everything last read from the store.
@@ -466,6 +538,8 @@ pub struct App {
     /// `serve --manual-reviews`: queued reviews are held, not waiting their turn.
     manual_reviews: bool,
     focus: Pane,
+    /// How much room each pane takes; `serve` saves it as it changes.
+    sizes: Sizes,
     /// Per pane, by [`Pane::index`].
     lists: [ListState; 4],
     /// The log pane shows the newest lines until you move up in it.
@@ -518,6 +592,8 @@ pub enum Request {
         key: PrKey,
         archived: bool,
     },
+    /// The panes' layout changed; keep it for the next start.
+    SaveLayout(Sizes),
 }
 
 impl App {
@@ -530,6 +606,7 @@ impl App {
             logs_dropped: 0,
             manual_reviews,
             focus: Pane::Owed,
+            sizes: Sizes::default(),
             lists: Default::default(),
             follow_log: true,
             show_archived: false,
@@ -636,15 +713,26 @@ impl App {
                 _ => Flow::Continue,
             };
         }
+        if !ctrl && !self.sizes.shown(self.focus) && acts_on_rows(key.code) {
+            self.notice = Some(format!(
+                "{} is collapsed · z or {} shows it",
+                self.focus.label(),
+                self.focus.key()
+            ));
+            return Flow::Continue;
+        }
         match key.code {
             KeyCode::Char('q') => return self.quit(),
             KeyCode::Char('c') if ctrl => return self.quit(),
             KeyCode::Char('r') => self.ask_rerun(),
-            KeyCode::Char('a') => return self.toggle_archive(),
+            KeyCode::Char('x') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
             KeyCode::Char('c') => return self.open_chat(),
             KeyCode::Char('o') => return Flow::Open(self.selected_page()),
-            KeyCode::Char('A') => {
+            KeyCode::Char(c) if let Some(pane) = Pane::with_key(c) => return self.jump(pane),
+            KeyCode::Char('z') => return self.resize(Sizes::cycle),
+            KeyCode::Char('Z') => return self.resize(|sizes, _| *sizes = Sizes::default()),
+            KeyCode::Char('X') => {
                 self.show_archived = !self.show_archived;
                 self.notice = Some(if self.show_archived {
                     "showing archived PRs".into()
@@ -657,8 +745,8 @@ impl App {
                 self.overlay = (self.overlay != Some(Overlay::Help)).then_some(Overlay::Help);
             }
             KeyCode::Esc => self.overlay = None,
-            KeyCode::Tab => self.focus = self.focus.step(true),
-            KeyCode::BackTab => self.focus = self.focus.step(false),
+            KeyCode::Tab => return self.step(true),
+            KeyCode::BackTab => return self.step(false),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
             KeyCode::Char('g') | KeyCode::Home => self.move_to(0),
@@ -666,6 +754,51 @@ impl App {
             _ => {}
         }
         Flow::Continue
+    }
+
+    /// Takes a saved layout, focusing the first pane it shows so keys don't
+    /// start on one that's hidden.
+    fn set_sizes(&mut self, sizes: Sizes) {
+        self.sizes = sizes;
+        if let Some(pane) = Pane::ALL.into_iter().find(|&p| sizes.shown(p)) {
+            self.focus = pane;
+        }
+    }
+
+    /// Focuses `pane` and shows it: a collapsed pane fits again, and one
+    /// behind another's full screen takes it over.
+    fn jump(&mut self, pane: Pane) -> Flow {
+        self.focus = pane;
+        self.resize(|sizes, pane| match sizes.full() {
+            Some(full) if full != pane => sizes.set(pane, Size::Full),
+            _ if sizes.get(pane) == Size::Collapsed => sizes.set(pane, Size::Fit),
+            _ => {}
+        })
+    }
+
+    /// Tab: the next pane that isn't collapsed. Under a full screen, it
+    /// takes the full screen over.
+    fn step(&mut self, forward: bool) -> Flow {
+        let mut next = self.focus.step(forward);
+        while next != self.focus && self.sizes.get(next) == Size::Collapsed {
+            next = next.step(forward);
+        }
+        if next == self.focus {
+            return Flow::Continue;
+        }
+        self.jump(next)
+    }
+
+    /// Changes the layout with `change(sizes, focus)`, and asks `serve` to
+    /// save it if that changed anything.
+    fn resize(&mut self, change: impl FnOnce(&mut Sizes, Pane)) -> Flow {
+        let before = self.sizes;
+        change(&mut self.sizes, self.focus);
+        if self.sizes == before {
+            Flow::Continue
+        } else {
+            Flow::Request(Request::SaveLayout(self.sizes))
+        }
     }
 
     /// Asks to confirm a review of the selected PR you owe, if its latest
@@ -774,7 +907,7 @@ impl App {
             Pane::Activity | Pane::Log => None,
         };
         let Some((key, was)) = target else {
-            self.notice = Some("a archives the selected PR".into());
+            self.notice = Some("x archives the selected PR".into());
             return Flow::Continue;
         };
         let archived = !was;
@@ -786,7 +919,7 @@ impl App {
             pr.archived = archived;
         }
         self.notice = Some(if archived {
-            format!("archived {} · A shows archived PRs", key.url())
+            format!("archived {} · X shows archived PRs", key.url())
         } else {
             format!("unarchived {}", key.url())
         });
@@ -817,19 +950,14 @@ impl App {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
-    let [owed, mine, activity, log, status] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [panes, status] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
     let App {
         overview,
         logs,
         manual_reviews,
         focus,
+        sizes,
         lists,
         follow_log,
         show_archived,
@@ -839,31 +967,28 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ..
     } = app;
     // How many archived PRs a pane is hiding, for its title.
-    let title = |name: &str, shown: usize, archived: usize| {
+    let counted = |shown: usize, archived: usize| {
         if *show_archived || archived == 0 {
-            format!("{name} ({shown})")
+            format!(" ({shown})")
         } else {
-            format!("{name} ({shown} · {archived} archived)")
+            format!(" ({shown} · {archived} archived)")
         }
     };
-    let [owed_state, mine_state, activity_state, log_state] = lists;
 
-    let rows: Vec<_> = overview
+    let owed: Vec<_> = overview
         .owed
         .iter()
         .map(|pr| owed_row(pr, overview, *manual_reviews))
         .collect();
     let archived = loaded.owed.iter().filter(|pr| pr.archived).count();
-    let pane = Pane::Owed.frame(*focus, &title("Reviews you owe", rows.len(), archived));
-    pane.render(frame, owed, rows, owed_state, "No reviews requested.");
+    let owed_title = counted(owed.len(), archived);
 
-    let rows: Vec<_> = overview.mine.iter().map(my_row).collect();
+    let mine: Vec<_> = overview.mine.iter().map(my_row).collect();
     let archived = loaded.mine.iter().filter(|pr| pr.archived).count();
-    let pane = Pane::Mine.frame(*focus, &title("Your PRs", rows.len(), archived));
-    pane.render(frame, mine, rows, mine_state, "No open PRs of yours.");
+    let mine_title = counted(mine.len(), archived);
 
     let events = &overview.activity;
-    let rows: Vec<_> = events
+    let activity: Vec<_> = events
         .iter()
         .enumerate()
         .map(|(i, a)| {
@@ -881,15 +1006,34 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             activity_row(a, held)
         })
         .collect();
-    let pane = Pane::Activity.frame(*focus, "Activity");
-    pane.render(frame, activity, rows, activity_state, "Nothing yet.");
 
-    let rows: Vec<_> = logs.iter().map(|l| ListItem::new(l.as_str())).collect();
-    let mut pane = Pane::Log.frame(*focus, "Log");
-    // A following log keeps its newest line selected to stay scrolled to
-    // the bottom; that isn't a selection worth highlighting.
-    pane.highlight &= !*follow_log;
-    pane.render(frame, log, rows, log_state, "");
+    let log: Vec<_> = logs.iter().map(|l| ListItem::new(l.as_str())).collect();
+
+    let sections = [
+        (owed, owed_title, "No reviews requested."),
+        (mine, mine_title, "No open PRs of yours."),
+        (activity, String::new(), "Nothing yet."),
+        (log, String::new(), ""),
+    ];
+    let content = sections
+        .each_ref()
+        .map(|(rows, ..)| rows.iter().map(ListItem::height).sum());
+    let (areas, bar) = layout::arrange(panes, *sizes, content);
+    let mut tabs = Vec::new();
+    for ((pane, (rows, title, empty)), area) in Pane::ALL.into_iter().zip(sections).zip(areas) {
+        let Some(area) = area else {
+            tabs.push((pane, title));
+            continue;
+        };
+        let mut frame_ = pane.frame(*focus, &title);
+        // A following log keeps its newest line selected to stay scrolled
+        // to the bottom; that isn't a selection worth highlighting.
+        frame_.highlight &= !(pane == Pane::Log && *follow_log);
+        frame_.render(frame, area, rows, &mut lists[pane.index()], empty);
+    }
+    if let Some(bar) = bar {
+        render_tabs(frame, bar, &tabs, *focus);
+    }
 
     render_status(frame, status, overview, *manual_reviews, notice.as_deref());
     match overlay {
@@ -901,24 +1045,43 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
+/// The panes that aren't shown, as tabs to jump to, with their titles'
+/// `suffix`es.
+fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[(Pane, String)], focus: Pane) {
+    let mut spans = Vec::new();
+    for (i, (pane, suffix)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", Style::new().fg(Color::DarkGray)));
+        }
+        spans.extend(pane.title(suffix, border_style(*pane == focus)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 /// A pane's border and whether its selection is highlighted.
 struct PaneFrame<'a> {
     block: Block<'a>,
     highlight: bool,
 }
 
+/// A focused pane's border and tab stand out.
+fn border_style(focused: bool) -> Style {
+    if focused {
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::DarkGray)
+    }
+}
+
 impl Pane {
-    fn frame(self, focus: Pane, title: &str) -> PaneFrame<'static> {
+    /// `suffix` follows its name in the title.
+    fn frame(self, focus: Pane, suffix: &str) -> PaneFrame<'static> {
         let focused = focus == self;
-        let border = if focused {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(Color::DarkGray)
-        };
+        let border = border_style(focused);
         PaneFrame {
             block: Block::bordered()
                 .border_style(border)
-                .title(Span::styled(format!(" {title} "), border)),
+                .title(Line::from(self.title(suffix, border))),
             highlight: focused,
         }
     }
@@ -937,6 +1100,11 @@ impl PaneFrame<'_> {
             frame.render_widget(Paragraph::new(empty.dim()).block(self.block), area);
             return;
         }
+        // Scrolled down while the pane was shorter, it would leave rows
+        // blank at the bottom now; the list still scrolls to the selection.
+        let deepest = deepest_offset(&rows, self.block.inner(area).height);
+        let offset = state.offset_mut();
+        *offset = (*offset).min(deepest);
         let highlight = if self.highlight {
             Style::new().add_modifier(Modifier::REVERSED)
         } else {
@@ -945,6 +1113,21 @@ impl PaneFrame<'_> {
         let list = List::new(rows).block(self.block).highlight_style(highlight);
         frame.render_stateful_widget(list, area, state);
     }
+}
+
+/// The furthest a list of `rows` can scroll in `height` rows and still
+/// fill them: the first row of the longest tail that fits.
+fn deepest_offset(rows: &[ListItem<'_>], height: u16) -> usize {
+    let mut room = usize::from(height);
+    let mut offset = rows.len();
+    for row in rows.iter().rev() {
+        match room.checked_sub(row.height()) {
+            Some(left) => room = left,
+            None => break,
+        }
+        offset -= 1;
+    }
+    offset
 }
 
 const RERUN_HINT: &str = "r reviews a failed, held, skipped or archived PR you owe now";
@@ -1149,11 +1332,14 @@ fn render_status(
 const HELP: &[(&str, &str)] = &[
     ("q, Ctrl-C", "quit serve"),
     ("Tab, Shift-Tab", "next, previous pane"),
+    ("w/p/a/l", "jump to owed, yours, activity, log"),
+    ("z", "pane size: fit, full screen, collapsed"),
+    ("Z", "every pane back to fit"),
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
     ("r", "review now: failed, held or skipped"),
-    ("a", "archive or unarchive the selected PR"),
-    ("A", "show or hide archived PRs"),
+    ("x", "archive or unarchive the selected PR"),
+    ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
     ("c", "chat with the agent that reviewed it"),
     ("o", "open it in the dashboard, or the index"),
@@ -1704,13 +1890,13 @@ mod tests {
     }
 
     #[test]
-    fn a_archives_and_capital_a_shows_archived_prs() {
+    fn x_archives_and_capital_x_shows_archived_prs() {
         let mut app = app(false);
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.overview.mine.len(), 2, "the archived one is hidden");
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
-            app.handle_key(key(KeyCode::Char('a'))),
+            app.handle_key(key(KeyCode::Char('x'))),
             Flow::Request(Request::Archive {
                 key: pr("org/api", 470),
                 archived: true,
@@ -1724,12 +1910,12 @@ mod tests {
                 .starts_with("archived https://")
         );
 
-        press(&mut app, KeyCode::Char('A'));
+        press(&mut app, KeyCode::Char('X'));
         assert_eq!(app.overview.mine.len(), 3);
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
         press(&mut app, KeyCode::End);
         assert_eq!(
-            app.handle_key(key(KeyCode::Char('a'))),
+            app.handle_key(key(KeyCode::Char('x'))),
             Flow::Request(Request::Archive {
                 key: pr("org/web", 60),
                 archived: false,
@@ -1738,7 +1924,8 @@ mod tests {
 
         // Nothing to archive in the other panes.
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.handle_key(key(KeyCode::Char('a'))), Flow::Continue);
+        assert_eq!(app.handle_key(key(KeyCode::Char('x'))), Flow::Continue);
+        assert_eq!(app.notice.as_deref(), Some("x archives the selected PR"));
     }
 
     #[test]
@@ -1975,6 +2162,231 @@ mod tests {
         assert_eq!(
             failure.as_deref(),
             Some("couldn't open http://127.0.0.1:4000/: no browser")
+        );
+    }
+
+    /// The screen's rows as text.
+    fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The row a pane's title is on.
+    fn title_row(rows: &[String], title: &str) -> usize {
+        rows.iter()
+            .position(|row| row.starts_with(&format!("┌ {title}")))
+            .unwrap_or_else(|| panic!("no {title} pane in\n{}", rows.join("\n")))
+    }
+
+    /// Presses a key that changes the layout, and returns the layout
+    /// `serve` is asked to save.
+    fn resize(app: &mut App, code: KeyCode) -> Sizes {
+        match app.handle_key(key(code)) {
+            Flow::Request(Request::SaveLayout(sizes)) => sizes,
+            other => panic!("{code} didn't save the layout: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lists_fit_their_content_and_the_log_fills_the_rest() {
+        let mut app = app(false);
+        let rows = rows(&draw(&mut app, 80, 40));
+        // Five reviews, one with an error line; two PRs; four events.
+        let owed = title_row(&rows, "Reviews you owe");
+        let mine = title_row(&rows, "Your PRs");
+        let activity = title_row(&rows, "Activity");
+        let log = title_row(&rows, "Log");
+        assert_eq!(
+            (owed, mine - owed, activity - mine, log - activity),
+            (0, 8, 4, 6)
+        );
+        // The log runs down to the status bar.
+        assert!(rows[38].starts_with('└'), "{}", rows.join("\n"));
+        assert!(rows[39].starts_with(" ? help"));
+    }
+
+    #[test]
+    fn long_lists_scroll_and_leave_activity_and_the_log_a_row() {
+        let mut app = app(false);
+        let mut many = overview();
+        many.owed = (0..60)
+            .map(|n| owed("org/api", 1000 + n, "Something", "alice"))
+            .collect();
+        many.mine = (0..20).map(|n| my("org/web", 2000 + n, "Mine")).collect();
+        app.set_overview(many);
+        press(&mut app, KeyCode::End);
+        let terminal = draw(&mut app, 80, 30);
+        let rows = rows(&terminal);
+        let mine = title_row(&rows, "Your PRs");
+        let activity = title_row(&rows, "Activity");
+        let log = title_row(&rows, "Log");
+        // The lists split what activity's and the log's single rows leave
+        // about 3:1, as their content does.
+        assert_eq!((mine, activity - mine, log - activity), (16, 7, 3));
+        // The last review you owe, scrolled to.
+        assert!(rows[mine - 2].contains("pull/1059 "), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn a_pane_that_grows_scrolls_back_to_fill_itself() {
+        let mut app = app(false);
+        app.set_logs((0..30).map(|i| format!("line {i}")).collect(), 0);
+        // Line 25 selected in the short log pane, which shows the last few.
+        press(&mut app, KeyCode::Char('l'));
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Char('k'));
+        }
+        let short = rows(&draw(&mut app, 80, 30));
+        assert!(!short.iter().any(|r| r.contains("line 3 ")));
+        let scrolled = app.lists[Pane::Log.index()].offset();
+
+        // Full screen, it scrolls back so no row is left blank.
+        resize(&mut app, KeyCode::Char('z'));
+        let full = rows(&draw(&mut app, 80, 30));
+        let line = |y: usize| full[y].trim_end_matches(['│', ' ']).to_owned();
+        assert_eq!((line(1), line(26)), ("│line 4".into(), "│line 29".into()));
+        assert!(app.lists[Pane::Log.index()].offset() < scrolled);
+        assert_eq!(app.lists[Pane::Log.index()].selected(), Some(25));
+    }
+
+    #[test]
+    fn z_cycles_fit_full_screen_collapsed_and_capital_z_resets() {
+        let mut app = app(false);
+        press(&mut app, KeyCode::Tab);
+        let sizes = resize(&mut app, KeyCode::Char('z'));
+        assert_eq!(sizes.full(), Some(Pane::Mine));
+        insta::assert_snapshot!("full_screen", draw(&mut app, 80, 12).backend());
+
+        let sizes = resize(&mut app, KeyCode::Char('z'));
+        assert_eq!(sizes.get(Pane::Mine), Size::Collapsed);
+        insta::assert_snapshot!("collapsed", draw(&mut app, 80, 24).backend());
+        // Its rows aren't there to act on.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Your PRs is collapsed · z or p shows it")
+        );
+        assert_eq!(app.lists[Pane::Mine.index()].selected(), None);
+        // Tab passes it by.
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus, Pane::Owed);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Pane::Activity);
+
+        // p fits it again; from there z goes round the cycle.
+        assert_eq!(resize(&mut app, KeyCode::Char('p')), Sizes::default());
+        assert_eq!(
+            resize(&mut app, KeyCode::Char('z')).full(),
+            Some(Pane::Mine)
+        );
+        let sizes = resize(&mut app, KeyCode::Char('z'));
+        assert_eq!(sizes.get(Pane::Mine), Size::Collapsed);
+        assert_eq!(resize(&mut app, KeyCode::Char('z')), Sizes::default());
+
+        // Z puts every pane back to fit.
+        resize(&mut app, KeyCode::Char('z'));
+        // Taking the full screen over, then collapsing.
+        resize(&mut app, KeyCode::Char('w'));
+        resize(&mut app, KeyCode::Char('z'));
+        press(&mut app, KeyCode::Char('l'));
+        resize(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.sizes.get(Pane::Owed), Size::Collapsed);
+        assert_eq!(app.sizes.full(), Some(Pane::Log));
+        assert_eq!(resize(&mut app, KeyCode::Char('Z')), Sizes::default());
+        // Nothing to reset, nothing to save.
+        press(&mut app, KeyCode::Char('Z'));
+    }
+
+    #[test]
+    fn jump_keys_focus_and_show_a_pane() {
+        let mut app = app(false);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.focus, Pane::Log);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.lists[Pane::Log.index()].selected(), Some(0));
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.focus, Pane::Activity);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.lists[Pane::Activity.index()].selected(), Some(3));
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.focus, Pane::Mine);
+        press(&mut app, KeyCode::Char('w'));
+        assert_eq!(app.focus, Pane::Owed);
+
+        // A collapsed pane fits again.
+        press(&mut app, KeyCode::Char('l'));
+        resize(&mut app, KeyCode::Char('z'));
+        resize(&mut app, KeyCode::Char('z'));
+        press(&mut app, KeyCode::Char('w'));
+        let sizes = resize(&mut app, KeyCode::Char('l'));
+        assert_eq!((app.focus, sizes), (Pane::Log, Sizes::default()));
+
+        // One behind a full screen takes it over; so does Tab's.
+        resize(&mut app, KeyCode::Char('z'));
+        let sizes = resize(&mut app, KeyCode::Char('w'));
+        assert_eq!(sizes.full(), Some(Pane::Owed));
+        assert_eq!(sizes.get(Pane::Log), Size::Fit);
+        let sizes = resize(&mut app, KeyCode::Tab);
+        assert_eq!((app.focus, sizes.full()), (Pane::Mine, Some(Pane::Mine)));
+    }
+
+    #[test]
+    fn titles_and_tabs_highlight_their_jump_letters() {
+        let mut app = app(false);
+        resize(&mut app, KeyCode::Char('z'));
+        let terminal = draw(&mut app, 80, 12);
+        let buffer = terminal.backend().buffer();
+        let underlined = |y: u16| -> String {
+            (0..80)
+                .filter(|&x| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
+        // "Revie[w]s you owe" in the full-screen title; the others' tabs.
+        assert_eq!(underlined(0), "w");
+        assert_eq!(underlined(10), "PAL");
+        let tabs = rows(&terminal).remove(10);
+        assert!(
+            tabs.starts_with(" Your PRs (2 · 1 archived) │ Activity │ Log "),
+            "{tabs}"
+        );
+    }
+
+    #[test]
+    fn the_layout_is_saved_by_serve_and_loaded_at_start() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = app(false);
+        let sizes = resize(&mut app, KeyCode::Char('z'));
+        save_layout(&store, sizes).unwrap();
+        assert_eq!(load_layout(&store), sizes);
+    }
+
+    #[test]
+    fn a_loaded_layout_focuses_a_shown_pane() {
+        let mut app = app(false);
+        let mut sizes = Sizes::default();
+        sizes.set(Pane::Log, Size::Full);
+        app.set_sizes(sizes);
+        assert_eq!(app.focus, Pane::Log);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_a_collapsed_pane() {
+        let mut app = App::new(false);
+        resize(&mut app, KeyCode::Char('z'));
+        resize(&mut app, KeyCode::Char('z'));
+        assert!(!app.sizes.shown(app.focus));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Flow::Quit
         );
     }
 

@@ -1,5 +1,5 @@
 //! Commands on one PR, for when the TUI isn't in use: `archive` and
-//! `unarchive` (the TUI's `a`) and `review` (its `r`). They write the store
+//! `unarchive` (the TUI's `x`) and `review` (its `r`). They write the store
 //! directly, so they work while `serve` runs.
 
 use std::path::PathBuf;

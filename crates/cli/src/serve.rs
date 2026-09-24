@@ -42,7 +42,7 @@ use crate::{
     ServeArgs, Ui, config_edit, logging,
     poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
-    tui::{Request, Shared, SystemBrowser, Tui},
+    tui::{self, Request, Shared, Sizes, SystemBrowser, Tui},
     watch::ConfigWatcher,
     work::Worker,
 };
@@ -446,6 +446,7 @@ async fn handle_requests(
             request = requests.recv(), if open => match request {
                 Some(Request::Rerun(key)) => review_now(&key, &store, &starter),
                 Some(Request::Archive { key, archived }) => archive(&key, archived, &store),
+                Some(Request::SaveLayout(sizes)) => save_layout(sizes, &store),
                 None => open = false,
             },
             _ = poll.tick() => {
@@ -477,6 +478,13 @@ fn archive(key: &PrKey, archived: bool, store: &Mutex<Store>) {
         Ok(true) => info!(url = %url, "unarchived"),
         Ok(false) => warn!(url = %url, "not archived: the PR isn't tracked"),
         Err(err) => warn!(url = %url, "archiving failed: {err:?}"),
+    }
+}
+
+fn save_layout(sizes: Sizes, store: &Mutex<Store>) {
+    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Err(err) = tui::save_layout(&store, sizes) {
+        warn!("{err:?}");
     }
 }
 
@@ -861,6 +869,15 @@ mod tests {
         let store = store.lock().unwrap();
         assert_eq!(store.run(failed.id).unwrap().unwrap().status, "superseded");
         assert!(store.pr_summary(&key).unwrap().unwrap().archived);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_save_the_tui_layout() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        handle(&store, false, vec![Request::SaveLayout(Sizes::default())]).await;
+        let store = store.lock().unwrap();
+        assert!(store.poll_state("tui.layout").unwrap().is_some());
+        assert_eq!(tui::load_layout(&store), Sizes::default());
     }
 
     #[tokio::test(start_paused = true)]

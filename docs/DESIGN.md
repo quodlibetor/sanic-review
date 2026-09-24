@@ -300,7 +300,7 @@ Rules:
 - **Archive.** Archiving a PR is yours alone to set and clear: new pushes
   and comments don't clear it. An archived PR is silent: it gets no
   automatic runs of any kind, and archiving supersedes every run of it
-  that's queued but not started; a running one finishes. Use the TUI's `a` key,
+  that's queued but not started; a running one finishes. Use the TUI's `x` key,
   or `sanic-review archive <PR url>` and `sanic-review unarchive <PR url>`,
   which write the store directly and work while `serve` runs.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
@@ -674,7 +674,8 @@ embedded in the binary, so nothing is fetched at runtime.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm, `a` archives or unarchives, `A` shows
-  archived PRs, `i` opens the ignore editor, `c` the chat commands.
+  archived PRs (the TUI's `x` and `X`, since its `a` jumps to Activity),
+  `i` opens the ignore editor, `c` the chat commands.
   `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
   skip a folded group. `q` closes the help, or else goes back to
   the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`
@@ -693,7 +694,8 @@ embedded in the binary, so nothing is fetched at runtime.
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
   TUI. Its only actions are rerunning a review, archiving a PR, adding
-  a `skip_titles` pattern to the config and opening the dashboard.
+  a `skip_titles` pattern to the config, opening the dashboard and
+  saving its own layout.
   - **Reviews you owe:** open PRs by others that you review: your review
     is requested, or you've left one in any state. Submitting a review
     clears GitHub's request and a push can dismiss the review, so a PR stays
@@ -753,11 +755,30 @@ embedded in the binary, so nothing is fetched at runtime.
   Keys: `q` or Ctrl-C quits `serve`; while reviews are running it first
   lists them ("exiting will cancel these running tasks:") and waits for
   Enter or `y`, and any other key stays. A second Ctrl-C quits without
-  asking. Tab and Shift-Tab switch pane, `j`/`k`
+  asking. Tab and Shift-Tab switch pane, passing collapsed ones by, `j`/`k`
   or the arrows move, `g`/`G` jump to the first or last row, `?` shows help.
-  `a` archives or unarchives the selected PR in either PR pane. Archived
-  PRs are hidden, and each pane's title counts them; `A` shows them,
+  `w`, `p`, `a` and `l` jump to Reviews you owe, Your PRs, Activity and
+  the Log; each pane's title and tab highlights its letter.
+  `x` archives or unarchives the selected PR in either PR pane. Archived
+  PRs are hidden, and each pane's title counts them; `X` shows them,
   dimmed and marked `archived`.
+  **Layout.** Each pane fits its content, collapses to a tab, or takes the
+  full screen. Fitting panes get as many rows as their content, except
+  that the Log takes any rows left over at the bottom, or Activity while
+  the Log is collapsed; with both collapsed they're left blank. When they
+  don't all fit, the two PR lists get their content first and Activity
+  and the Log share what's left; if the PR lists alone
+  overflow, they split the room in proportion to their content and
+  scroll, leaving the other two a row each. No shown pane gets less than
+  one row. Collapsed panes, and every other pane while one is full
+  screen, are tabs on a line above the status bar. `z` cycles the focused
+  pane from fit to full screen to collapsed and back to fit; `Z` puts
+  every pane back to fit. Jumping to a collapsed pane fits it again, and
+  jumping or tabbing to a pane behind another's full screen hands it the
+  full screen. Keys that act on rows do nothing in a collapsed pane but
+  say how to show it. The TUI's connection is read-only, so it asks
+  `serve` to save each layout change, under `tui.layout` in
+  `poll_state`, and loads it at startup.
   `c` on a PR in either pane chats with the agent that last reviewed it,
   as `sanic-review chat` does: the TUI gives up the terminal for the chat
   and takes it back when the chat ends, and `serve` keeps running
