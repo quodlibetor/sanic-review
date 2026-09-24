@@ -55,7 +55,7 @@ pub fn apply(doc: &mut DocumentMut, sel: &Selections, base: &Path) -> Result<()>
                 continue;
             };
             let mut error = None;
-            repos.retain(|entry| match entry_kind(entry, base) {
+            remove_keeping_comments(repos, |entry| !match entry_kind(entry, base) {
                 Ok(Entry::Checkout { path, managed }) => {
                     let keep = !managed || repo_selected(&path) != Some(false);
                     if keep {
@@ -84,14 +84,17 @@ pub fn apply(doc: &mut DocumentMut, sel: &Selections, base: &Path) -> Result<()>
 
     for (path, on) in &sel.repos {
         if *on && !present_repos.contains(path) {
-            profile_repos(doc, &sel.repo_profile)?.push(contract_path(path));
+            push_on_own_line(
+                profile_repos(doc, &sel.repo_profile)?,
+                contract_path(path).into(),
+            );
         }
     }
     for (org, on) in &sel.orgs {
         if *on && !present_orgs.iter().any(|o| o.eq_ignore_ascii_case(org)) {
             let mut table = InlineTable::new();
             table.insert("github", org.as_str().into());
-            profile_repos(doc, &sel.org_profile)?.push(table);
+            push_on_own_line(profile_repos(doc, &sel.org_profile)?, table.into());
         }
     }
     drop_emptied_profiles(doc);
@@ -195,8 +198,8 @@ fn remove_keeping_comments(list: &mut Array, mut drop: impl FnMut(&Value) -> boo
 }
 
 /// Appends `value`, on a line of its own when the list's last entry is.
-/// Without a trailing comma, what follows the last entry is its suffix,
-/// which is handed on so the new comma goes straight after it.
+/// What follows the last entry is handed on, so the new comma goes
+/// straight after it (or after its trailing comma).
 fn push_on_own_line(list: &mut Array, mut value: Value) {
     let trailing_comma = list.trailing_comma();
     let Some(final_entry) = list.iter_mut().last() else {
@@ -205,13 +208,15 @@ fn push_on_own_line(list: &mut Array, mut value: Value) {
     };
     let before = raw(final_entry.decor().prefix());
     let indent = before.rfind('\n').map(|end| before[end..].to_owned());
-    let tail = if trailing_comma {
-        String::new()
-    } else {
-        let tail = raw(final_entry.decor().suffix()).to_owned();
+    // What follows the last entry: without a trailing comma, its suffix;
+    // then the list's trailing space, which a removal may have filled even
+    // without one.
+    let mut tail = String::new();
+    if !trailing_comma {
+        tail.push_str(raw(final_entry.decor().suffix()));
         final_entry.decor_mut().set_suffix("");
-        tail
-    };
+    }
+    tail.push_str(raw(Some(list.trailing())));
     // A comment after the last entry stays on its line; the space before
     // the `]` moves after the new entry.
     let (comment, close) = tail.split_at(tail.rfind('\n').unwrap_or(0));
@@ -221,7 +226,7 @@ fn push_on_own_line(list: &mut Array, mut value: Value) {
         None => format!("{comment}\n"),
     };
     value.decor_mut().set_prefix(prefix);
-    value.decor_mut().set_suffix(close);
+    list.set_trailing(close);
     list.push_formatted(value);
 }
 
@@ -403,6 +408,53 @@ repos = [{ github = "gone-org" }]
     }
 
     #[test]
+    fn removed_repos_keep_the_comments_beside_them() {
+        let text = r#"[profile.p]
+repos = [
+  "/base/a", # on a
+  "/base/gone", # on gone
+  # before b
+  { github = "gone-org" },
+  "/base/b",
+]
+"#;
+        let sel = Selections {
+            repos: vec![("/base/gone".into(), false)],
+            orgs: vec![("gone-org".into(), false)],
+            ..Selections::default()
+        };
+        assert_eq!(
+            apply_to(text, &sel),
+            r#"[profile.p]
+repos = [
+  "/base/a", # on a
+  # before b
+  "/base/b",
+]
+"#
+        );
+    }
+
+    #[test]
+    fn added_repos_go_on_their_own_lines_in_a_multi_line_list() {
+        let sel = Selections {
+            repos: vec![("/base/new".into(), true)],
+            repo_profile: "p".into(),
+            orgs: vec![("new-org".into(), true)],
+            org_profile: "p".into(),
+            ..Selections::default()
+        };
+        assert_eq!(
+            apply_to("[profile.p]\nrepos = [\n  \"/base/a\", # on a\n]\n", &sel),
+            "[profile.p]\nrepos = [\n  \"/base/a\", # on a\n  \"/base/new\",\n  { github = \"new-org\" },\n]\n"
+        );
+        assert_eq!(
+            apply_to("[profile.p]\nrepos = [\"/base/a\"]\n", &sel),
+            "[profile.p]\nrepos = [\"/base/a\", \"/base/new\", { github = \"new-org\" }]\n"
+        );
+    }
+
+    #[test]
     fn path_scoped_checkouts_are_neither_removed_nor_duplicated() {
         let text = "[profile.p]\nrepos = [{ repo = \"/base/s\", paths = [\"v/**\"] }]\n";
         for on in [true, false] {
@@ -538,6 +590,12 @@ instructions = ["/etc/review.md"]
             "l = [\"b\", \"c\"]\n"
         );
         assert_eq!(edit("l = [\"x\"]\n", Some("c")), "l = [\"c\"]\n");
+        // Without a trailing comma, the comment handed on to the `]` stays
+        // beside the entry it was on, not the one added after it.
+        assert_eq!(
+            edit("l = [\n  \"a\", # on a\n  \"x\"\n]\n", Some("c")),
+            "l = [\n  \"a\", # on a\n  \"c\"\n]\n"
+        );
         assert_eq!(edit("l = [ \"a\", \"x\" ]\n", None), "l = [ \"a\" ]\n");
         // Comment lines before the next entry, or before the `]`, stay.
         assert_eq!(
