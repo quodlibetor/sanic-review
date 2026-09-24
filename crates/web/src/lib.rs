@@ -61,6 +61,11 @@ pub trait Control: Send + Sync {
     /// head as last polled.
     fn review_now(&self, key: PrKey);
 
+    /// Refreshes `key` from GitHub now, ahead of anything else queued,
+    /// rather than at the next reconcile; a rate limit's pause still holds
+    /// it back. Asked after a post, so the dashboard shows what GitHub has.
+    fn refresh(&self, key: PrKey);
+
     /// Adds `pattern` to `skip_titles` in the config file, in
     /// `[review_requests]` for `None` or else that profile's table, as the
     /// TUI's ignore editor does; `serve` picks it up by reloading. `false`

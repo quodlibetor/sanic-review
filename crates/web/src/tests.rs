@@ -43,6 +43,8 @@ const HOST: &str = "127.0.0.1:7117";
 #[derive(Default)]
 struct FakeServe {
     started: Mutex<Vec<PrKey>>,
+    /// The PRs asked to be refreshed from GitHub, in order.
+    refreshed: Mutex<Vec<PrKey>>,
     /// `skip_titles` patterns added, with the profile each went to.
     skipped: Mutex<Vec<(String, Option<String>)>>,
     /// The runs asked to be revised, with their instructions.
@@ -56,6 +58,10 @@ struct FakeServe {
 impl Control for FakeServe {
     fn review_now(&self, key: PrKey) {
         self.started.lock().unwrap().push(key);
+    }
+
+    fn refresh(&self, key: PrKey) {
+        self.refreshed.lock().unwrap().push(key);
     }
 
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> color_eyre::Result<bool> {
@@ -709,6 +715,7 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
     assert_eq!(preview.status, StatusCode::OK);
     insta::assert_snapshot!(readable(&f, &preview.body));
     drop(guard);
+    assert!(f.serve.refreshed.lock().unwrap().is_empty());
 
     let expected = json!({
         "commit_id": "head7",
@@ -738,8 +745,11 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
     for i in 0..3 {
         assert_eq!(f.status(i), "posted");
     }
+    // `serve` fetches the PR again now, so the lists show the review.
+    assert_eq!(*f.serve.refreshed.lock().unwrap(), [key(7)]);
 
-    // Confirming again finds nothing left to post, and sends nothing.
+    // Confirming again finds nothing left to post, and sends nothing, so
+    // there's nothing new to fetch.
     let again = f
         .post(
             &f.submit_uri(),
@@ -747,6 +757,7 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
         )
         .await;
     assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(f.serve.refreshed.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -818,6 +829,8 @@ async fn githubs_refusal_is_shown_and_not_retried() {
     for i in 0..3 {
         assert_eq!(f.status(i), "accepted");
     }
+    // GitHub took nothing, so there's nothing new to fetch.
+    assert!(f.serve.refreshed.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2482,6 +2495,8 @@ async fn after_a_failed_thumbs_up_a_retry_sends_only_what_github_lacks() {
     assert_eq!(f.status(0), "posted");
     assert_eq!(f.status(1), "posted");
     assert_eq!(f.status(2), "accepted");
+    // What GitHub took is fetched again, though not all of it went.
+    assert_eq!(*f.serve.refreshed.lock().unwrap(), [key(7)]);
 
     // The same confirm again sends nothing.
     let again = confirm(payload).await;
@@ -2506,6 +2521,8 @@ async fn after_a_failed_thumbs_up_a_retry_sends_only_what_github_lacks() {
     let done = confirm(payload).await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
     assert_eq!(f.status(2), "posted");
+    // A thumbs-up alone is a post too.
+    assert_eq!(f.serve.refreshed.lock().unwrap().len(), 2);
 
     // Requesting changes with only thumbs-ups isn't a review GitHub takes.
     let f = fixture(false).await;

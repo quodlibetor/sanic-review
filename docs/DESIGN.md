@@ -253,6 +253,16 @@ against stored state, never from notification payloads.
   notification pointed at. A PR is queued once, at its most urgent
   priority. A rate limit pauses everything and keeps the queue, priorities
   included.
+- **Refresh after a post.** Once GitHub takes anything the dashboard
+  posts (a review, its replies, a 👍, or a review an earlier submit left
+  that GitHub submitted after all), the dashboard asks `serve`, through
+  `sanic_web::Control::refresh`, to refresh that PR. It goes ahead of
+  everything queued, a batch already under way included, and is refreshed at once, without waiting for the next
+  reconcile or notification poll, unless a rate limit pauses polling; then
+  it waits in the queue for the pause to end. What you posted raises no
+  trigger, since triggers ignore your own reviews, comments and
+  reactions, so the refresh starts no run. The index shows the result at
+  its next reread, and a PR page when it's next opened.
 - **Progress.** Each reconcile logs what it found ("reconcile: 21 review
   requests, 29 involving you, 50 queued"), and a notification poll that
   queues PRs logs how many. A big refresh batch logs "refreshed 37/264"
