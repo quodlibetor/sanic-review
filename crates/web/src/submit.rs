@@ -821,29 +821,7 @@ pub async fn submit(
     let built = match built {
         Ok(built) if wire(&built)? == form.payload && !posted_before.contains(&sent) => built,
         _ => {
-            let preview = format!(
-                "{}/runs/{}/preview?event={}",
-                pr_href(key),
-                path.run,
-                form.event.as_str()
-            );
-            let content = result_card(
-                &pr,
-                "Not posted",
-                html! {
-                    p.note {
-                        "The drafts changed since the preview, or were already posted, so "
-                        "nothing was sent."
-                        // Its pick is used up.
-                        @if approve { " Pick Approve again on the PR page." }
-                    }
-                },
-                html! {
-                    @if !approve { a.btn.primary href=(preview) { "Preview again" } }
-                },
-                (&back, "Back to the drafts"),
-                Tone::Ask,
-            );
+            let content = changed_since_preview(&pr, path.run, form.event, &back);
             let page = result_page(&app, key, "Not posted", &content);
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
@@ -854,6 +832,7 @@ pub async fn submit(
             Ok(Settled::Cleared) => {}
             Ok(Settled::Submitted(done)) => {
                 posted_before.insert(sent);
+                app.control.refresh(key.clone());
                 let content = submitted_after_all(&pr, left, &done, &back, path.run);
                 let page = result_page(&app, key, "Posted earlier", &content);
                 return Ok((StatusCode::CONFLICT, page).into_response());
@@ -888,6 +867,10 @@ pub async fn submit(
     // After the review, so a failure here leaves it posted and marked, and
     // a submit again sends only the thumbs-ups left.
     let (reacted, failed) = react(&app, key, &built.reactions, &mut marking).await;
+    // Whatever GitHub took shows here now, not at the next reconcile.
+    if posted.is_some() || reacted > 0 {
+        app.control.refresh(key.clone());
+    }
     if failed.is_none() {
         posted_before.insert(sent);
     } else {
@@ -909,6 +892,34 @@ pub async fn submit(
     let content = posted_card(&pr, &built, &outcome, &back, path.run);
     let page = result_page(&app, key, outcome.heading(), &content);
     Ok((status, page).into_response())
+}
+
+/// What a confirm whose drafts changed since its preview, or were already
+/// posted, says: nothing was sent.
+fn changed_since_preview(pr: &PrPage, run: i64, event: ReviewEvent, back: &str) -> Markup {
+    let approve = event == ReviewEvent::Approve;
+    let preview = format!(
+        "{}/runs/{run}/preview?event={}",
+        pr_href(&pr.key),
+        event.as_str()
+    );
+    result_card(
+        pr,
+        "Not posted",
+        html! {
+            p.note {
+                "The drafts changed since the preview, or were already posted, so "
+                "nothing was sent."
+                // Its pick is used up.
+                @if approve { " Pick Approve again on the PR page." }
+            }
+        },
+        html! {
+            @if !approve { a.btn.primary href=(preview) { "Preview again" } }
+        },
+        (back, "Back to the drafts"),
+        Tone::Ask,
+    )
 }
 
 /// How far a review got, when GitHub didn't take all of it.

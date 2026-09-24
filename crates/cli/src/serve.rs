@@ -104,11 +104,13 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
+    let (refreshes, mut refreshes_rx) = mpsc::unbounded_channel();
     let chatting = Arc::new(AtomicBool::new(false));
     let (due_tx, due) = watch::channel(DueTimes::new());
     let live = Arc::new(Live::new(&config, store.window_choice()?));
     let control = DashboardControl {
         requests: requests.clone(),
+        refreshes,
         store: Arc::clone(&run_store),
         started: started.clone(),
         data_dir: data_dir.clone(),
@@ -163,7 +165,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             result
         }
         result = poll_forever(
-            &mut poller, &mut watcher, &config_path, &updates, &worker, &live,
+            &mut poller, &mut watcher, &config_path, &updates, &mut refreshes_rx, &worker, &live,
         ) => result,
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
@@ -313,6 +315,8 @@ impl Live {
 /// run settings its chat commands are built from.
 struct DashboardControl {
     requests: mpsc::UnboundedSender<Request>,
+    /// PRs to refresh from GitHub now, for the poller.
+    refreshes: mpsc::UnboundedSender<PrKey>,
     /// For regenerations, which start at once and return their run.
     store: Arc<Mutex<Store>>,
     /// Straight to the worker, past any `--manual-reviews` hold.
@@ -330,6 +334,12 @@ impl sanic_web::Control for DashboardControl {
     fn review_now(&self, key: PrKey) {
         // Only fails once `serve` is stopping.
         let _ = self.requests.send(Request::Rerun(key));
+    }
+
+    fn refresh(&self, key: PrKey) {
+        info!(url = %key.url(), "refreshing after a post");
+        // Only fails once `serve` is stopping.
+        let _ = self.refreshes.send(key);
     }
 
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool> {
@@ -592,6 +602,7 @@ async fn poll_forever<G: GithubApi>(
     watcher: &mut ConfigWatcher,
     config_path: &Path,
     updates: &mpsc::UnboundedSender<Update>,
+    refreshes: &mut mpsc::UnboundedReceiver<PrKey>,
     worker: &Worker,
     live: &Live,
 ) -> Result<()> {
@@ -621,6 +632,15 @@ async fn poll_forever<G: GithubApi>(
                     next_reconcile = Instant::now().max(paused_until);
                 }
                 continue;
+            }
+            Some(key) = refreshes.recv() => {
+                // First in the queue, and refreshed now rather than after
+                // the next poll, unless a rate limit pauses polling: then
+                // it waits in the queue for the pause to end.
+                pending.push(key, Priority::Asked);
+                if Instant::now() < paused_until {
+                    continue;
+                }
             }
         }
         let reconcile_every = poller.config().poll.reconcile_interval;
@@ -667,7 +687,7 @@ async fn poll_forever<G: GithubApi>(
 
         let triggered = if backoff.is_none() {
             let (triggered, wait) =
-                refresh_queued(poller, &mut pending, &mut seen, updates, live).await?;
+                refresh_queued(poller, &mut pending, refreshes, &mut seen, updates, live).await?;
             backoff = wait;
             triggered
         } else {
@@ -692,9 +712,12 @@ async fn poll_forever<G: GithubApi>(
 
 /// Refreshes queued PRs, most urgent first, until the queue is empty or a
 /// rate limit says to wait. Returns the triggers found and that wait.
+/// Refreshes the dashboard asks for during a long batch join the queue
+/// before each pop, so they go next rather than after the batch.
 async fn refresh_queued<G: GithubApi>(
     poller: &mut Poller<G>,
     pending: &mut RefreshQueue,
+    asked: &mut mpsc::UnboundedReceiver<PrKey>,
     seen: &mut HashSet<PrKey>,
     updates: &mpsc::UnboundedSender<Update>,
     live: &Live,
@@ -702,9 +725,11 @@ async fn refresh_queued<G: GithubApi>(
     let mut triggered = 0;
     let mut backoff = None;
     let mut progress = ProgressLog::new(Instant::now());
-    while backoff.is_none()
-        && let Some((key, priority)) = pending.pop()
-    {
+    while backoff.is_none() {
+        take_asked(asked, pending);
+        let Some((key, priority)) = pending.pop() else {
+            break;
+        };
         let step = progress.step(pending.len(), Instant::now());
         live.progress.send_replace(Some(step.progress));
         if step.log {
@@ -743,6 +768,13 @@ async fn refresh_queued<G: GithubApi>(
     }
     live.progress.send_replace(None);
     Ok((triggered, backoff))
+}
+
+/// Queues every refresh the dashboard has asked for so far, first.
+fn take_asked(asked: &mut mpsc::UnboundedReceiver<PrKey>, pending: &mut RefreshQueue) {
+    while let Ok(key) = asked.try_recv() {
+        pending.push(key, Priority::Asked);
+    }
 }
 
 /// Swaps in the config at `path`, keeping the current one if the new one
@@ -976,6 +1008,94 @@ mod tests {
         assert!((0..5).all(|i| !log.step(4 - i, later).log));
     }
 
+    /// A refresh the dashboard asks for goes ahead of the next poll, but
+    /// not through a rate limit's pause.
+    #[tokio::test(start_paused = true)]
+    async fn asked_refreshes_go_now_unless_a_rate_limit_pauses_polling() {
+        use crate::poll::tests::{FakeGithub, key, poller, snapshot};
+
+        let pr = key("org/repo", 7);
+        // Without a pause it's fetched when asked; the first reconcile's
+        // rate limit holds it until the pause ends.
+        for (limit, fetched_after) in [(None, 5), (Some(60), 60)] {
+            let github = FakeGithub::default();
+            github.rate_limit.set(limit.map(Duration::from_secs));
+            github
+                .prs
+                .borrow_mut()
+                .insert(pr.clone(), snapshot(&pr, "alice", &[]));
+            let mut poller = poller(github);
+            let dir = tempfile::TempDir::new().unwrap();
+            let config_path = dir.path().join("config.toml");
+            std::fs::write(&config_path, "").unwrap();
+            let mut watcher = ConfigWatcher::new(&config_path).unwrap();
+            let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+            let worker = Worker::new(dir.path(), store, poller.config());
+            let live = Live::new(poller.config(), None);
+            let (updates, _updates) = mpsc::unbounded_channel();
+            let (refreshes, mut asked) = mpsc::unbounded_channel();
+            let start = Instant::now();
+            let polling = tokio::time::timeout(
+                Duration::from_secs(90),
+                poll_forever(
+                    &mut poller,
+                    &mut watcher,
+                    &config_path,
+                    &updates,
+                    &mut asked,
+                    &worker,
+                    &live,
+                ),
+            );
+            let ask = async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                refreshes.send(pr.clone()).unwrap();
+            };
+            let (stopped, ()) = tokio::join!(polling, ask);
+            assert!(stopped.is_err(), "poll_forever never returns");
+            // Nothing else fetches it: it's in no search or notification.
+            let github = poller.github();
+            assert_eq!(*github.fetched.borrow(), std::slice::from_ref(&pr));
+            let at = github.fetched_at.borrow()[0] - start;
+            assert_eq!(at.as_secs(), fetched_after, "{limit:?}");
+        }
+    }
+
+    /// A refresh asked for while a batch is queued goes next, not after it.
+    #[tokio::test]
+    async fn asked_refreshes_jump_a_queued_batch() {
+        use crate::poll::tests::{FakeGithub, key, poller, snapshot};
+
+        let (batch, asked_for) = ([key("org/a", 1), key("org/b", 2)], key("org/c", 3));
+        let github = FakeGithub::default();
+        for pr in batch.iter().chain([&asked_for]) {
+            github
+                .prs
+                .borrow_mut()
+                .insert(pr.clone(), snapshot(pr, "alice", &[]));
+        }
+        let mut poller = poller(github);
+        let mut pending = RefreshQueue::default();
+        pending.extend(batch.clone(), Priority::Involved);
+        let (refreshes, mut asked) = mpsc::unbounded_channel();
+        refreshes.send(asked_for.clone()).unwrap();
+        let (updates, _updates) = mpsc::unbounded_channel();
+        let live = Live::new(poller.config(), None);
+        refresh_queued(
+            &mut poller,
+            &mut pending,
+            &mut asked,
+            &mut HashSet::new(),
+            &updates,
+            &live,
+        )
+        .await
+        .unwrap();
+        let fetched = poller.github().fetched.borrow();
+        assert_eq!(fetched.first(), Some(&asked_for), "{fetched:?}");
+        assert_eq!(fetched.len(), 3);
+    }
+
     #[test]
     fn the_dashboard_adds_skip_titles_and_picks_windows() {
         use sanic_web::Control as _;
@@ -988,6 +1108,7 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let control = DashboardControl {
             requests: mpsc::unbounded_channel().0,
+            refreshes: mpsc::unbounded_channel().0,
             store: Arc::clone(&store),
             started: mpsc::unbounded_channel().0,
             data_dir: dir.path().to_owned(),

@@ -118,6 +118,8 @@ pub struct Reconciled {
 /// How soon a queued PR is refreshed: earlier variants first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
+    /// The dashboard asked for it, having just posted to it.
+    Asked,
     /// A reconcile found it requesting your review.
     Requested,
     /// A reconcile found it involving you.
@@ -403,14 +405,18 @@ impl<G: GithubApi> Poller<G> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{cell::RefCell, collections::HashMap, path::Path};
+pub(crate) mod tests {
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        path::Path,
+    };
 
     use color_eyre::eyre::{Result, eyre};
     use sanic_core::{
         clock::WindowChoice,
         config::{CheckoutResolver, Vcs},
-        pr::{CONVERSATION_THREAD, Comment, Placement, Thread},
+        pr::{CONVERSATION_THREAD, Comment, Placement, Review, ReviewState, Thread},
         repo::RepoName,
     };
     use sanic_github::Notification;
@@ -418,19 +424,28 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct FakeGithub {
+    pub(crate) struct FakeGithub {
         /// By the exact qualifiers searched for.
         searches: HashMap<String, Vec<PrKey>>,
         /// Counts, by the exact qualifiers counted.
         counts: HashMap<String, u32>,
         /// Every search and count, in order.
         searched: RefCell<Vec<String>>,
-        prs: RefCell<HashMap<PrKey, PrSnapshot>>,
+        pub(crate) prs: RefCell<HashMap<PrKey, PrSnapshot>>,
         notifications: Vec<Notification>,
         seen_since: RefCell<Vec<Option<String>>>,
-        /// Every PR `pull_request` was asked for, in order.
-        fetched: RefCell<Vec<PrKey>>,
+        /// Every PR `pull_request` was asked for, in order, and when.
+        pub(crate) fetched: RefCell<Vec<PrKey>>,
+        pub(crate) fetched_at: RefCell<Vec<tokio::time::Instant>>,
         teams: Vec<TeamRef>,
+        /// The next search is rate limited for this long.
+        pub(crate) rate_limit: Cell<Option<Duration>>,
+    }
+
+    impl<G> Poller<G> {
+        pub(crate) fn github(&self) -> &G {
+            &self.github
+        }
     }
 
     // The fake answers immediately; `async fn` keeps it readable.
@@ -451,6 +466,9 @@ mod tests {
         }
 
         async fn search_prs(&self, qualifiers: &str) -> Result<Vec<PrKey>, ApiError> {
+            if let Some(retry_after) = self.rate_limit.take() {
+                return Err(ApiError::RateLimited { retry_after });
+            }
             self.searched.borrow_mut().push(qualifiers.to_owned());
             Ok(self.searches.get(qualifiers).cloned().unwrap_or_default())
         }
@@ -471,6 +489,9 @@ mod tests {
             with_files: bool,
         ) -> Result<Option<PrSnapshot>, ApiError> {
             self.fetched.borrow_mut().push(key.clone());
+            self.fetched_at
+                .borrow_mut()
+                .push(tokio::time::Instant::now());
             Ok(self.prs.borrow().get(key).cloned().map(|mut s| {
                 if !with_files {
                     s.files = None;
@@ -509,14 +530,14 @@ mod tests {
         .unwrap()
     }
 
-    fn key(repo: &str, number: u32) -> PrKey {
+    pub(crate) fn key(repo: &str, number: u32) -> PrKey {
         PrKey {
             repo: RepoName::parse(repo).unwrap(),
             number,
         }
     }
 
-    fn snapshot(key: &PrKey, author: &str, files: &[&str]) -> PrSnapshot {
+    pub(crate) fn snapshot(key: &PrKey, author: &str, files: &[&str]) -> PrSnapshot {
         PrSnapshot {
             key: key.clone(),
             title: "t".into(),
@@ -560,7 +581,7 @@ mod tests {
         format!("{qualifiers} updated:>=2026-09-09")
     }
 
-    fn poller(github: FakeGithub) -> Poller<FakeGithub> {
+    pub(crate) fn poller(github: FakeGithub) -> Poller<FakeGithub> {
         Poller::new(
             github,
             Store::open_in_memory().unwrap(),
@@ -601,11 +622,14 @@ mod tests {
         // changes nothing.
         queue.push(key("org/a", 1), Priority::Requested);
         queue.push(key("org/z", 3), Priority::Notified);
-        assert_eq!(queue.len(), 3);
+        // What the dashboard asks for goes before them all.
+        queue.push(key("org/c", 4), Priority::Asked);
+        assert_eq!(queue.len(), 4);
         let order: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
         assert_eq!(
             order,
             [
+                (key("org/c", 4), Priority::Asked),
                 (key("org/a", 1), Priority::Requested),
                 (key("org/z", 3), Priority::Requested),
                 (key("org/b", 2), Priority::Involved),
@@ -835,6 +859,79 @@ mod tests {
         let triggers = poller.refresh(&pr).await.unwrap().unwrap().triggers;
         assert!(matches!(triggers.as_slice(), [Trigger::Reply { .. }]));
         assert_eq!(poller.store().events().unwrap().len(), 1);
+    }
+
+    fn comment(id: &str, author: &str) -> Comment {
+        Comment {
+            id: id.into(),
+            author: author.into(),
+            body: "b".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            url: None,
+            by_bot: false,
+            reacted_at: None,
+            reactions: vec![],
+        }
+    }
+
+    /// The refresh the dashboard asks for after it posts finds only what
+    /// you posted, which raises nothing.
+    #[tokio::test]
+    async fn what_you_post_raises_no_triggers() {
+        let theirs = key("org/other", 3);
+        let mut owed = snapshot(&theirs, "alice", &[]);
+        owed.review_requested = true;
+        owed.threads.push(Thread {
+            id: "t1".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(3),
+            resolved: false,
+            place: Placement::default(),
+            comments: vec![comment("c1", "bob")],
+        });
+        let mine = key("org/mine", 4);
+        let mut own = snapshot(&mine, "me", &[]);
+        own.threads[0].comments.push(comment("c2", "alice"));
+        let github = FakeGithub::default();
+        github.prs.borrow_mut().insert(theirs.clone(), owed.clone());
+        github.prs.borrow_mut().insert(mine.clone(), own.clone());
+        let mut poller = poller(github);
+        let first = poller.refresh(&theirs).await.unwrap().unwrap().triggers;
+        assert!(matches!(
+            first.as_slice(),
+            [Trigger::ReviewRequested { .. }]
+        ));
+        assert_eq!(poller.refresh(&mine).await.unwrap().unwrap().triggers, []);
+
+        // A review with an inline comment and a reply in bob's thread,
+        // which clears the request, and a 👍 on bob's comment.
+        owed.review_requested = false;
+        owed.reviews.push(Review {
+            id: "r1".into(),
+            author: "me".into(),
+            state: ReviewState::Commented,
+            body: "Mostly fine.".into(),
+            submitted_at: "2026-01-02T00:00:00Z".into(),
+            commit: Some("h1".into()),
+            by_bot: false,
+        });
+        owed.threads[1].comments[0].reacted_at = Some("2026-01-02T00:00:00Z".into());
+        owed.threads[1].comments.push(comment("c3", "me"));
+        owed.threads.push(Thread {
+            id: "t2".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(9),
+            resolved: false,
+            place: Placement::default(),
+            comments: vec![comment("c4", "me")],
+        });
+        // On your own PR, a reply to alice and a 👍 on her comment.
+        own.threads[0].comments[0].reacted_at = Some("2026-01-02T00:00:00Z".into());
+        own.threads[0].comments.push(comment("c5", "me"));
+        poller.github.prs.borrow_mut().insert(theirs.clone(), owed);
+        poller.github.prs.borrow_mut().insert(mine.clone(), own);
+        assert_eq!(poller.refresh(&theirs).await.unwrap().unwrap().triggers, []);
+        assert_eq!(poller.refresh(&mine).await.unwrap().unwrap().triggers, []);
     }
 
     #[tokio::test]
