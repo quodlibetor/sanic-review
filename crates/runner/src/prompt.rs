@@ -98,8 +98,9 @@ pub fn system_prompt(
     }
     if !skills.is_empty() {
         out.push_str(
-            "\n# Skills\n\nThese directories hold skills (a `SKILL.md` per skill). \
-             Read the ones relevant to this PR.\n\n",
+            "\n# Skills\n\nEach of these directories is a skill, holding its `SKILL.md`, \
+             or holds skills, a `SKILL.md` per subdirectory. Read the ones relevant \
+             to this PR.\n\n",
         );
         for dir in skills {
             let _ = writeln!(out, "- {}", dir.display());

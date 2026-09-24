@@ -34,7 +34,7 @@ Be terse.
 
 # Skills
 
-These directories hold skills (a `SKILL.md` per skill). Read the ones relevant to this PR.
+Each of these directories is a skill, holding its `SKILL.md`, or holds skills, a `SKILL.md` per subdirectory. Read the ones relevant to this PR.
 
 - /skills/vuln
 
