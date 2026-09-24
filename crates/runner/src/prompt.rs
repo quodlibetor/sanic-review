@@ -47,8 +47,44 @@ with an existing comment, say so in `summary`, naming who made it and where, \
 rather than commenting on it again.
 ";
 
-/// The system prompt: fixed review instructions, then each of the profile's
-/// instruction files, then where its skills and the reference checkouts are.
+/// Where the agent runs, for instructions and skills written for an
+/// interactive session: what they ask for that this one can't do, and
+/// where it goes instead. Before them, so they read in its light.
+const ENVIRONMENT: &str = "
+# Where you're running
+
+You're running non-interactively inside sanic-review, with read-only tools. \
+You can't ask questions, wait for confirmation, post to GitHub, run `gh` or \
+write files. Your only output is the drafts, in the format above; the reviewer \
+triages, edits and posts them from sanic-review's dashboard.
+
+The instructions and skills below may be written for an interactive session. \
+Map their steps onto this one:
+- Presenting findings for triage, or explaining them to the user: put that in \
+each draft's private `note` (`summary_note` for the summary).
+- Revising from the user's verdicts: the reviewer's revision requests arrive \
+later, in a prompt that resumes this session.
+- Delivering, posting or confirming: stop at the drafts.
+- Steps that need tools you don't have: skip them silently. They aren't \
+failures; don't report them.
+
+Otherwise, the instructions and skills below govern the review's style and \
+content.
+";
+
+/// What a chat resumed from a review's session is told about where it
+/// runs, in place of [`ENVIRONMENT`]: someone is there to answer now, but
+/// the drafts still change only on the dashboard. One line without
+/// apostrophes, since it goes in the command a chat prints to paste.
+pub const CHAT_ENVIRONMENT: &str = "You are in a chat, resumed from a sanic-review \
+review session, with the reviewer who triages your drafts. You cannot post to GitHub, \
+run `gh` or reach the network. Your drafts are edited, accepted and posted from the \
+sanic-review dashboard, not from here: to change one, say what you would change, and \
+the reviewer makes it there or asks you to revise it.";
+
+/// The system prompt: fixed review instructions and where the agent runs,
+/// then each of the profile's instruction files, then where its skills and
+/// the reference checkouts are.
 #[must_use]
 pub fn system_prompt(
     instructions: &[(String, String)],
@@ -56,6 +92,7 @@ pub fn system_prompt(
     references: &[&Path],
 ) -> String {
     let mut out = String::from(REVIEW_INSTRUCTIONS);
+    out.push_str(ENVIRONMENT);
     for (name, text) in instructions {
         let _ = write!(out, "\n# Instructions from {name}\n\n{}\n", text.trim_end());
     }
@@ -407,6 +444,26 @@ mod tests {
             &[Path::new("/skills/vuln")],
             &[Path::new("/src/services"), Path::new("/src/vuln-eval")]
         ));
+    }
+
+    #[test]
+    fn where_it_runs_comes_before_the_profiles_instructions_and_skills() {
+        let text = system_prompt(
+            &[(
+                "general.md".into(),
+                "Present each finding for triage.\n".into(),
+            )],
+            &[Path::new("/skills/vuln")],
+            &[],
+        );
+        let at = |needle: &str| text.find(needle).expect(needle);
+        let environment = at("# Where you're running");
+        assert!(at("Your answer is JSON") < environment, "{text}");
+        assert!(environment < at("# Instructions from general.md"), "{text}");
+        assert!(environment < at("# Skills"), "{text}");
+        assert!(text[environment..].contains("run `gh`"), "{text}");
+        // It's said once, however many instruction files there are.
+        assert_eq!(text.matches("# Where you're running").count(), 1);
     }
 
     #[test]

@@ -239,7 +239,7 @@ expression: "readable(&f, &page.body)"
 <li>
 <span>Run it</span>
 <div class="copyrow">
-<pre id="claude-command">cd $DATA/worktrees/1 &amp;&amp; env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-7 --restricted --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --add-dir $DATA/runs/1 --add-dir /skills/review</pre>
+<pre id="claude-command">cd $DATA/worktrees/1 &amp;&amp; env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-7 --restricted --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --append-system-prompt 'You are in a chat, resumed from a sanic-review review session, with the reviewer who triages your drafts. You cannot post to GitHub, run `gh` or reach the network. Your drafts are edited, accepted and posted from the sanic-review dashboard, not from here: to change one, say what you would change, and the reviewer makes it there or asks you to revise it.' --add-dir $DATA/runs/1 --add-dir /skills/review</pre>
 <button class="btn" type="button" data-copy="#claude-command" aria-describedby="claude-command">Copy</button>
 </div>
 </li>
