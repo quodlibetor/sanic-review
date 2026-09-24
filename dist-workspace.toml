@@ -34,8 +34,9 @@ aarch64-apple-darwin = "macos-26"
 # Cross-compiled on the arm64 runner.
 x86_64-apple-darwin = "macos-26"
 
-# Actions the generated workflow uses, pinned to the commits their major tags
-# pointed at. Bump by resolving the tag again and running `dist generate`.
+# Actions the generated workflow uses, pinned to the commits of the releases
+# in the comments. Renovate bumps the SHA and comment together; run
+# `dist generate` afterwards.
 [dist.github-action-commits]
 "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803" # v6.1.0
 "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" # v7.0.1
