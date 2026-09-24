@@ -60,23 +60,40 @@ impl At<'_> {
             (side == Side::Right).then(|| blob_url(self.key, self.reviewed, path, lines))
         }
     }
+
+    /// `path` on GitHub, as [`At::lines`] links its lines: in the PR's
+    /// Files changed, or the file at the reviewed head, which a `deleted`
+    /// file isn't in.
+    #[must_use]
+    pub fn file(self, path: &str, deleted: bool) -> Option<String> {
+        if self.reviewed == self.current {
+            Some(format!("{}/files#{}", self.key.url(), file_anchor(path)))
+        } else {
+            (!deleted).then(|| blob_file(self.key, self.reviewed, path))
+        }
+    }
 }
 
-/// `lines` of `path` in the file at `head` on GitHub, as source even for
-/// Markdown (`plain=1`, or GitHub renders it, without its lines).
+/// `path` at `head` on GitHub, as source even for Markdown (`plain=1`,
+/// or GitHub renders it, without its lines).
+fn blob_file(key: &PrKey, head: &str, path: &str) -> String {
+    let path: Vec<String> = path.split('/').map(percent_encode).collect();
+    format!(
+        "https://github.com/{}/blob/{head}/{}?plain=1",
+        key.repo,
+        path.join("/")
+    )
+}
+
+/// `lines` of `path` in the file at `head` on GitHub; see [`blob_file`].
 #[must_use]
 pub fn blob_url(key: &PrKey, head: &str, path: &str, (start, end): (u32, u32)) -> String {
-    let path: Vec<String> = path.split('/').map(percent_encode).collect();
     let lines = if start == end {
         format!("L{end}")
     } else {
         format!("L{start}-L{end}")
     };
-    format!(
-        "https://github.com/{}/blob/{head}/{}?plain=1#{lines}",
-        key.repo,
-        path.join("/")
-    )
+    format!("{}#{lines}", blob_file(key, head, path))
 }
 
 /// `segment` with everything but RFC 3986's unreserved characters
@@ -155,5 +172,15 @@ mod tests {
             Some("https://github.com/org/repo/blob/abc123/src/a%20b%23c.rs?plain=1#L10-L12")
         );
         assert_eq!(moved.lines("src/lib.rs", Side::Left, (3, 3)), None);
+        assert_eq!(
+            at("abc123").file("src/lib.rs", true),
+            Some(format!("{diff}#{LIB}"))
+        );
+        assert_eq!(
+            moved.file("src/lib.rs", false).as_deref(),
+            Some("https://github.com/org/repo/blob/abc123/src/lib.rs?plain=1")
+        );
+        // The reviewed head has no deleted file to link to.
+        assert_eq!(moved.file("src/lib.rs", true), None);
     }
 }

@@ -10,6 +10,12 @@ targets = [
 
 [advisories]
 yanked = "deny"
+ignore = [
+  # bincode is unmaintained, and its team calls 1.3.3 complete. syntect
+  # uses it only to load the syntaxes and themes built into the binary,
+  # never anything from outside, and has no release without it.
+  { id = "RUSTSEC-2025-0141", reason = "syntect's own embedded dumps only" },
+]
 
 [licenses]
 # The allowlist is policy, not an inventory of what the current graph uses.

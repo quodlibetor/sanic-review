@@ -10,6 +10,7 @@ expression: "readable(&f, &page.body)"
 <meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
 <title>Add the thing · sanic-review</title>
 <link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/syntax.css">
 <script src="/assets/htmx.min.js" defer>
 </script>
 <script src="/assets/app.js" defer>
@@ -101,6 +102,12 @@ expression: "readable(&f, &page.body)"
 </div>
 </details>
 </div>
+<nav class="views" id="views">
+<a class="cur" href="/pr/org/repo/7?view=drafts" data-view="drafts">Drafts</a>
+<a href="/pr/org/repo/7?view=files" data-view="files">Files changed <span class="cnt">1</span>
+</a>
+<span class="k">f</span>
+</nav>
 <section id="drafts">
 <article class="draft dc pending summary" id="draft-1">
 <div class="h">
@@ -247,7 +254,7 @@ expression: "readable(&f, &page.body)"
 </section>
 <p class="help-foot">
 <span class="k">j</span>
-<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">p</span> preview · <span class="k">r</span>
+<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">f</span> files · <span class="k">p</span> preview · <span class="k">r</span>
 <span class="k">x</span>
 <span class="k">i</span>
 <span class="k">c</span> act on the PR · <span class="k">q</span> index</p>
@@ -327,6 +334,12 @@ expression: "readable(&f, &page.body)"
 <kbd>c</kbd>
 </th>
 <td>chat with the agent that reviewed it: shows the command</td>
+</tr>
+<tr>
+<th>
+<kbd>f</kbd>
+</th>
+<td>on a PR page: the drafts, or the files changed with the drafts in them</td>
 </tr>
 <tr>
 <th>

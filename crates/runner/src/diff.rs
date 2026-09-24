@@ -11,9 +11,33 @@ use sanic_core::run::{InlineComment, Side};
 
 #[derive(Debug, Default)]
 pub struct DiffIndex {
-    /// Keyed by the path GitHub uses: the new path, or the old one for a
-    /// deleted file.
-    files: HashMap<String, Vec<Hunk>>,
+    /// In diff order.
+    files: Vec<DiffFile>,
+    /// Where each file is in `files`, by [`DiffFile::path`].
+    by_path: HashMap<String, usize>,
+}
+
+/// One file's part of the diff.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffFile {
+    /// The path GitHub uses: the new path, or the old one for a deleted
+    /// file.
+    pub path: String,
+    /// Its path before a rename; `None` if it wasn't renamed.
+    pub renamed_from: Option<String>,
+    pub change: Change,
+    /// Git says only that it differs.
+    pub binary: bool,
+    pub hunks: Vec<Hunk>,
+}
+
+/// What happened to a file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Change {
+    Added,
+    Deleted,
+    #[default]
+    Modified,
 }
 
 /// One `@@` hunk: the lines it covers on each side, and its lines.
@@ -43,23 +67,37 @@ impl Hunk {
     }
 }
 
+impl DiffFile {
+    /// Its added and removed lines.
+    #[must_use]
+    pub fn stats(&self) -> (usize, usize) {
+        let lines = self.hunks.iter().flat_map(|h| &h.lines);
+        lines.fold((0, 0), |(add, del), l| match (l.old, l.new) {
+            (None, _) => (add + 1, del),
+            (_, None) => (add, del + 1),
+            _ => (add, del),
+        })
+    }
+}
+
 impl DiffIndex {
     /// Indexes `git diff` output made with `a/` and `b/` prefixes.
     #[must_use]
     pub fn parse(diff: &str) -> Self {
-        let mut index = Self::default();
-        let mut old_path: Option<String> = None;
-        let mut path: Option<String> = None;
+        let mut files: Vec<DiffFile> = Vec::new();
+        // The file being read, with the paths its `diff --git` line names,
+        // until its `---` and `+++` lines, if any, say better.
+        let mut file: Option<DiffFile> = None;
         // File headers come between `diff --git` and the first hunk; after
         // that, a `--- ` line is a removed line that began with `-- `.
         let mut in_header = false;
-        // The hunk being read, its path, and how many of its old and new
-        // lines are still to come.
-        let mut open: Option<(String, Hunk, u32, u32)> = None;
+        // The hunk being read, and how many of its old and new lines are
+        // still to come.
+        let mut open: Option<(Hunk, u32, u32)> = None;
         for line in diff.lines() {
             // A line that can't be part of a hunk ends it, even if its
             // header promised more.
-            if let Some((_, hunk, old_left, new_left)) = &mut open
+            if let Some((hunk, old_left, new_left)) = &mut open
                 && (*old_left > 0 || *new_left > 0)
                 && (line.is_empty() || line.starts_with([' ', '+', '-', '\\']))
             {
@@ -82,54 +120,170 @@ impl DiffIndex {
                 });
                 continue;
             }
-            if line.starts_with("diff --git ") {
-                index.close(open.take());
+            if let Some((hunk, ..)) = open.take()
+                && let Some(file) = &mut file
+            {
+                file.hunks.push(hunk);
+            }
+            if let Some(paths) = line.strip_prefix("diff --git ") {
+                files.extend(file.take());
                 in_header = true;
-                old_path = None;
-                path = None;
-            } else if in_header && let Some(p) = line.strip_prefix("--- ") {
-                old_path = header_path(p, "a/");
-            } else if in_header && let Some(p) = line.strip_prefix("+++ ") {
-                path = header_path(p, "b/").or_else(|| old_path.clone());
-            } else if let Some(header) = line.strip_prefix("@@ ") {
-                index.close(open.take());
+                let (old, new) = git_line_paths(paths).unwrap_or_default();
+                file = Some(DiffFile {
+                    renamed_from: (old != new).then_some(old),
+                    path: new,
+                    ..DiffFile::default()
+                });
+            } else if let Some(header) = line.strip_prefix("@@ ")
+                && file.is_some()
+            {
                 in_header = false;
-                if let (Some(path), Some(hunk)) = (&path, parse_hunk_header(header)) {
+                if let Some(hunk) = parse_hunk_header(header) {
                     let (old_left, new_left) =
                         (hunk.old.end - hunk.old.start, hunk.new.end - hunk.new.start);
-                    open = Some((path.clone(), hunk, old_left, new_left));
+                    open = Some((hunk, old_left, new_left));
                 }
+            } else if let Some(file) = &mut file
+                && in_header
+            {
+                header_line(file, line);
             }
         }
-        index.close(open);
-        index
+        if let (Some((hunk, ..)), Some(file)) = (open, &mut file) {
+            file.hunks.push(hunk);
+        }
+        files.extend(file);
+        let by_path = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.path.clone(), i))
+            .collect();
+        Self { files, by_path }
     }
 
-    fn close(&mut self, hunk: Option<(String, Hunk, u32, u32)>) {
-        if let Some((path, hunk, ..)) = hunk {
-            self.files.entry(path).or_default().push(hunk);
-        }
+    /// The files it changes, in diff order.
+    #[must_use]
+    pub fn files(&self) -> &[DiffFile] {
+        &self.files
+    }
+
+    /// The file at `path`, as GitHub names it.
+    #[must_use]
+    pub fn file(&self, path: &str) -> Option<&DiffFile> {
+        self.by_path.get(path).map(|&i| &self.files[i])
     }
 
     /// `path`'s hunks, in diff order; empty for a file the diff doesn't
     /// touch.
     #[must_use]
     pub fn hunks(&self, path: &str) -> &[Hunk] {
-        self.files.get(path).map_or(&[], Vec::as_slice)
+        self.file(path).map_or(&[], |f| f.hunks.as_slice())
     }
 
     /// Whether GitHub would accept `comment`'s anchor.
     #[must_use]
     pub fn anchors(&self, comment: &InlineComment) -> bool {
-        let Some(hunks) = self.files.get(&comment.path) else {
-            return false;
-        };
+        let hunks = self.hunks(&comment.path);
         let start = comment.start_line.unwrap_or(comment.line);
         start <= comment.line
             && hunks.iter().any(|h| {
                 let lines = h.lines(comment.side);
                 lines.contains(&start) && lines.contains(&comment.line)
             })
+    }
+}
+
+/// Reads a line between `diff --git` and the first hunk into `file`.
+fn header_line(file: &mut DiffFile, line: &str) {
+    if let Some(p) = line.strip_prefix("--- ") {
+        match header_path(p, "a/") {
+            Some(old) => {
+                // A deleted file has no new path, so it's named by its old.
+                if file.change == Change::Deleted {
+                    file.path.clone_from(&old);
+                }
+                file.renamed_from = (old != file.path).then_some(old);
+            }
+            None => file.change = Change::Added,
+        }
+    } else if let Some(p) = line.strip_prefix("+++ ") {
+        if let Some(new) = header_path(p, "b/") {
+            if file.renamed_from.as_ref() == Some(&new) {
+                file.renamed_from = None;
+            }
+            file.path = new;
+        } else {
+            file.change = Change::Deleted;
+        }
+    } else if line.starts_with("new file mode ") {
+        file.change = Change::Added;
+    } else if line.starts_with("deleted file mode ") {
+        file.change = Change::Deleted;
+    } else if let Some(p) = line.strip_prefix("rename from ") {
+        file.renamed_from = Some(git_path(p));
+    } else if let Some(p) = line.strip_prefix("rename to ") {
+        file.path = git_path(p);
+    } else if line.starts_with("Binary files ") || line == "GIT binary patch" {
+        file.binary = true;
+    }
+}
+
+/// The old and new paths on a `diff --git a/<old> b/<new>` line. A name
+/// with a space is ambiguous there, so this takes the two halves when
+/// they match, as they do for anything but a rename, whose own lines name
+/// its paths.
+fn git_line_paths(paths: &str) -> Option<(String, String)> {
+    if let Some(rest) = paths.strip_prefix('"') {
+        // `"a/…" "b/…"`, or `"a/…" b/…`.
+        let end = quoted_end(rest)?;
+        let old = unquote(&rest[..end]);
+        let new = git_path(rest[end + 1..].trim_start());
+        return Some((
+            old.strip_prefix("a/")?.to_owned(),
+            new.strip_prefix("b/")?.to_owned(),
+        ));
+    }
+    let half = paths.len().checked_sub(1)? / 2;
+    let (old, new) = match (paths.get(..half), paths.get(half + 1..)) {
+        (Some(old), Some(new))
+            if paths.as_bytes().get(half) == Some(&b' ')
+                && old.strip_prefix("a/").is_some()
+                && old.get(2..) == new.get(2..) =>
+        {
+            (old.to_owned(), new.to_owned())
+        }
+        _ => {
+            let (old, new) = paths.split_once(" b/")?;
+            (old.to_owned(), format!("b/{new}"))
+        }
+    };
+    Some((
+        old.strip_prefix("a/")?.to_owned(),
+        new.strip_prefix("b/")?.to_owned(),
+    ))
+}
+
+/// Where the quoted name that `rest` starts inside ends: the index of its
+/// closing `"`.
+fn quoted_end(rest: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A path as git writes it after `rename from` and the like: C-quoted if
+/// it has special characters.
+fn git_path(raw: &str) -> String {
+    match raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(quoted) => unquote(quoted),
+        None => raw.to_owned(),
     }
 }
 
@@ -357,5 +511,74 @@ diff --git a/src/lib.rs b/src/lib.rs
         let index = DiffIndex::parse(DIFF);
         assert!(!index.anchors(&comment("img.png", Side::Right, None, 1)));
         assert!(!index.anchors(&comment("elsewhere.rs", Side::Right, None, 1)));
+    }
+
+    #[test]
+    fn files_are_listed_in_diff_order_with_what_happened_to_them() {
+        let diff = format!(
+            "{DIFF}\
+diff --git a/old name.rs b/new name.rs
+similarity index 90%
+rename from old name.rs
+rename to new name.rs
+--- a/old name.rs
++++ b/new name.rs
+@@ -1 +1 @@
+-a
++b
+diff --git a/moved.txt b/there/moved.txt
+similarity index 100%
+rename from moved.txt
+rename to there/moved.txt
+diff --git a/with space.bin b/with space.bin
+Binary files a/with space.bin and b/with space.bin differ
+"
+        );
+        let index = DiffIndex::parse(&diff);
+        let files: Vec<_> = index
+            .files()
+            .iter()
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.renamed_from.as_deref(),
+                    f.change,
+                    f.binary,
+                    f.hunks.len(),
+                    f.stats(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("src/lib.rs", None, Change::Modified, false, 2, (3, 2)),
+                ("gone.txt", None, Change::Deleted, false, 1, (0, 2)),
+                ("new.txt", None, Change::Added, false, 1, (3, 0)),
+                ("img.png", None, Change::Modified, true, 0, (0, 0)),
+                (
+                    "new name.rs",
+                    Some("old name.rs"),
+                    Change::Modified,
+                    false,
+                    1,
+                    (1, 1)
+                ),
+                (
+                    "there/moved.txt",
+                    Some("moved.txt"),
+                    Change::Modified,
+                    false,
+                    0,
+                    (0, 0)
+                ),
+                ("with space.bin", None, Change::Modified, true, 0, (0, 0)),
+            ]
+        );
+        assert_eq!(
+            index.file("gone.txt").map(|f| f.change),
+            Some(Change::Deleted)
+        );
+        assert!(index.file("elsewhere.rs").is_none());
     }
 }

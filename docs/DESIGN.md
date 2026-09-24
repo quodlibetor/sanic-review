@@ -603,6 +603,20 @@ embedded in the binary, so nothing is fetched at runtime.
   the file at the reviewed head, for new lines only; old ones get no
   link. A draft that isn't on a line of the diff links to its lines in
   the file at that head.
+- **Files changed.** Tabs over the drafts switch to a view of the whole
+  diff the run reviewed, laid out as GitHub's Files changed tab, and back
+  (`f`). The URL says which (`?view=files`), so it's linkable, and a page
+  opened without one shows the view this browser last picked. It says
+  which head the diff is at, and when the PR has moved on since. The
+  summary and the drafts that aren't on a line of the diff come first;
+  every other draft is under the line it ends on, its lines marked, with
+  the drafts view's card and controls, and each existing thread on the
+  reviewed head is under the line it ends on. Lines are highlighted
+  (syntect's pure-Rust regex engine, as classes coloured for light and
+  dark mode), except in files too big for it and on very long lines. A
+  big file with no draft or thread on it, or any such file once the page
+  has shown a lot, is folded to a Load diff button that fetches it on
+  its own. Each file's header links to it on GitHub, as its lines link.
 - **Existing threads.** Over the drafts, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, and how
   many are resolved; the threads no draft overlaps are folded under it.
@@ -769,7 +783,8 @@ embedded in the binary, so nothing is fetched at runtime.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm, `x` archives or unarchives, `X` shows
-  archived PRs, `i` opens the ignore editor, `c` the chat commands, and
+  archived PRs, `i` opens the ignore editor, `c` the chat commands, `f`
+  switches a PR page between its drafts and the files changed, and
   on the index `v` and `d` open the selected row's reviewers and lead
   popovers, which `Esc` closes.
   `Enter` opens the selected PR, and `j`/`k` skip a folded group.

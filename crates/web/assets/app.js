@@ -360,6 +360,13 @@
         else return;
         break;
       }
+      case "f": {
+        // The PR page's other view of its drafts.
+        const other = page === "pr" && document.querySelector("#views a[data-view]:not(.cur)");
+        if (!other) return;
+        other.click();
+        break;
+      }
       case "i": {
         const target = subject();
         const href = target && target.dataset.ignore;
@@ -692,6 +699,35 @@
     draw(false);
     retally();
   });
+
+  // The PR page's view of its drafts, remembered for this browser: a
+  // page asked for without one shows the one you last picked, and the
+  // URL says which, so a link to it shows the same.
+  const VIEW_KEY = "sanic-review.view";
+  function remembered(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (err) {
+      return null;
+    }
+  }
+  function remember(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (err) {
+      // Private windows may refuse; it's only a convenience.
+    }
+  }
+  if (page === "pr") {
+    const params = new URLSearchParams(window.location.search);
+    const want = remembered(VIEW_KEY);
+    const link = want && !params.has("view") && document.querySelector('#views a[data-view="' + want + '"]:not(.cur)');
+    if (link) window.location.replace(link.href);
+    document.addEventListener("click", function (e) {
+      const tab = e.target.closest("#views a[data-view]");
+      if (tab) remember(VIEW_KEY, tab.dataset.view);
+    });
+  }
 
   function retally() {
     document.querySelectorAll("#review-bar [data-count]").forEach(function (b) {
