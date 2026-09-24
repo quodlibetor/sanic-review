@@ -647,9 +647,9 @@ fn sumline(pr: &PrPage, built: &Built) -> Markup {
     }
 }
 
-/// What to check before posting: an approval, a stale head, comments moved
-/// into the body, replies and thumbs-ups in existing threads, Markdown that
-/// hides things, and drafts left out.
+/// What to check before posting: a stale head, comments moved into the
+/// body, replies and thumbs-ups in existing threads, Markdown that hides
+/// things, and drafts left out.
 fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
     let review = built.review.as_ref();
     let texts = review
@@ -664,12 +664,6 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
             " It's checked first: if GitHub submitted it after all, its drafts are marked "
             "posted and nothing else is sent; if it's still pending, it's deleted, then "
             "this is posted."
-        });
-    }
-    if built.event() == Some(ReviewEvent::Approve) {
-        checks.push(html! {
-            b { "You picked Approve." }
-            " The agent never suggests approving."
         });
     }
     if let Some(review) = review

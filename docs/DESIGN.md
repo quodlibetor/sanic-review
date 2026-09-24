@@ -677,7 +677,7 @@ embedded in the binary, so nothing is fetched at runtime.
   👍s) beside every request that will be sent, in order, each with its
   exact JSON body or mutation variables, with the confirm in a footer
   that stays in view; on a narrow window they stack. Above them, "Check before posting" lists what
-  to look at: that you picked Approve, that the reviewed commit is behind
+  to look at: that the reviewed commit is behind
   the PR's head, comments moved into the body, what GitHub's Markdown would
   make easy to miss (mentions, hidden comments, images, HTML tags and
   invisible characters), replies and 👍s in existing threads, and drafts
