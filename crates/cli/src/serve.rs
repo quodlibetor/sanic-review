@@ -804,7 +804,7 @@ mod tests {
             merge_state: None,
             checks: None,
         };
-        store.record(&snapshot, "p", &[]).unwrap();
+        store.record(&snapshot, "me", "p", &[]).unwrap();
         store
     }
 

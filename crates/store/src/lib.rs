@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0011_pr_state.sql"),
     include_str!("migrations/0012_regenerate.sql"),
     include_str!("migrations/0013_draft_based_on.sql"),
+    include_str!("migrations/0014_pr_reviewer.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -154,16 +155,17 @@ impl Store {
         Ok(ids)
     }
 
-    /// Stores `snapshot` as the new baseline for its PR and logs `triggers`,
-    /// atomically.
+    /// Stores `snapshot` as the new baseline for its PR, as the user `me`
+    /// sees it, and logs `triggers`, atomically.
     pub fn record(
         &mut self,
         snapshot: &PrSnapshot,
+        me: &str,
         profile: &str,
         triggers: &[Trigger],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        write_snapshot(&tx, snapshot, profile)?;
+        write_snapshot(&tx, snapshot, me, profile)?;
         let repo = snapshot.key.repo.to_string();
         for trigger in triggers {
             tx.execute(
@@ -432,22 +434,23 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Result<()> {
+fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, me: &str, profile: &str) -> Result<()> {
     let repo = snap.key.repo.to_string();
     let number = snap.key.number;
     tx.execute(
         &format!(
             "INSERT INTO prs (repo, number, title, url, author, head_sha, base_sha, is_draft,
-                              review_requested, profile, body, open, github_updated_at,
-                              review_decision, merge_state, checks, first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?15,
+                              review_requested, reviewer, profile, body, open,
+                              github_updated_at, review_decision, merge_state, checks,
+                              first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?15, ?16,
                      {NOW}, {NOW})
              ON CONFLICT (repo, number) DO UPDATE SET
                  title = excluded.title, body = excluded.body, url = excluded.url,
                  author = excluded.author,
                  head_sha = excluded.head_sha, base_sha = excluded.base_sha,
                  is_draft = excluded.is_draft, review_requested = excluded.review_requested,
-                 profile = excluded.profile, open = 1,
+                 reviewer = excluded.reviewer, profile = excluded.profile, open = 1,
                  github_updated_at = excluded.github_updated_at,
                  review_decision = excluded.review_decision,
                  merge_state = excluded.merge_state, checks = excluded.checks,
@@ -463,6 +466,7 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, profile: &str) -> Res
             snap.base_sha,
             snap.is_draft,
             snap.review_requested,
+            snap.is_reviewer(me),
             profile,
             snap.body,
             snap.updated_at,
@@ -610,7 +614,7 @@ mod tests {
     fn recorded_snapshot_becomes_the_baseline() {
         let mut store = Store::open_in_memory().unwrap();
         let snap = snapshot();
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         let known = store.known(&snap.key).unwrap().unwrap();
         assert_eq!(known.head_sha, "h1");
         assert!(known.review_requested);
@@ -622,11 +626,11 @@ mod tests {
     fn recording_again_updates_in_place() {
         let mut store = Store::open_in_memory().unwrap();
         let mut snap = snapshot();
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         snap.head_sha = "h2".into();
         snap.review_requested = false;
         snap.threads[0].comments[0].body = "edited".into();
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
 
         let known = store.known(&snap.key).unwrap().unwrap();
         assert_eq!(known.head_sha, "h2");
@@ -641,7 +645,7 @@ mod tests {
         let trigger = Trigger::ReviewRequested {
             head_sha: "h1".into(),
         };
-        store.record(&snap, "default", &[trigger]).unwrap();
+        store.record(&snap, "me", "default", &[trigger]).unwrap();
         let events = store.events().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key, snap.key);
@@ -655,8 +659,8 @@ mod tests {
         let snap = snapshot();
         let mut other = snapshot();
         other.key.number = 8;
-        store.record(&snap, "default", &[]).unwrap();
-        store.record(&other, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
+        store.record(&other, "me", "default", &[]).unwrap();
         let open = |store: &Store| -> Vec<u32> {
             store
                 .conn
@@ -674,7 +678,7 @@ mod tests {
         store.mark_closed(&other.key).unwrap();
         assert_eq!(open(&store), Vec::<u32>::new());
         // Seen open again.
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         assert_eq!(open(&store), [7]);
     }
 
@@ -683,9 +687,9 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let mut snap = snapshot();
         assert_eq!(store.pr_summary(&snap.key).unwrap(), None);
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         snap.title = "build(deps): bump".into();
-        store.record(&snap, "other", &[]).unwrap();
+        store.record(&snap, "me", "other", &[]).unwrap();
         assert_eq!(
             store.pr_summary(&snap.key).unwrap(),
             Some(PrSummary {
@@ -707,7 +711,7 @@ mod tests {
         let mut other = snapshot();
         other.key.number = 8;
         assert!(!store.set_archived(&snap.key, true).unwrap());
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         let run = store
             .queue_review(&store.review_request(&snap.key).unwrap().unwrap())
             .unwrap()
@@ -715,7 +719,7 @@ mod tests {
 
         assert!(store.set_archived(&snap.key, true).unwrap());
         assert_eq!(store.run(run.id).unwrap().unwrap().status, "superseded");
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         assert!(store.pr_summary(&snap.key).unwrap().unwrap().archived);
         assert!(store.set_archived(&snap.key, false).unwrap());
         assert!(!store.pr_summary(&snap.key).unwrap().unwrap().archived);
@@ -763,7 +767,7 @@ mod tests {
             review("r6", "fred", ReviewState::Dismissed, "h1", false),
             review("r7", "renovate[bot]", ReviewState::Approved, "h1", true),
         ];
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
         assert_eq!(
             store.head_reviewers(&snap.key, "h1").unwrap(),
             ["carol", "Bob"]

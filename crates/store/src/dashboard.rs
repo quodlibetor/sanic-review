@@ -347,7 +347,7 @@ mod tests {
     /// A store with one tracked PR and one finished review of it.
     fn reviewed() -> (Store, i64) {
         let mut store = Store::open_in_memory().unwrap();
-        store.record(&snapshot(), "default", &[]).unwrap();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
         let run = store
             .queue_review(&ReviewRequest {
                 key: key(),

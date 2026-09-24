@@ -93,7 +93,7 @@ pub fn detect(me: &str, known: Option<&Known>, snapshot: &PrSnapshot) -> Vec<Tri
         return triggers;
     };
 
-    let reviewing = snapshot.review_requested || snapshot.reviews.iter().any(|r| is_me(&r.author));
+    let reviewing = snapshot.is_reviewer(me);
     if !newly_requested && reviewing && known.is_draft && !snapshot.is_draft {
         triggers.push(Trigger::ReadyForReview {
             head_sha: snapshot.head_sha.clone(),
@@ -310,14 +310,15 @@ mod tests {
         after.head_sha = "h2".into();
         assert_eq!(detect(ME, Some(&known_from(&before)), &after), []);
 
+        let pushed = [Trigger::Push {
+            from_sha: "h1".into(),
+            to_sha: "h2".into(),
+        }];
         after.reviews = vec![review("r1", "me", ReviewState::Commented, "")];
-        assert_eq!(
-            detect(ME, Some(&known_from(&before)), &after),
-            [Trigger::Push {
-                from_sha: "h1".into(),
-                to_sha: "h2".into()
-            }]
-        );
+        assert_eq!(detect(ME, Some(&known_from(&before)), &after), pushed);
+        // A push that dismisses your review still asks for another.
+        after.reviews[0].state = ReviewState::Dismissed;
+        assert_eq!(detect(ME, Some(&known_from(&before)), &after), pushed);
     }
 
     #[test]

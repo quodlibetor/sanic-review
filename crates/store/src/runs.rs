@@ -1034,7 +1034,7 @@ mod tests {
 
     fn store() -> Store {
         let mut store = Store::open_in_memory().unwrap();
-        store.record(&snapshot(), "default", &[]).unwrap();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
         store
     }
 
@@ -1090,7 +1090,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("state.db");
         let mut store = Store::open(&path).unwrap();
-        store.record(&snapshot(), "default", &[]).unwrap();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
         let other = rusqlite::Connection::open(&path).unwrap();
         other
             .execute_batch("BEGIN IMMEDIATE; INSERT INTO poll_state VALUES ('k', 'v');")
@@ -1290,7 +1290,7 @@ mod tests {
         // The PR moved on: regenerate reviews the old head, so it's refused.
         let mut moved = snapshot();
         moved.head_sha = "h2".into();
-        store.record(&moved, "default", &[]).unwrap();
+        store.record(&moved, "me", "default", &[]).unwrap();
         let refused = store.queue_regeneration(source.id, "x", |_| false).unwrap();
         assert_eq!(
             refused,

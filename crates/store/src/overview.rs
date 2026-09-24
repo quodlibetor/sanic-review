@@ -85,7 +85,8 @@ pub enum ActivityKind {
 }
 
 impl Store {
-    /// Open PRs by others that request your review, by repo and number.
+    /// Open PRs by others that you review, by repo and number: see
+    /// `PrSnapshot::is_reviewer`.
     /// With `since`, only those GitHub saw activity on from then on, or
     /// that have no GitHub timestamp stored.
     pub fn owed_reviews(&self, me: &str, since: Option<&str>) -> Result<Vec<OwedReview>> {
@@ -104,7 +105,7 @@ impl Store {
                  WHERE r.repo = p.repo AND r.number = p.number
                  ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
              -- lower() on both sides is `is_login`'s rule.
-             WHERE p.open AND p.review_requested AND lower(p.author) != lower(?1)
+             WHERE p.open AND p.reviewer AND lower(p.author) != lower(?1)
                    AND (?2 IS NULL OR p.github_updated_at IS NULL OR p.github_updated_at >= ?2)
              ORDER BY p.repo, p.number",
         )?;
@@ -320,12 +321,14 @@ mod tests {
         requested.review_requested = true;
         let mut mine = snapshot(3, "Me");
         mine.review_requested = true;
-        store.record(&requested, "default", &[]).unwrap();
-        store.record(&mine, "default", &[]).unwrap();
-        store.record(&snapshot(1, "bob"), "default", &[]).unwrap();
+        store.record(&requested, "me", "default", &[]).unwrap();
+        store.record(&mine, "me", "default", &[]).unwrap();
+        store
+            .record(&snapshot(1, "bob"), "me", "default", &[])
+            .unwrap();
         let mut merged = snapshot(4, "alice");
         merged.review_requested = true;
-        store.record(&merged, "default", &[]).unwrap();
+        store.record(&merged, "me", "default", &[]).unwrap();
         store.mark_closed(&merged.key).unwrap();
 
         let owed = store.owed_reviews("me", None).unwrap();
@@ -426,11 +429,13 @@ mod tests {
             review("r8", "bob", GithubState::Dismissed, "2026-01-02T00:00:00Z"),
         ];
         for snap in [&waiting, &approved, &blocked, &dismissed] {
-            store.record(snap, "default", &[]).unwrap();
+            store.record(snap, "me", "default", &[]).unwrap();
         }
-        store.record(&snapshot(5, "alice"), "default", &[]).unwrap();
+        store
+            .record(&snapshot(5, "alice"), "me", "default", &[])
+            .unwrap();
         let merged = snapshot(6, "me");
-        store.record(&merged, "default", &[]).unwrap();
+        store.record(&merged, "me", "default", &[]).unwrap();
         store.mark_closed(&merged.key).unwrap();
 
         let states: Vec<_> = store
@@ -466,7 +471,7 @@ mod tests {
         let mut mine = snapshot(4, "me");
         mine.updated_at = Some("2026-01-01T00:00:00Z".into());
         for snap in [&old, &recent, &unknown, &mine] {
-            store.record(snap, "default", &[]).unwrap();
+            store.record(snap, "me", "default", &[]).unwrap();
         }
         let since = Some("2026-09-09T00:00:00Z");
         let owed: Vec<u32> = store
@@ -510,8 +515,8 @@ mod tests {
         owed.review_requested = true;
         // Bob's question in a thread you haven't joined doesn't count here.
         owed.threads = mine.threads.clone();
-        store.record(&mine, "default", &[]).unwrap();
-        store.record(&owed, "default", &[]).unwrap();
+        store.record(&mine, "me", "default", &[]).unwrap();
+        store.record(&owed, "me", "default", &[]).unwrap();
 
         assert_eq!(
             store.my_prs("me", None).unwrap()[0].state,
@@ -536,11 +541,56 @@ mod tests {
             GithubState::ChangesRequested,
             "2026-01-03T00:00:00Z",
         )];
-        store.record(&asked, "default", &[]).unwrap();
+        store.record(&asked, "me", "default", &[]).unwrap();
         let owed = store.owed_reviews("me", None).unwrap();
         let state = owed.iter().find(|pr| pr.key.number == 3).unwrap().state;
         assert_eq!(state.status(), "changes requested");
         assert_eq!(state.urgency(), Urgency::Quiet);
+    }
+
+    #[test]
+    fn prs_you_have_reviewed_stay_owed_after_the_request_clears() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snap = snapshot(2, "alice");
+        snap.review_requested = true;
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let listed = |store: &Store| -> Vec<u32> {
+            let owed = store.owed_reviews("me", None).unwrap();
+            owed.iter().map(|pr| pr.key.number).collect()
+        };
+        assert_eq!(listed(&store), [2]);
+
+        // Submitting your review clears GitHub's request.
+        snap.review_requested = false;
+        let mut mine = review("r1", "Me", GithubState::Commented, "2026-01-02T00:00:00Z");
+        mine.commit = Some("h1".into());
+        snap.reviews = vec![mine];
+        store.record(&snap, "me", "default", &[]).unwrap();
+        assert_eq!(listed(&store), [2]);
+        let owed = &store.owed_reviews("me", None).unwrap()[0];
+        assert_eq!(owed.head_reviewers, ["Me"]);
+
+        // A push, which may dismiss your review, gets its own run and
+        // drafts on the same row.
+        let trigger = Trigger::Push {
+            from_sha: "h1".into(),
+            to_sha: "h2".into(),
+        };
+        snap.head_sha = "h2".into();
+        snap.reviews[0].state = GithubState::Dismissed;
+        store.record(&snap, "me", "default", &[trigger]).unwrap();
+        let mut pushed = request(&snap);
+        pushed.trigger = ReviewTrigger::Push {
+            from_sha: "h1".into(),
+        };
+        let run = store.queue_review(&pushed).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.finish_review(run.id, &result()).unwrap();
+        let owed = store.owed_reviews("me", None).unwrap();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].head_reviewers, Vec::<String>::new());
+        assert_eq!(owed[0].latest_run.as_ref().unwrap().status, "succeeded");
+        assert_eq!(owed[0].pending_drafts, 1);
     }
 
     #[test]
@@ -551,7 +601,7 @@ mod tests {
         let trigger = Trigger::ReviewRequested {
             head_sha: "h1".into(),
         };
-        store.record(&snap, "default", &[trigger]).unwrap();
+        store.record(&snap, "me", "default", &[trigger]).unwrap();
         let run = store.queue_review(&request(&snap)).unwrap().unwrap();
         store.claim_run(run.id).unwrap();
         store.fail_run(run.id, "boom").unwrap();

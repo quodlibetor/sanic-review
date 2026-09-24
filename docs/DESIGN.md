@@ -610,9 +610,13 @@ embedded in the binary, so nothing is fetched at runtime.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
   TUI. Its only actions are rerunning a review, archiving a PR, adding
   a `skip_titles` pattern to the config and opening the dashboard.
-  - **Reviews you owe:** open PRs by others that request your review, with
-    their PR state (below), then the latest run's status (queued, held by `--manual-reviews`, running, drafted,
-    failed, crashed) and the pending draft count. A review still waiting
+  - **Reviews you owe:** open PRs by others that you review: your review
+    is requested, or you've left one in any state. Submitting a review
+    clears GitHub's request and a push can dismiss the review, so a PR stays
+    here through both. The push and ready-for-review triggers use the same
+    rule (`PrSnapshot::is_reviewer`). Each row has its PR state (below),
+    then the latest run's status (queued, held by `--manual-reviews`,
+    running, drafted, failed, crashed) and the pending draft count. A review still waiting
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
     `waiting` without a countdown means no run and no known due time.

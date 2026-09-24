@@ -234,7 +234,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
 async fn fixture(manual_reviews: bool) -> Fixture {
     let mut store = Store::open_in_memory().unwrap();
     for snap in fixture_prs() {
-        store.record(&snap, "default", &[]).unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
     }
     let request = |number| ReviewRequest {
         key: key(number),
@@ -1305,7 +1305,7 @@ async fn reviewing_an_already_reviewed_head_again_says_by_whom() {
     f.dashboard
         .app
         .store()
-        .record(&snap, "default", &[])
+        .record(&snap, "me", "default", &[])
         .unwrap();
 
     let index = f.get("/").await.body;
@@ -1397,7 +1397,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     f.dashboard
         .app
         .store()
-        .record(&unrequested, "default", &[])
+        .record(&unrequested, "me", "default", &[])
         .unwrap();
     let page = f.get("/pr/org/repo/8").await.body;
     assert!(
@@ -1411,7 +1411,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     f.dashboard
         .app
         .store()
-        .record(&snapshot(11, "me", "Quiet change"), "default", &[])
+        .record(&snapshot(11, "me", "Quiet change"), "me", "default", &[])
         .unwrap();
     let page = f.get("/pr/org/repo/11").await.body;
     assert!(!page.contains(r#"class="state"#), "{page}");
@@ -1443,7 +1443,7 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
         // PR 12 waits out the quiet period; PR 13's review is held.
         for (number, title) in [(12, "Waiting one"), (13, "Held one")] {
             store
-                .record(&snapshot(number, "dave", title), "default", &[])
+                .record(&snapshot(number, "dave", title), "me", "default", &[])
                 .unwrap();
         }
         store
@@ -1506,7 +1506,7 @@ async fn the_preview_says_what_the_review_leaves_out_and_where_it_lands() {
     f.dashboard
         .app
         .store()
-        .record(&moved, "default", &[])
+        .record(&moved, "me", "default", &[])
         .unwrap();
     let page = f.get(&f.preview_uri("COMMENT")).await.body;
     assert!(
