@@ -384,7 +384,9 @@ Rules:
    those two optional fields. Its output becomes the new run's drafts,
    checked against the diff as usual. A draft that names a draft of the
    revised run and matches it word for word, kind and anchor too, keeps that
-   draft's status and your edit: accepted stays accepted. Only the first
+   draft's status and your edit as they stand when the run finishes:
+   accepted stays accepted. Word for word means as it stands or as the agent
+   was shown it, so an edit you make while it runs isn't lost. Only the first
    to do so keeps them; a repeat is pending. One that changed
    is pending and records `based_on`, so the dashboard can say "revised
    from #N"; one that names nothing (or a draft it wasn't shown) is new and
