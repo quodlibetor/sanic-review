@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 
 use crate::{ApiError, Client, client::Failed};
 
-/// How long a write may take before it's given up on, so a hung connection
-/// doesn't hold the dashboard's submit lock for good.
+/// How long a write, or a read a submit makes after one, may take before
+/// it's given up on, so a hung connection doesn't hold the dashboard's
+/// submit lock for good.
 pub(crate) const POST_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// A review to create, serialized as GitHub's create-review request body.
@@ -165,6 +166,15 @@ mutation($subject: ID!) {
   addReaction(input: { subjectId: $subject, content: THUMBS_UP }) { reaction { content } }
 }";
 
+/// A posted review's inline comments, to link each to the draft it was
+/// posted from. Replies in existing threads are in it too, with `replyTo`.
+pub(crate) const REVIEW_COMMENTS_QUERY: &str = r"
+query($review: ID!) {
+  node(id: $review) {
+    ... on PullRequestReview { comments(first: 100) { nodes { id path body replyTo { id } } } }
+  }
+}";
+
 /// A [`NewReview`] without its verdict, which leaves it pending.
 #[derive(Serialize)]
 struct PendingBody<'a> {
@@ -192,6 +202,16 @@ pub enum PostError {
     /// No answer, a server error, or an answer that couldn't be read:
     /// GitHub may have posted it.
     Unknown(ApiError),
+}
+
+/// An inline comment a posted review started a thread with, as
+/// [`Client::review_comments`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedComment {
+    /// Its node id, which its thread's first comment has.
+    pub id: String,
+    pub path: String,
+    pub body: String,
 }
 
 /// Where a review is, as [`Client::review_state`] finds it.
@@ -520,6 +540,60 @@ impl Client {
                 Some(_) => ReviewStatus::Submitted,
             },
         )
+    }
+
+    /// The comments posted review `node_id` started threads with: not its
+    /// replies in existing threads. Given up on after [`POST_TIMEOUT`],
+    /// since a submit waits on it.
+    pub async fn review_comments(
+        &self,
+        key: &PrKey,
+        node_id: &str,
+    ) -> Result<Vec<PostedComment>, ApiError> {
+        #[derive(Deserialize)]
+        struct Data {
+            node: Option<Node>,
+        }
+        #[derive(Deserialize)]
+        struct Node {
+            comments: Option<Comments>,
+        }
+        #[derive(Deserialize)]
+        struct Comments {
+            nodes: Vec<Option<CommentNode>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CommentNode {
+            id: String,
+            path: String,
+            body: String,
+            reply_to: Option<Value>,
+        }
+        let what = format!("listing your review's comments on {}", key.url());
+        let data: Data = self
+            .graphql_within(
+                REVIEW_COMMENTS_QUERY,
+                json!({ "review": node_id }),
+                &what,
+                POST_TIMEOUT,
+            )
+            .await?;
+        let nodes = data
+            .node
+            .and_then(|n| n.comments)
+            .map(|c| c.nodes)
+            .unwrap_or_default();
+        Ok(nodes
+            .into_iter()
+            .flatten()
+            .filter(|c| c.reply_to.is_none())
+            .map(|c| PostedComment {
+                id: c.id,
+                path: c.path,
+                body: c.body,
+            })
+            .collect())
     }
 
     /// Whether `reaction`'s comment already has your thumbs-up.

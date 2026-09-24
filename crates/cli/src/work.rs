@@ -31,6 +31,8 @@ use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 
 pub struct Worker {
     runner: ReviewRunner,
+    /// The GitHub login reviews are drafted for.
+    me: String,
     store: Arc<Mutex<Store>>,
     settings: RwLock<Settings>,
     limit: Arc<Semaphore>,
@@ -83,9 +85,10 @@ impl Settings {
 }
 
 impl Worker {
-    pub fn new(data_dir: &Path, store: Arc<Mutex<Store>>, config: &Config) -> Self {
+    pub fn new(data_dir: &Path, store: Arc<Mutex<Store>>, config: &Config, me: &str) -> Self {
         Self {
             runner: ReviewRunner::new(data_dir),
+            me: me.to_owned(),
             store,
             settings: RwLock::new(Settings::new(config)),
             limit: Arc::new(Semaphore::new(config.runner.max_concurrent)),
@@ -351,7 +354,7 @@ impl Worker {
         let settings = self.run_settings(&req.profile)?;
         let ctx = self
             .store()
-            .pr_context(&req.key)?
+            .pr_context(&req.key, &self.me)?
             .ok_or_else(|| eyre!("{} is not in the database", req.key.url()))?;
         if let Some(revision) = &run.revision {
             if let Some(draft) = revision.draft {
@@ -571,7 +574,7 @@ mod tests {
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
         assert!(store.claim_run(run.id).unwrap());
         let store = Arc::new(Mutex::new(store));
-        let worker = Worker::new(data.path(), Arc::clone(&store), &config(1, "p"));
+        let worker = Worker::new(data.path(), Arc::clone(&store), &config(1, "p"), "me");
 
         worker.crashed(run.clone(), "boom".into()).await;
         let record = store.lock().unwrap().run(run.id).unwrap().unwrap();
@@ -582,7 +585,7 @@ mod tests {
     #[tokio::test]
     async fn reloads_apply_to_later_runs() {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
-        let worker = Worker::new(Path::new("/data"), store, &config(2, "old"));
+        let worker = Worker::new(Path::new("/data"), store, &config(2, "old"), "me");
         assert!(worker.run_settings("old").is_ok());
 
         worker.configure(&config(3, "new"));
@@ -722,6 +725,7 @@ mod tests {
             &dir.path().join("data"),
             Arc::clone(&store),
             &config,
+            "me",
         ));
         let (runs, runs_rx) = mpsc::unbounded_channel();
         runs.send((*run).clone()).unwrap();
@@ -853,7 +857,7 @@ mod tests {
         };
 
         let data = dir.path().join("data");
-        let worker = Arc::new(Worker::new(&data, Arc::clone(&store), &config));
+        let worker = Arc::new(Worker::new(&data, Arc::clone(&store), &config, "me"));
         let (runs, runs_rx) = mpsc::unbounded_channel();
         let working = tokio::spawn(Arc::clone(&worker).work(runs_rx));
         let old = queue(&first);

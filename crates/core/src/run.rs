@@ -85,6 +85,9 @@ pub struct PrContext {
     pub threads: Vec<Thread>,
     /// Your own review pending on GitHub, as last polled.
     pub in_progress: Option<InProgressReview>,
+    /// The login the review is drafted for, whose comments in `threads`
+    /// the brief labels as the reviewer's own.
+    pub viewer: String,
 }
 
 /// A run the store has accepted and the runner should pick up.

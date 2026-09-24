@@ -74,9 +74,12 @@ query($owner: String!, $name: String!, $number: Int!) {
 # double the query's rate-limit cost, so only the conversation gets them.
 # The few thread comments whose reactions matter get theirs afterwards,
 # with `REACTIONS_QUERY`.
+# Neither kind of comment is `UniformResourceLocatable`, so each is asked
+# for its `url` by name.
 fragment comment on Comment {
   id author { __typename login } body createdAt
-  ... on UniformResourceLocatable { url }
+  ... on IssueComment { url }
+  ... on PullRequestReviewComment { url }
   ... on Reactable { reactionGroups { viewerHasReacted } }
 }";
 
@@ -98,6 +101,7 @@ pub(crate) const QUERIES: &[(&str, &str)] = &[
     ("MY_REVIEWS_QUERY", review::MY_REVIEWS_QUERY),
     ("REACTION_MUTATION", review::REACTION_MUTATION),
     ("THUMBS_UP_QUERY", review::THUMBS_UP_QUERY),
+    ("REVIEW_COMMENTS_QUERY", review::REVIEW_COMMENTS_QUERY),
 ];
 
 const SEARCH_QUERY: &str = r"
@@ -205,13 +209,22 @@ impl Client {
         variables: V,
         what: &str,
     ) -> Result<T, ApiError> {
+        self.graphql_within(mutation, variables, what, review::POST_TIMEOUT)
+            .await
+    }
+
+    /// [`Client::graphql`], giving up after `timeout`.
+    pub(crate) async fn graphql_within<V: Serialize, T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: V,
+        what: &str,
+        timeout: std::time::Duration,
+    ) -> Result<T, ApiError> {
         let req = self
             .post(&self.url("/graphql"))
-            .json(&Request {
-                query: mutation,
-                variables,
-            })
-            .timeout(review::POST_TIMEOUT);
+            .json(&Request { query, variables })
+            .timeout(timeout);
         let resp: Response<T> = self.graphql_sent(req, what).await?;
         if !resp.errors.is_empty() {
             return Err(eyre!("GraphQL errors for {what}: {}", messages(&resp.errors)).into());

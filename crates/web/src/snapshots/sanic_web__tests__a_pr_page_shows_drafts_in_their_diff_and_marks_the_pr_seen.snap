@@ -92,6 +92,7 @@ expression: "readable(&f, &page.body)"
 <div class="th">
 <span class="anc">src/lib.rs:2</span>
 <span class="dim" title="Lines of another commit than the one reviewed, so they aren't compared with the drafts'.">on another commit</span>
+<span class="chip dim" title="You started it on GitHub.">yours</span>
 <span class="dim">2 comments</span>
 </div>
 <ul class="said">

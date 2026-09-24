@@ -3903,3 +3903,254 @@ async fn an_expander_keeps_its_hunk_header_when_the_mirror_loses_the_file() {
     assert!(body.contains("no longer has this file"), "{body}");
     assert!(expanders(body).is_empty(), "{body}");
 }
+
+/// The PR page's summary of its review threads.
+fn threads_summary(body: &str) -> &str {
+    &body[body.find(r#"id="existing""#).unwrap()..body.find(r#"id="drafts""#).unwrap()]
+}
+
+/// PR 7 polled again with `threads`, beside the fixture's `t1`, which
+/// is on no draft's lines.
+fn record_pr7_threads(f: &Fixture, threads: Vec<Thread>) {
+    let snap = PrSnapshot {
+        threads,
+        ..snapshot(7, "alice", "Add the thing")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_posted_comments_thread_is_its_draft_and_not_an_existing_thread() {
+    let f = fixture(false).await;
+    accept(&f, 0).await;
+    accept(&f, 1).await;
+    let payload = f.previewed_payload("COMMENT").await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(created("PRR_5"))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation(
+        "PullRequestReview { comments",
+        &json!({ "review": "PRR_5" }),
+    )
+    .respond_with(data(&json!({ "node": { "comments": { "nodes": [
+            { "id": "PRRC_9", "path": "src/lib.rs", "body": "Why `m`?", "replyTo": null },
+        ] } } })))
+    .expect(1)
+    .mount(&f.github)
+    .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    let recorded = f.dashboard.app.store().posted_drafts(&key(7)).unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        (recorded[0].id, recorded[0].comment.as_deref()),
+        (f.drafts[1], Some("PRRC_9"))
+    );
+
+    // The next fetch has its thread, answered, and someone's on its lines.
+    let mut mine = review_thread("t-mine", "src/lib.rs", Some(3), "me", "Why `m`?");
+    mine.comments[0].id = "PRRC_9".into();
+    let reply = review_thread("t-x", "src/lib.rs", Some(3), "alice", "It's used below.");
+    mine.comments.extend(reply.comments);
+    let bob = review_thread("t-bob", "src/lib.rs", Some(3), "bob", "Is `m` used?");
+    record_pr7_threads(&f, vec![mine, bob]);
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>2</b> existing review threads · <b>0</b> overlap your drafts · <b>1</b> posted from here"
+        ),
+        "{summary}"
+    );
+    assert!(!summary.contains("#discussion_t-mine"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("Posted from here ↗"), "{card}");
+    assert!(card.contains("#discussion_t-mine"), "{card}");
+    // Answered, so the thread's under it.
+    assert!(card.contains("used below."), "{card}");
+    assert!(!card.contains("overlaps an existing thread"), "{card}");
+    assert!(!card.contains("👍 instead"), "{card}");
+    assert!(!card.contains("#discussion_t-bob"), "{card}");
+}
+
+#[tokio::test]
+async fn a_thread_posted_before_its_comment_was_recorded_is_matched_by_its_text() {
+    let f = fixture(false).await;
+    f.dashboard.app.store().mark_posted(&[f.drafts[1]]).unwrap();
+    let mine = review_thread("t-mine", "src/lib.rs", Some(3), "me", "Why `m`?");
+    // Word for word too, but not yours.
+    let bobs = review_thread("t-bob", "src/lib.rs", Some(3), "bob", "Why `m`?");
+    record_pr7_threads(&f, vec![bobs, mine]);
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>2</b> existing review threads · <b>0</b> overlap your drafts · <b>1</b> posted from here"
+        ),
+        "{summary}"
+    );
+    assert!(summary.contains("#discussion_t-bob"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("Posted from here ↗"), "{card}");
+    assert!(card.contains("#discussion_t-mine"), "{card}");
+}
+
+#[tokio::test]
+async fn your_own_thread_written_on_github_is_yours_and_still_overlaps() {
+    let f = fixture(false).await;
+    // Word for word the draft, which isn't posted.
+    let mine = review_thread("t-mine", "src/lib.rs", Some(3), "me", "Why `m`?");
+    record_pr7_threads(&f, vec![mine]);
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>2</b> existing review threads · <b class=\"hot\">1</b> overlaps your drafts"
+        ),
+        "{summary}"
+    );
+    assert!(!summary.contains("posted from here"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("overlaps an existing thread"), "{card}");
+    assert!(card.contains(">yours</span>"), "{card}");
+    assert!(card.contains("👍 instead"), "{card}");
+    assert!(!card.contains("Posted from here"), "{card}");
+}
+
+#[tokio::test]
+async fn a_rejected_draft_overlaps_nothing() {
+    let f = fixture(false).await;
+    let bob = review_thread("t-bob", "src/lib.rs", Some(3), "bob", "Is `m` used?");
+    record_pr7_threads(&f, vec![bob]);
+    f.post(
+        &format!("/drafts/{}/status", f.drafts[1]),
+        &[("status", "rejected")],
+    )
+    .await;
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains("<b>2</b> existing review threads · <b>0</b> overlap your drafts"),
+        "{summary}"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_you_posted_is_its_drafts_and_an_existing_thread_to_the_rest() {
+    let f = fixture(false).await;
+    let (regeneration, ids) = regenerate(&f);
+    {
+        let mut store = f.dashboard.app.store();
+        // Posted from the first run, and its copy in the regeneration
+        // marked posted with it.
+        store.mark_posted(&[f.drafts[1], ids[1]]).unwrap();
+        store
+            .record_posted_comments(&[(f.drafts[1], "PRRC_9".into())])
+            .unwrap();
+    }
+    let mut mine = review_thread("t-mine", "src/lib.rs", Some(3), "me", "Why `m`?");
+    mine.comments[0].id = "PRRC_9".into();
+    record_pr7_threads(&f, vec![mine]);
+
+    // The regeneration's other draft on those lines overlaps it.
+    let page = f.get(&format!("/pr/org/repo/7?run={regeneration}")).await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>2</b> existing review threads · <b class=\"hot\">1</b> overlaps your drafts"
+        ),
+        "{summary}"
+    );
+    let other = card_of_draft(&page.body, ids[2]);
+    assert!(other.contains("overlaps an existing thread"), "{other}");
+    assert!(
+        other.contains(&format!("you posted this from run {}", f.run)),
+        "{other}"
+    );
+    assert!(other.contains("👍 instead"), "{other}");
+    let copy = card_of_draft(&page.body, ids[1]);
+    assert!(copy.contains("Posted from here ↗"), "{copy}");
+
+    // On its own run, it's only the draft's.
+    let page = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>1</b> existing review thread · <b>0</b> overlap your drafts · <b>1</b> posted from here"
+        ),
+        "{summary}"
+    );
+    assert!(!summary.contains("#discussion_t-mine"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("Posted from here ↗"), "{card}");
+    // Nor does its diff show it as an existing thread.
+    let page = f
+        .get(&format!("/pr/org/repo/7?run={}&view=files", f.run))
+        .await;
+    let view = files_view(&page.body);
+    assert!(!view.contains("you posted this from run"), "{view}");
+}
+
+#[tokio::test]
+async fn a_draft_that_chose_a_thread_but_went_inline_is_not_in_it() {
+    let f = fixture(false).await;
+    let bob = review_thread("t-bob", "src/lib.rs", Some(3), "bob", "Is `m` used?");
+    let mut mine = review_thread("t-mine", "src/lib.rs", Some(3), "me", "Why `m`?");
+    mine.comments[0].id = "PRRC_9".into();
+    record_pr7_threads(&f, vec![bob, mine]);
+    // GitHub took it inline but marking it failed, and it chose bob's
+    // thread before the next submit found the review and marked it.
+    f.dashboard
+        .app
+        .store()
+        .record_posted_comments(&[(f.drafts[1], "PRRC_9".into())])
+        .unwrap();
+    choose(&f, 1, "reply", "t-bob", "").await;
+    f.dashboard.app.store().mark_posted(&[f.drafts[1]]).unwrap();
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>2</b> existing review threads · <b>0</b> overlap your drafts · <b>1</b> posted from here"
+        ),
+        "{summary}"
+    );
+    assert!(summary.contains("#discussion_t-bob"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("Posted from here ↗"), "{card}");
+    assert!(!card.contains("Posted in this thread:"), "{card}");
+    assert!(!card.contains("#discussion_t-bob"), "{card}");
+}
+
+#[tokio::test]
+async fn a_thread_a_posted_reply_went_in_is_with_its_draft() {
+    let f = fixture(false).await;
+    let bob = review_thread("t-bob", "src/lib.rs", Some(3), "bob", "Is `m` used?");
+    record_pr7_threads(&f, vec![bob]);
+    choose(&f, 1, "reply", "t-bob", "").await;
+    f.dashboard.app.store().mark_posted(&[f.drafts[1]]).unwrap();
+    let page = f.get("/pr/org/repo/7").await;
+    let summary = threads_summary(&page.body);
+    assert!(
+        summary.contains(
+            "<b>1</b> existing review thread · <b>0</b> overlap your drafts · <b>1</b> posted from here"
+        ),
+        "{summary}"
+    );
+    assert!(!summary.contains("#discussion_t-bob"), "{summary}");
+    let card = card_of_draft(&page.body, f.drafts[1]);
+    assert!(card.contains("Posted in this thread:"), "{card}");
+    assert!(card.contains("#discussion_t-bob"), "{card}");
+}

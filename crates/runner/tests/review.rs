@@ -130,6 +130,7 @@ fn context() -> PrContext {
         author: "alice".into(),
         threads: vec![],
         in_progress: None,
+        viewer: "me".into(),
     }
 }
 

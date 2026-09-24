@@ -101,7 +101,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         (runs.clone(), None)
     };
     resume_queued(&run_store, args.manual_reviews, &runs)?;
-    let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config));
+    let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config, &me));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
     let (refreshes, mut refreshes_rx) = mpsc::unbounded_channel();
@@ -1038,7 +1038,7 @@ mod tests {
             std::fs::write(&config_path, "").unwrap();
             let mut watcher = ConfigWatcher::new(&config_path).unwrap();
             let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
-            let worker = Worker::new(dir.path(), store, poller.config());
+            let worker = Worker::new(dir.path(), store, poller.config(), "me");
             let live = Live::new(poller.config(), None);
             let (updates, _updates) = mpsc::unbounded_channel();
             let (refreshes, mut asked) = mpsc::unbounded_channel();
@@ -1121,7 +1121,7 @@ mod tests {
             started: mpsc::unbounded_channel().0,
             data_dir: dir.path().to_owned(),
             config_path: config_path.clone(),
-            worker: Arc::new(Worker::new(dir.path(), Arc::clone(&store), &config)),
+            worker: Arc::new(Worker::new(dir.path(), Arc::clone(&store), &config, "me")),
             live: Arc::new(Live::new(&config, None)),
         };
         assert!(control.add_skip_title("build(deps)*", None).unwrap());

@@ -16,6 +16,7 @@ pub use client::{ApiError, Client};
 pub use notifications::{Notification, NotificationPoll};
 pub use review::{
     CreatedReview, NewComment, NewReaction, NewReply, NewReview, PENDING_REVIEW, PostError,
-    ReviewEvent, ReviewStatus, SentReview, Step, find_review_step, review_state_step,
+    PostedComment, ReviewEvent, ReviewStatus, SentReview, Step, find_review_step,
+    review_state_step,
 };
 pub use token::Token;

@@ -204,6 +204,7 @@ expression: "readable(&f, view)"
 <div class="thread">
 <div class="th">
 <a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R2" title="On GitHub, at the reviewed commit">src/lib.rs:2</a>
+<span class="chip dim" title="You started it on GitHub.">yours</span>
 <span class="dim">2 comments</span>
 <a class="gh" href="https://github.com/org/repo/pull/7#discussion_t1">on GitHub ↗</a>
 </div>
