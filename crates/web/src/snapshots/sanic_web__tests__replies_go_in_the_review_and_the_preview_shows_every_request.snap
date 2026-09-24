@@ -1,0 +1,89 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, cols)"
+---
+<div class="cols">
+<div>
+<div class="check">
+<h2>Check before posting</h2>
+<ul>
+<li>
+<b>1</b> draft(s) go as replies in existing threads, in the review. If a reply fails, the pending review is deleted, so nothing is posted.</li>
+<li>
+<b>1</b> 👍 go on existing comments, in place of those drafts' text, after the review.</li>
+</ul>
+</div>
+<h2 class="sec">Review body</h2>
+<div class="rv">
+<pre class="body">Mostly fine.</pre>
+</div>
+<h2 class="sec">Inline comments <span class="dim">0</span>
+</h2>
+<h2 class="sec">Replies in existing threads <span class="dim">1</span>
+</h2>
+<div class="rv">
+<div class="thread">
+<div class="th">
+<span class="anc">src/lib.rs:3-4</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</li>
+</ul>
+</div>
+<div class="dim">draft 2, in reply:</div>
+<pre>Why `m`?</pre>
+</div>
+<h2 class="sec">👍 on existing comments <span class="dim">1</span>
+</h2>
+<div class="rv">
+<div class="th">
+<span class="anc">src/lib.rs:3</span>
+<span class="chip dim">outdated</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>
+</div>
+<div>👍 on <b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</div>
+<div class="dim">in place of draft 3</div>
+</div>
+</div>
+<div class="wirecol">
+<h2>Exactly what's sent, 1 of 5 · <code>POST /repos/org/repo/pulls/7/reviews</code>
+</h2>
+<pre class="wire">{
+  &quot;commit_id&quot;: &quot;head7&quot;,
+  &quot;body&quot;: &quot;Mostly fine.&quot;,
+  &quot;comments&quot;: []
+}</pre>
+<h2>Exactly what's sent, 2 of 5 · <code>GraphQL addPullRequestReviewThreadReply, with</code>
+</h2>
+<pre class="wire">{
+  &quot;body&quot;: &quot;Why `m`?&quot;,
+  &quot;review&quot;: &quot;&lt;the id of the review created above&gt;&quot;,
+  &quot;thread&quot;: &quot;t-range&quot;
+}</pre>
+<h2>Exactly what's sent, 3 of 5 · <code>GraphQL submitPullRequestReview, with</code>
+</h2>
+<pre class="wire">{
+  &quot;body&quot;: &quot;Mostly fine.&quot;,
+  &quot;event&quot;: &quot;COMMENT&quot;,
+  &quot;review&quot;: &quot;&lt;the id of the review created above&gt;&quot;
+}</pre>
+<h2>Exactly what's sent, 4 of 5 · <code>GraphQL node (whether you've given it a 👍), with</code>
+</h2>
+<pre class="wire">{
+  &quot;subject&quot;: &quot;t-outdated-c1&quot;
+}</pre>
+<h2>Exactly what's sent, 5 of 5 · <code>GraphQL addReaction (THUMBS_UP), unless you have, with</code>
+</h2>
+<pre class="wire">{
+  &quot;subject&quot;: &quot;t-outdated-c1&quot;
+}</pre>
+</div>
+</div>

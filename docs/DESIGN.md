@@ -393,7 +393,8 @@ Rules:
    those two optional fields. Its output becomes the new run's drafts,
    checked against the diff as usual. A draft that names a draft of the
    revised run and matches it word for word, kind and anchor too, keeps that
-   draft's status and your edit as they stand when the run finishes:
+   draft's status, thread choice and your edit as they stand when the run
+   finishes:
    accepted stays accepted. Word for word means as it stands or as the agent
    was shown it, so an edit you make while it runs isn't lost. Only the first
    to do so keeps them; a repeat is pending. One that changed
@@ -463,7 +464,8 @@ invited to draft replies or fixes on someone else's PR.
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
-| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |
+| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
+| `pending_reviews` | per PR, a review a submit created pending on GitHub and hasn't seen submitted or deleted: its run, and its drafts with their bodies as posted |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
@@ -540,7 +542,13 @@ embedded in the binary, so nothing is fetched at runtime.
   whether it's resolved or outdated, its link on GitHub, and each
   comment's author with an excerpt of its body; the diff shows each
   thread on the reviewed head under the line it ends on, with its first
-  comment. The conversation isn't on lines, so it isn't listed. For each draft: edit in place (click its text or `e`; htmx
+  comment. The conversation isn't on lines, so it isn't listed.
+  An overlapping draft offers, in each thread it overlaps, a 👍 on one
+  of the thread's comments (the first unless you pick another) instead
+  of the draft, or the draft as a reply in that thread; its Accept reads
+  "Post separately", a comment of its own. Picking one accepts the draft,
+  and the choice is stored with it (`drafts.thread_choice`); accepting,
+  rejecting or undoing clears it. For each draft: edit in place (click its text or `e`; htmx
   saves on change, or a Save button without the script; a box you leave
   by clicking another draft folds, and its save swaps in, only after that
   click, so the drafts don't move under it), accept (`y`),
@@ -594,24 +602,74 @@ embedded in the binary, so nothing is fetched at runtime.
   so Approve in a URL alone is refused; the preview's button then reads
   "Approve this PR", or "Approve this PR with the above comments" when
   there are any. The preview shows the review as it'll read (body,
-  then each inline comment) beside the exact payload, the JSON request
-  that will be sent, with the confirm in a footer that stays in view; on a
-  narrow window they stack. Above them, "Check before posting" lists what
+  then each inline comment, then the replies in existing threads and the
+  👍s) beside every request that will be sent, in order, each with its
+  exact JSON body or mutation variables, with the confirm in a footer
+  that stays in view; on a narrow window they stack. Above them, "Check before posting" lists what
   to look at: that you picked Approve, that the reviewed commit is behind
   the PR's head, comments moved into the body, what GitHub's Markdown would
   make easy to miss (mentions, hidden comments, images, HTML tags and
-  invisible characters), and drafts still pending, which aren't sent. The body
+  invisible characters), replies and 👍s in existing threads, and drafts
+  still pending, which aren't sent. The body
   is the summary if you accepted it. Accepted comments go out as inline
   comments in one GitHub review, anchored to the reviewed run's head, and
   accepted comments that aren't on a line of the diff are added to the
   body. Each one there is headed by a link to its lines in the file at
   that head, shown as source even for Markdown, or by its plain
-  `path:line` for lines of the old file. You confirm, then it posts, only
-  if the payload is still exactly what the preview showed; otherwise
-  nothing is sent and you preview again. It's sent once: a GitHub error
-  is shown and nothing is retried or marked. Once GitHub has it, its
-  drafts are marked `posted` and can't be changed. Replies aren't posted
-  yet: drafts don't record their thread.
+  `path:line` for lines of the old file. Drafts accepted as replies go
+  in that review too. The review is always created pending (the REST
+  create-review call without a verdict), which nobody else can see; each
+  reply is added to it with `addPullRequestReviewThreadReply`, and
+  `submitPullRequestReview` submits it with your verdict, so the review
+  and its replies appear together. Then each 👍, for the drafts that
+  chose it (several choosing one comment share one), is sent with
+  `addReaction`, one at a time, unless the comment already has yours. With nothing but 👍s accepted there's
+  no review, unless you picked Approve; Request changes then has nothing
+  to post.
+  You confirm, then it posts, only if what's sent is still exactly what
+  the preview showed; otherwise nothing is sent and you preview again.
+  Each request is sent once: a GitHub error is shown and nothing is
+  retried. A retry never sends again what GitHub has, whatever GitHub
+  does with a repeat, because what it takes is recorded here as it takes
+  it:
+  - The pending review is recorded for the PR (`pending_reviews`), with
+    its run and its drafts as posted, before anything is added to it. If recording fails, it's deleted
+    and nothing is posted. If a reply fails, it's deleted and forgotten.
+  - While the PR has one recorded, the next submit of any of its runs
+    checks it first, and the preview says so: a regeneration copies the
+    drafts it may have posted. Submitted after all (a submit that failed
+    after GitHub took it), its drafts are marked `posted` and nothing
+    else is sent; it's forgotten only once they're marked. So are its
+    drafts' copies: drafts of any of the PR's runs that share a line of
+    revisions with one it posted (revised from it, it from them, or both
+    from one draft) and are word for word what it posted, kind and anchor
+    too. The submitting run's that share one but differ are left as they
+    are, and the result names them to check against the posted review.
+    Still pending, it's deleted, then the review is posted afresh. Gone,
+    it's forgotten.
+  - Once the submit succeeds, the review's drafts and their copies are
+    marked `posted`, and only then is the pending review forgotten, so
+    if marking fails, the next submit, after a restart too, finds it
+    submitted. Either result lists the copies it marked, each linked
+    through its own run, so every draft that changed state is shown. Posted
+    drafts can't be changed, and a preview leaves them out. What GitHub
+    took is marked `posted` whatever its status, since a draft decided on
+    again while its request was out was still sent. If the store
+    can't mark them, `serve` also treats them as posted until it
+    restarts.
+  - Before each 👍, whether the comment already has yours is checked
+    (`reactionGroups`), so one whose answer was lost is marked `posted`
+    rather than sent again. Each 👍's drafts are marked as soon as it's
+    added.
+  - A failed 👍 stops the rest and shows the review as posted with a
+    Comment preview of what's left, which has no review: Approve would
+    post a second one.
+
+  What a local record can't cover: a create whose answer is lost
+  leaves a pending review GitHub made but that isn't recorded. Nobody
+  else sees it, and it's never submitted from here; the result says to
+  discard it on GitHub. Drafts of kind `reply` aren't posted yet: they
+  don't record their thread.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
@@ -777,7 +835,7 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   capability-based: the agent can't post, push or reach the network, so the
   worst it can do is write a bad draft that you then read.
 - The GitHub token lives only in the serve process, and only the web task's
-  submit path writes with it.
+  submit path writes with it: reviews, their replies and 👍s.
 - Every agent, whether a review, a regeneration or a chat, runs without
   any environment variable whose name looks like a GitHub credential,
   ignoring case: any that names GitHub or starts `GH_` and also names a

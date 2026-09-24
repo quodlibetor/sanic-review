@@ -11,7 +11,7 @@ expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
 <span class="sp">
 <form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
-<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+<button class="btn" name="status" value="accepted" title="As a comment of its own, not in the existing thread.">Post separately<span class="k">y</span>
 </button>
 <button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
 </button>
@@ -93,6 +93,13 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </li>
 </ul>
+<form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="thread" value="t-range">
+<input type="hidden" name="comment" value="t-range-c1">
+<button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
+<button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
+</form>
 </div>
 <div class="thread">
 <div class="th">
@@ -106,6 +113,13 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 <b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
 </li>
 </ul>
+<form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="thread" value="t-outdated">
+<input type="hidden" name="comment" value="t-outdated-c1">
+<button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
+<button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
+</form>
 </div>
 </div>
 <div class="body" data-edit title="click or e to edit">Why `m`?</div>

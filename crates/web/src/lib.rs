@@ -6,7 +6,7 @@
 //! CSRF token and come from the dashboard's own origin; see [`guard`].
 //!
 //! GitHub is written to in exactly one place: the submit handler, after
-//! you've seen the exact payload and pressed Confirm.
+//! you've seen the exact requests and pressed Confirm.
 
 mod assets;
 mod chat;
@@ -84,7 +84,7 @@ pub struct Context {
     pub config_path: PathBuf,
     /// The dashboard's own connection; it edits drafts and records views.
     pub store: Store,
-    /// Posts reviews, and nothing else.
+    /// Posts reviews, their replies and thumbs-ups, and nothing else.
     pub github: Client,
     pub control: Arc<dyn Control>,
     /// When the scheduler will queue each debounced review.
@@ -117,6 +117,9 @@ struct App {
     /// posted payloads, as `<run>:<payload>`, so a second confirm of an
     /// approval with no drafts can't post it twice.
     posting: tokio::sync::Mutex<HashSet<String>>,
+    /// Drafts GitHub has that the store failed to mark posted, so they're
+    /// never sent again while `serve` runs.
+    taken: Mutex<HashSet<i64>>,
 }
 
 impl App {
@@ -126,6 +129,10 @@ impl App {
 
     fn picks(&self) -> MutexGuard<'_, HashMap<String, submit::Pick>> {
         self.picks.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn taken(&self) -> MutexGuard<'_, HashSet<i64>> {
+        self.taken.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -167,6 +174,7 @@ impl Dashboard {
                 csrf: Csrf::generate()?,
                 picks: Mutex::new(HashMap::new()),
                 posting: tokio::sync::Mutex::new(HashSet::new()),
+                taken: Mutex::new(HashSet::new()),
             }),
         })
     }
@@ -202,6 +210,7 @@ impl Dashboard {
             )
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
+            .route("/drafts/{id}/thread", post(pr::choose_thread))
             .route("/assets/{file}", get(assets::asset))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&self.app),

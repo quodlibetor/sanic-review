@@ -543,12 +543,6 @@ fieldset label {
   margin-right: 1rem;
 }
 
-#payload {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.75rem;
-}
-
 .overlay {
   position: fixed;
   inset: 0;
@@ -1380,4 +1374,22 @@ table.diff tr.thread-row td {
 table.diff tr.thread-row.resolved td {
   color: var(--dim);
   background: none;
+}
+
+.thread.chosen {
+  border-color: var(--ok);
+  box-shadow: inset 3px 0 var(--ok);
+}
+
+form.choose {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+  margin-top: 0.3rem;
+}
+
+form.choose select {
+  max-width: 22rem;
+  font-size: 12px;
 }

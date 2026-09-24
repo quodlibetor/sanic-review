@@ -114,12 +114,19 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
 /// A thread in full: where it is, its state, a link, and an excerpt of
 /// each comment.
 pub fn thread_box(thread: &Thread, head: &str) -> Markup {
+    thread_box_with(thread, head, false, &html! {})
+}
+
+/// [`thread_box`], marked `chosen` if a draft posts in it, with `actions`
+/// under its comments.
+pub fn thread_box_with(thread: &Thread, head: &str, chosen: bool, actions: &Markup) -> Markup {
     html! {
-        div.thread.resolved[thread.resolved] {
+        div.thread.resolved[thread.resolved].chosen[chosen] {
             (thread_head(thread, head))
             ul.said {
                 @for comment in &thread.comments { li { (said(comment)) } }
             }
+            (actions)
         }
     }
 }
@@ -194,11 +201,16 @@ fn link(thread: &Thread) -> Option<&str> {
 
 /// `body` on one line, cut at [`EXCERPT`] characters.
 pub fn excerpt(body: &str) -> String {
+    excerpt_of(body, EXCERPT)
+}
+
+/// `body` on one line, cut at `max` characters.
+pub fn excerpt_of(body: &str, max: usize) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= EXCERPT {
+    if flat.chars().count() <= max {
         return flat;
     }
-    let cut: String = flat.chars().take(EXCERPT).collect();
+    let cut: String = flat.chars().take(max).collect();
     format!("{}…", cut.trim_end())
 }
 

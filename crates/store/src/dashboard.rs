@@ -68,6 +68,50 @@ pub struct DraftRow {
     /// For a regenerated draft: the draft of the revised run it's based on,
     /// kept as it was if unchanged ("revised from #N" otherwise).
     pub based_on: Option<i64>,
+    /// For an accepted comment that overlaps an existing thread, what to
+    /// post there instead of a comment of its own.
+    pub choice: Option<ThreadChoice>,
+}
+
+/// What an accepted draft that overlaps an existing review thread posts,
+/// instead of a comment of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadChoice {
+    /// A thumbs-up on `comment`, one of `thread`'s, and not the draft.
+    React { thread: String, comment: String },
+    /// The draft, as a reply in `thread`.
+    Reply { thread: String },
+}
+
+impl ThreadChoice {
+    /// The thread it's for.
+    #[must_use]
+    pub fn thread(&self) -> &str {
+        match self {
+            Self::React { thread, .. } | Self::Reply { thread } => thread,
+        }
+    }
+
+    /// As the `thread_choice`, `thread_id` and `react_to` columns hold it.
+    fn columns(&self) -> (&'static str, &str, Option<&str>) {
+        match self {
+            Self::React { thread, comment } => ("react", thread, Some(comment)),
+            Self::Reply { thread } => ("reply", thread, None),
+        }
+    }
+
+    /// From those columns; `None` for a draft posted on its own.
+    fn from_columns(
+        choice: Option<&str>,
+        thread: Option<String>,
+        comment: Option<String>,
+    ) -> Option<Self> {
+        match (choice, thread, comment) {
+            (Some("react"), Some(thread), Some(comment)) => Some(Self::React { thread, comment }),
+            (Some("reply"), Some(thread), _) => Some(Self::Reply { thread }),
+            _ => None,
+        }
+    }
 }
 
 impl DraftRow {
@@ -76,6 +120,17 @@ impl DraftRow {
     pub fn body(&self) -> &str {
         self.edited_body.as_deref().unwrap_or(&self.original_body)
     }
+}
+
+/// A review created pending on GitHub for a PR, until it's known to be
+/// submitted or gone: the run it's from, and the drafts in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReview {
+    pub run: i64,
+    pub node_id: String,
+    pub html_url: String,
+    /// Each draft in it, with its body as posted.
+    pub drafts: Vec<(i64, String)>,
 }
 
 /// What you can decide about a draft. `stale` and `posted` are set by
@@ -103,7 +158,7 @@ const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 
 const DRAFT_COLUMNS: &str = "r.repo, r.number, d.id, d.run_id, d.kind, d.path, d.line,
     d.start_line, d.side, d.severity, d.confidence, d.original_body, d.edited_body,
-    d.status, d.unanchored, d.based_on";
+    d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to";
 
 fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     Ok(DraftRow {
@@ -122,6 +177,11 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
         status: row.get(13)?,
         unanchored: row.get(14)?,
         based_on: row.get(15)?,
+        choice: ThreadChoice::from_columns(
+            row.get::<_, Option<String>>(16)?.as_deref(),
+            row.get(17)?,
+            row.get(18)?,
+        ),
     })
 }
 
@@ -222,12 +282,14 @@ impl Store {
         Ok(changed == 1)
     }
 
-    /// Accepts or rejects a draft, or puts it back to pending. `false` if
-    /// the draft doesn't exist or is stale or posted.
+    /// Accepts or rejects a draft, or puts it back to pending. Accepted
+    /// this way, a comment is posted on its own, whatever thread choice it
+    /// had. `false` if the draft doesn't exist or is stale or posted.
     pub fn set_draft_status(&self, id: i64, status: DraftStatus) -> Result<bool> {
         let changed = self.conn.execute(
             &format!(
-                "UPDATE drafts SET status = ?2, updated_at = {NOW}
+                "UPDATE drafts SET status = ?2, thread_choice = NULL, thread_id = NULL,
+                     react_to = NULL, updated_at = {NOW}
                  WHERE id = ?1 AND status IN {DECIDABLE}"
             ),
             params![id, status.as_str()],
@@ -235,19 +297,105 @@ impl Store {
         Ok(changed == 1)
     }
 
-    /// Marks accepted drafts posted, once GitHub has them.
+    /// Accepts comment draft `id` to post as `choice` in an existing thread
+    /// of its PR. `false` if the draft doesn't exist, isn't a comment,
+    /// can't be decided, or `choice` names a thread of another PR or a
+    /// comment of another thread.
+    pub fn choose_thread(&self, id: i64, choice: &ThreadChoice) -> Result<bool> {
+        let (kind, thread, comment) = choice.columns();
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE drafts SET status = 'accepted', thread_choice = ?2, thread_id = ?3,
+                     react_to = ?4, updated_at = {NOW}
+                 WHERE id = ?1 AND kind = 'comment' AND status IN {DECIDABLE}
+                   AND EXISTS (
+                       SELECT 1 FROM threads t JOIN runs r
+                           ON r.repo = t.repo AND r.number = t.number
+                       WHERE r.id = drafts.run_id AND t.thread_id = ?3)
+                   AND (?4 IS NULL OR EXISTS (
+                       SELECT 1 FROM comments c JOIN runs r
+                           ON r.repo = c.repo AND r.number = c.number
+                       WHERE r.id = drafts.run_id AND c.thread_id = ?3 AND c.id = ?4))"
+            ),
+            params![id, kind, thread, comment],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Marks drafts posted, once GitHub has them: whatever their status,
+    /// since one decided on again while it was being posted was still sent.
     pub fn mark_posted(&mut self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for id in ids {
             tx.execute(
                 &format!(
                     "UPDATE drafts SET status = 'posted', updated_at = {NOW}
-                     WHERE id = ?1 AND status = 'accepted'"
+                     WHERE id = ?1 AND status <> 'posted'"
                 ),
                 [id],
             )?;
         }
         tx.commit().wrap_err("marking drafts posted")
+    }
+
+    /// Records that `key` has `review` pending on GitHub, replacing any
+    /// earlier record.
+    pub fn record_pending_review(&self, key: &PrKey, review: &PendingReview) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO pending_reviews (repo, number, run_id, node_id, html_url, drafts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (repo, number) DO UPDATE SET run_id = excluded.run_id,
+                 node_id = excluded.node_id, html_url = excluded.html_url,
+                 drafts = excluded.drafts",
+            params![
+                key.repo.to_string(),
+                key.number,
+                review.run,
+                review.node_id,
+                review.html_url,
+                serde_json::to_string(&review.drafts)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The review recorded as pending on GitHub for `key`, if any.
+    pub fn pending_review(&self, key: &PrKey) -> Result<Option<PendingReview>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT run_id, node_id, html_url, drafts FROM pending_reviews
+                 WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(run, node_id, html_url, drafts)| {
+            Ok(PendingReview {
+                run,
+                node_id,
+                html_url,
+                drafts: serde_json::from_str(&drafts)
+                    .wrap_err("reading a pending review's drafts")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Forgets `key`'s pending review: it was submitted or deleted.
+    pub fn clear_pending_review(&self, key: &PrKey) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM pending_reviews WHERE repo = ?1 AND number = ?2",
+            params![key.repo.to_string(), key.number],
+        )?;
+        Ok(())
     }
 
     /// Records that you opened `key`'s page just now. Does nothing if the
@@ -284,7 +432,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use sanic_core::{
-        pr::PrSnapshot,
+        pr::{Comment, Placement, PrSnapshot, Thread},
         repo::RepoName,
         run::{
             Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -420,10 +568,9 @@ mod tests {
                 .set_draft_status(summary, DraftStatus::Rejected)
                 .unwrap()
         );
-        store.mark_posted(&[summary, comment]).unwrap();
+        store.mark_posted(&[comment]).unwrap();
 
         let status = |id| store.draft_row(id).unwrap().unwrap().status;
-        // Only accepted drafts are marked posted.
         assert_eq!(status(summary), "rejected");
         assert_eq!(status(comment), "posted");
         assert!(
@@ -437,6 +584,106 @@ mod tests {
                 .set_draft_status(summary, DraftStatus::Pending)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn a_draft_decided_on_again_while_it_was_posted_is_marked_posted() {
+        let (mut store, run) = reviewed();
+        let id = store.draft_rows(run).unwrap()[1].id;
+        assert!(store.set_draft_status(id, DraftStatus::Accepted).unwrap());
+        // Rejected after GitHub took it, as while a submit awaits GitHub.
+        assert!(store.set_draft_status(id, DraftStatus::Rejected).unwrap());
+        store.mark_posted(&[id]).unwrap();
+        assert_eq!(store.draft_row(id).unwrap().unwrap().status, "posted");
+    }
+
+    #[test]
+    fn a_thread_choice_accepts_the_draft_for_a_thread_of_its_pr() {
+        let (mut store, run) = reviewed();
+        let comment = |id: &str| Comment {
+            id: id.into(),
+            author: "bob".into(),
+            body: "hm".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            url: None,
+            by_bot: false,
+            reacted_at: None,
+        };
+        let thread = |id: &str, comments| Thread {
+            id: id.into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(4),
+            resolved: false,
+            place: Placement::default(),
+            comments,
+        };
+        let mut snap = snapshot();
+        snap.threads = vec![
+            thread("t1", vec![comment("c1"), comment("c2")]),
+            thread("t2", vec![comment("c3")]),
+        ];
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let [summary, id] = [0, 1].map(|i| store.draft_rows(run).unwrap()[i].id);
+        let choice = |id| store.draft_row(id).unwrap().unwrap().choice;
+
+        let react = ThreadChoice::React {
+            thread: "t1".into(),
+            comment: "c2".into(),
+        };
+        assert!(store.choose_thread(id, &react).unwrap());
+        assert_eq!(store.draft_row(id).unwrap().unwrap().status, "accepted");
+        assert_eq!(choice(id), Some(react));
+        let reply = ThreadChoice::Reply {
+            thread: "t2".into(),
+        };
+        assert!(store.choose_thread(id, &reply).unwrap());
+        assert_eq!(choice(id), Some(reply.clone()));
+
+        // A comment of another thread, a thread of no PR's, a summary.
+        for wrong in [
+            ThreadChoice::React {
+                thread: "t2".into(),
+                comment: "c1".into(),
+            },
+            ThreadChoice::Reply {
+                thread: "elsewhere".into(),
+            },
+        ] {
+            assert!(!store.choose_thread(id, &wrong).unwrap(), "{wrong:?}");
+        }
+        assert!(!store.choose_thread(summary, &reply).unwrap());
+        assert_eq!(choice(id), Some(reply.clone()));
+
+        // Accepting it plainly posts it on its own; undoing forgets.
+        assert!(store.set_draft_status(id, DraftStatus::Accepted).unwrap());
+        assert_eq!(choice(id), None);
+        assert!(store.choose_thread(id, &reply).unwrap());
+        assert!(store.set_draft_status(id, DraftStatus::Pending).unwrap());
+        assert_eq!(choice(id), None);
+
+        // Posted, it's final.
+        assert!(store.choose_thread(id, &reply).unwrap());
+        store.mark_posted(&[id]).unwrap();
+        assert!(!store.choose_thread(id, &reply).unwrap());
+    }
+
+    #[test]
+    fn a_pending_review_is_recorded_for_its_pr_until_cleared() {
+        let (store, run) = reviewed();
+        assert_eq!(store.pending_review(&key()).unwrap(), None);
+        let pending = PendingReview {
+            run,
+            node_id: "PRR_1".into(),
+            html_url: "https://github.com/org/repo/pull/7#pullrequestreview-1".into(),
+            drafts: vec![(3, "Looks fine.".into()), (4, "off by one?".into())],
+        };
+        store.record_pending_review(&key(), &pending).unwrap();
+        assert_eq!(store.pending_review(&key()).unwrap(), Some(pending));
+        let mut other = key();
+        other.number = 8;
+        assert_eq!(store.pending_review(&other).unwrap(), None);
+        store.clear_pending_review(&key()).unwrap();
+        assert_eq!(store.pending_review(&key()).unwrap(), None);
     }
 
     #[test]

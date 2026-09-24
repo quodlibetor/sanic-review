@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_draft_based_on.sql"),
     include_str!("migrations/0014_pr_reviewer.sql"),
     include_str!("migrations/0015_thread_placement.sql"),
+    include_str!("migrations/0016_draft_thread_choice.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -43,7 +44,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-pub use dashboard::{DraftRow, DraftStatus, PrPage, ReviewRun};
+pub use dashboard::{DraftRow, DraftStatus, PendingReview, PrPage, ReviewRun, ThreadChoice};
 pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview};
 pub use runs::{Draft, Refusal, Regeneration, RunCounts, RunRecord, SessionRun};
 

@@ -11,11 +11,16 @@ use sanic_core::{
     pr::{CONVERSATION_THREAD, Placement, PrKey, ReviewState, TeamRef},
     repo::RepoName,
 };
-use sanic_github::{ApiError, Client, NewComment, NewReview, NotificationPoll, ReviewEvent, Token};
+use sanic_github::{
+    ApiError, Client, NewComment, NewReaction, NewReply, NewReview, NotificationPoll, ReviewEvent,
+    ReviewStatus, Token,
+};
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_json, body_partial_json, header, method, path, query_param},
+    matchers::{
+        body_json, body_partial_json, body_string_contains, header, method, path, query_param,
+    },
 };
 
 fn fixture(name: &str) -> Value {
@@ -361,40 +366,57 @@ fn new_review() -> NewReview {
     }
 }
 
-#[tokio::test]
-async fn reviews_post_exactly_the_payload_once() {
-    let server = MockServer::start().await;
+fn replies() -> Vec<NewReply> {
+    ["PRRT_1", "PRRT_2"]
+        .into_iter()
+        .map(|thread| NewReply {
+            thread_id: thread.into(),
+            body: format!("agreed, in {thread}"),
+        })
+        .collect()
+}
+
+/// GitHub creating `new_review()` pending, as review `PRR_80`.
+async fn pending_review(server: &MockServer) {
+    let mut body = serde_json::to_value(new_review()).unwrap();
+    body.as_object_mut().unwrap().remove("event");
     Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
-        .and(header("authorization", "Bearer t0ken"))
-        .and(body_json(json!({
-            "commit_id": "h1",
-            "body": "Looks fine.",
-            "event": "REQUEST_CHANGES",
-            "comments": [
-                { "path": "src/lib.rs", "body": "off by one?", "line": 4, "side": "RIGHT" },
-                {
-                    "path": "src/old.rs", "body": "why remove this?", "line": 9,
-                    "side": "LEFT", "start_line": 7, "start_side": "LEFT"
-                },
-            ],
-        })))
+        .and(body_json(body))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 80,
+            "node_id": "PRR_80",
             "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-80",
-            "state": "CHANGES_REQUESTED",
+            "state": "PENDING",
         })))
         .expect(1)
-        .mount(&server)
+        .mount(server)
         .await;
+}
 
-    let posted = client(&server)
-        .post_review(&key("org/repo", 7), &new_review())
+/// A GraphQL mutation named `name`, with `variables`, answered `data`.
+fn mutation(name: &str, variables: &Value) -> wiremock::MockBuilder {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(name))
+        .and(body_partial_json(json!({ "variables": variables })))
+}
+
+fn ok(data: &Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+}
+
+#[tokio::test]
+async fn a_review_is_created_pending_without_its_verdict() {
+    let server = MockServer::start().await;
+    pending_review(&server).await;
+    let pending = client(&server)
+        .create_pending_review(&key("org/repo", 7), &new_review())
         .await
         .unwrap();
-    assert_eq!(posted.id, 80);
+    assert_eq!(pending.node_id, "PRR_80");
     assert_eq!(
-        posted.html_url,
+        pending.html_url,
         "https://github.com/org/repo/pull/7#pullrequestreview-80"
     );
 }
@@ -404,6 +426,7 @@ async fn a_rejected_review_says_why_and_is_not_retried() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
+        .and(header("authorization", "Bearer t0ken"))
         .respond_with(ResponseTemplate::new(422).set_body_json(json!({
             "message": "Unprocessable Entity",
             "errors": ["Line could not be resolved"],
@@ -413,7 +436,7 @@ async fn a_rejected_review_says_why_and_is_not_retried() {
         .await;
 
     let err = client(&server)
-        .post_review(&key("org/repo", 7), &new_review())
+        .create_pending_review(&key("org/repo", 7), &new_review())
         .await
         .unwrap_err();
     let ApiError::Other(report) = err else {
@@ -422,4 +445,167 @@ async fn a_rejected_review_says_why_and_is_not_retried() {
     let message = format!("{report:?}");
     assert!(message.contains("422"), "{message}");
     assert!(message.contains("Line could not be resolved"), "{message}");
+}
+
+#[tokio::test]
+async fn replies_then_the_submit_go_to_the_pending_review() {
+    let server = MockServer::start().await;
+    for reply in replies() {
+        mutation(
+            "addPullRequestReviewThreadReply",
+            &json!({ "review": "PRR_80", "thread": reply.thread_id, "body": reply.body }),
+        )
+        .respond_with(ok(
+            &json!({ "addPullRequestReviewThreadReply": { "comment": { "id": "C" } } }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    }
+    mutation(
+        "submitPullRequestReview",
+        &json!({ "review": "PRR_80", "event": "REQUEST_CHANGES", "body": "Looks fine." }),
+    )
+    .respond_with(ok(
+        &json!({ "submitPullRequestReview": { "pullRequestReview": { "id": "PRR_80" } } }),
+    ))
+    .expect(1)
+    .mount(&server)
+    .await;
+    mutation("deletePullRequestReview", &json!({ "review": "PRR_80" }))
+        .respond_with(ok(
+            &json!({ "deletePullRequestReview": { "clientMutationId": null } }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let github = client(&server);
+    let pr = key("org/repo", 7);
+    for reply in replies() {
+        github.add_reply(&pr, "PRR_80", &reply).await.unwrap();
+    }
+    github
+        .submit_review(&pr, "PRR_80", &new_review())
+        .await
+        .unwrap();
+    github.delete_review(&pr, "PRR_80").await.unwrap();
+    // In the order sent, as the preview shows them.
+    let steps: Vec<String> = new_review()
+        .steps(&pr, &replies())
+        .into_iter()
+        .map(|s| s.endpoint)
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "POST /repos/org/repo/pulls/7/reviews",
+            "GraphQL addPullRequestReviewThreadReply, with",
+            "GraphQL addPullRequestReviewThreadReply, with",
+            "GraphQL submitPullRequestReview, with",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_graphql_error_fails_the_write() {
+    let server = MockServer::start().await;
+    mutation("addPullRequestReviewThreadReply", &json!({}))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": null,
+            "errors": [{ "message": "Could not resolve to a node with the global id of 'PRRT_2'" }],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .add_reply(&key("org/repo", 7), "PRR_80", &replies()[1])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("PRRT_2"), "{err}");
+}
+
+#[tokio::test]
+async fn a_review_is_found_pending_submitted_or_gone() {
+    let server = MockServer::start().await;
+    for (id, answer) in [
+        (
+            "PRR_1",
+            json!({ "data": { "node": { "state": "PENDING" } } }),
+        ),
+        (
+            "PRR_2",
+            json!({ "data": { "node": { "state": "COMMENTED" } } }),
+        ),
+        (
+            "PRR_3",
+            json!({
+                "data": { "node": null },
+                "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to a node" }],
+            }),
+        ),
+    ] {
+        mutation("node(id: $review)", &json!({ "review": id }))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer))
+            .mount(&server)
+            .await;
+    }
+    let github = client(&server);
+    let state = async |id| github.review_state(&key("org/repo", 7), id).await.unwrap();
+    assert_eq!(state("PRR_1").await, ReviewStatus::Pending);
+    assert_eq!(state("PRR_2").await, ReviewStatus::Submitted);
+    assert_eq!(state("PRR_3").await, ReviewStatus::Gone);
+}
+
+#[tokio::test]
+async fn a_reaction_is_a_thumbs_up_on_the_comment() {
+    let server = MockServer::start().await;
+    mutation("THUMBS_UP", &json!({ "subject": "PRRC_9" }))
+        .and(body_string_contains("addReaction"))
+        .respond_with(ok(
+            &json!({ "addReaction": { "reaction": { "content": "THUMBS_UP" } } }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client(&server)
+        .add_reaction(&NewReaction {
+            comment_id: "PRRC_9".into(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn your_thumbs_up_is_found_among_the_comments_reactions() {
+    let server = MockServer::start().await;
+    for (id, groups) in [
+        (
+            "PRRC_1",
+            json!([{ "content": "THUMBS_UP", "viewerHasReacted": true }]),
+        ),
+        (
+            "PRRC_2",
+            json!([
+                { "content": "THUMBS_UP", "viewerHasReacted": false },
+                { "content": "HEART", "viewerHasReacted": true },
+            ]),
+        ),
+    ] {
+        mutation("reactionGroups", &json!({ "subject": id }))
+            .respond_with(ok(&json!({ "node": { "reactionGroups": groups } })))
+            .mount(&server)
+            .await;
+    }
+    let github = client(&server);
+    let has = async |id: &str| {
+        github
+            .has_thumbs_up(&NewReaction {
+                comment_id: id.into(),
+            })
+            .await
+            .unwrap()
+    };
+    assert!(has("PRRC_1").await);
+    assert!(!has("PRRC_2").await);
 }
