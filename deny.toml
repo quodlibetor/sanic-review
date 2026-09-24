@@ -34,6 +34,21 @@ allow = [
   "Zlib",
 ]
 
+# MPL-2.0 is file-level copyleft, met by using the crates unmodified.
+# ammonia's style sanitiser pulls in both.
+[[licenses.exceptions]]
+crate = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "dtoa-short"
+allow = ["MPL-2.0"]
+
+# Unicode-3.0's predecessor, for its tables; comrak pulls it in.
+[[licenses.exceptions]]
+crate = "finl_unicode"
+allow = ["Unicode-DFS-2016"]
+
 [licenses.private]
 ignore = true
 

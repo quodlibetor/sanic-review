@@ -35,7 +35,11 @@ expression: "readable(&f, view)"
 </form>
 </span>
 </div>
-<div class="body" data-edit title="click or e to edit">Mostly fine.</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>Mostly fine.</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/1/edit" hx-post="/drafts/1/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Mostly fine.</textarea>
@@ -71,7 +75,11 @@ expression: "readable(&f, view)"
 </form>
 </span>
 </div>
-<div class="body" data-edit title="click or e to edit">This file isn't in the diff.</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>This file isn't in the diff.</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/3/edit" hx-post="/drafts/3/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">This file isn't in the diff.</textarea>
@@ -201,10 +209,16 @@ expression: "readable(&f, view)"
 </div>
 <ul class="said">
 <li>
-<b>me</b>: <span class="excerpt" title="hm">hm</span>
+<b>me</b>
+<div class="md">
+<p>hm</p>
+</div>
 </li>
 <li>
-<b>alice</b>: <span class="excerpt" title="hm">hm</span>
+<b>alice</b>
+<div class="md">
+<p>hm</p>
+</div>
 </li>
 </ul>
 </div>
@@ -236,7 +250,10 @@ expression: "readable(&f, view)"
 </div>
 <ul class="said">
 <li>
-<b>carol</b>: <span class="excerpt" title="Name it?">Name it?</span>
+<b>carol</b>
+<div class="md">
+<p>Name it?</p>
+</div>
 </li>
 </ul>
 </div>
@@ -249,7 +266,10 @@ expression: "readable(&f, view)"
 </div>
 <ul class="said">
 <li>
-<b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+<b>dave</b>
+<div class="md">
+<p>Why 2?</p>
+</div>
 </li>
 </ul>
 </div>
@@ -339,9 +359,11 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </div>
 <ul class="said">
 <li>
-<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
-
-It looks dead.">Is `m` used anywhere? It looks dead.</span>
+<b>bob</b>
+<div class="md">
+<p>Is <code>m</code> used anywhere?</p>
+<p>It looks dead.</p>
+</div>
 </li>
 </ul>
 <form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
@@ -361,7 +383,10 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </div>
 <ul class="said">
 <li>
-<b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+<b>dave</b>
+<div class="md">
+<p>Why 2?</p>
+</div>
 </li>
 </ul>
 <form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
@@ -373,7 +398,11 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </form>
 </div>
 </div>
-<div class="body" data-edit title="click or e to edit">Why `m`?</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>Why <code>m</code>?</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Why `m`?</textarea>
@@ -432,9 +461,11 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </div>
 <ul class="said">
 <li>
-<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
-
-It looks dead.">Is `m` used anywhere? It looks dead.</span>
+<b>bob</b>
+<div class="md">
+<p>Is <code>m</code> used anywhere?</p>
+<p>It looks dead.</p>
+</div>
 </li>
 </ul>
 </div>

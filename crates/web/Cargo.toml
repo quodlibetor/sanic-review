@@ -7,8 +7,10 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+ammonia.workspace = true
 axum.workspace = true
 color-eyre.workspace = true
+comrak.workspace = true
 getrandom.workspace = true
 maud.workspace = true
 sanic-core.workspace = true

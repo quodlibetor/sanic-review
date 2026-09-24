@@ -25,7 +25,7 @@ use crate::{
     App, Error, PrPath, Shared, chat, diff,
     files::{self, Layout, View},
     index::{Overview, archive_form, owed_status, why},
-    links,
+    links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href, submit,
     threads::{self, Existing},
@@ -220,7 +220,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                 @if !pr.body.trim().is_empty() {
                     details.description {
                         summary { "Description" }
-                        pre { (pr.body) }
+                        (markdown::render(&pr.body, &markdown::Context::default()))
                     }
                 }
                 @if !h.runs.is_empty() { (run_list(&pr.key, h.runs, h.shown)) }
@@ -271,15 +271,19 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                             " · revises "
                             a href={ (href) "?run=" (source) } { "run " (number(source)) }
                         }
-                        @if let Some(instruction) = &run.instruction {
-                            " · " span.instruction title=(instruction) {
-                                "“" (first_line(instruction))
-                                @if instruction.trim_end().contains('\n') { "…" }
-                                "”"
-                            }
-                        }
                         @if let Some(error) = &run.error {
                             " — " span.error { (first_line(error)) }
+                        }
+                        // Its first line, which opens to all of it.
+                        @if let Some(instruction) = &run.instruction {
+                            details.instruction {
+                                summary {
+                                    "“" (first_line(instruction))
+                                    @if instruction.trim_end().contains('\n') { "…" }
+                                    "”"
+                                }
+                                (markdown::render(instruction, &markdown::Context::default()))
+                            }
                         }
                     }
                 }
@@ -436,6 +440,7 @@ fn drafts_section(
         threads,
         head: &run.head_sha,
         pr_head: &pr.head_sha,
+        diff,
     };
     let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
     let preselect = if suggested == "request_changes" {
@@ -622,7 +627,7 @@ pub fn draft_card(
             @if let Some(context) = context { (context) }
             @if open { (in_threads(app, draft, existing, &overlapping, editable)) }
             div.body data-edit[editable] title=[editable.then_some("click or e to edit")] {
-                (draft.body())
+                (markdown::render(draft.body(), &markdown::Context::draft(diff, draft)))
             }
             @if editable {
                 // Queued behind each other, so an edit saved on blur lands
@@ -658,8 +663,8 @@ fn card_foot(
         @if open { @if let Some(note) = &draft.note { (private_note(note)) } }
         @if let Some(reason) = dropped {
             div.dropped {
-                b { "The agent dropped this draft" } span.dim { " (it's kept, rejected)" } ": "
-                span.why { (reason) }
+                b { "The agent dropped this draft" } span.dim { " (it's kept, rejected)" } ":"
+                div.why { (markdown::render(reason, &markdown::Context::default())) }
             }
         }
         @if let Some(run) = revision { (revision_state(&draft.key, run)) }
@@ -721,7 +726,7 @@ fn private_note(note: &str) -> Markup {
     html! {
         aside.pnote {
             div.lbl { "Reviewer note " span { "(not posted)" } }
-            div.text { (note) }
+            (markdown::render(note, &markdown::Context::default()))
         }
     }
 }
@@ -780,6 +785,7 @@ fn in_threads(
                     @let actions = if choosable { choose_form(app, draft, thread) } else { html! {} };
                     (threads::thread_box_with(
                         existing.at(),
+                        existing.diff,
                         thread,
                         chosen.is_some_and(|c| c.id == thread.id),
                         &actions,
@@ -1012,6 +1018,7 @@ fn decided(
             threads: &threads,
             head: &head,
             pr_head: &pr_head,
+            diff: diff.as_ref(),
         };
         return Ok(draft_card(app, &draft, diff.as_ref(), existing, &revise).into_response());
     }

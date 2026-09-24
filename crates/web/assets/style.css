@@ -1132,7 +1132,8 @@ main:has(> .cols) > h1 {
   color: var(--dim);
 }
 
-.rv > pre {
+.rv > pre,
+.rv > .md {
   margin: 0;
   padding: 0.5rem 0.75rem;
   font-family: system-ui, sans-serif;
@@ -1342,11 +1343,11 @@ main:has(> .prh) {
   color: var(--accent);
 }
 
-.subnav pre {
-  font-family: system-ui, sans-serif;
+.subnav .md {
   font-size: 14px;
   border-left: 2px solid var(--line);
   padding-left: 0.7rem;
+  margin: 0.4rem 0;
 }
 
 .subnav ol {
@@ -1358,8 +1359,9 @@ main:has(> .prh) {
   font-weight: 600;
 }
 
-.subnav .instruction {
+.subnav .instruction summary {
   font-style: italic;
+  color: inherit;
 }
 
 .rbar {
@@ -1558,7 +1560,6 @@ p.seen {
 }
 
 .dc .body {
-  white-space: pre-wrap;
   margin: 0.35rem 0 0 -0.3rem;
   border-radius: 4px;
   padding: 0.15rem 0.3rem;
@@ -1572,10 +1573,20 @@ p.seen {
   background: var(--raise);
 }
 
-.dc.rejected .body {
+/* Its first block, on one line: the first line of a list, a table or a
+   suggestion. */
+.dc.rejected .body .md > * {
+  margin: 0;
+  padding-block: 0;
+  max-height: 1lh;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.dc.rejected .body .md > :not(:first-child),
+.dc.rejected .body .md br {
+  display: none;
 }
 
 .dc form.edit {
@@ -1608,8 +1619,12 @@ p.seen {
   letter-spacing: 0;
 }
 
-.dc .pnote .text {
-  white-space: pre-wrap;
+/* Its Markdown's code and table heads are raised, as the note itself is,
+   so they take the page's colour instead to stand out from it. */
+.dc .pnote .md code,
+.dc .pnote .md pre,
+.dc .pnote .md th {
+  background: var(--bg);
 }
 
 /* Revising one draft with the agent: a button that opens a short box for
@@ -1667,7 +1682,7 @@ p.seen {
 }
 
 .dc .dropped .why {
-  white-space: pre-wrap;
+  margin-top: 0.15rem;
 }
 
 /* A draft's box reads as the text it replaces: the same font, colours and
@@ -2230,4 +2245,200 @@ button.x {
 
 button.x:hover {
   border-color: var(--accent);
+}
+
+/* Markdown, as GitHub renders it, compact in cards. Wide tables and code
+   scroll inside their block, so the page never scrolls sideways. */
+.md {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md pre,
+.md table,
+.md details,
+.md .md-sugg {
+  margin: 0 0 0.5rem;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 0.7rem 0 0.35rem;
+  line-height: 1.25;
+}
+
+.md h1 {
+  font-size: 1.25em;
+}
+
+.md h2 {
+  font-size: 1.15em;
+}
+
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1em;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.5rem;
+}
+
+.md li > p {
+  margin: 0;
+}
+
+.md li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.2rem;
+}
+
+.md blockquote {
+  padding: 0 0 0 0.7rem;
+  margin-left: 0;
+  border-left: 3px solid var(--line);
+  color: var(--dim);
+}
+
+.md code {
+  background: var(--raise);
+  border-radius: 3px;
+  padding: 0.05em 0.3em;
+  font-size: 12px;
+}
+
+.md pre {
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  background: var(--raise);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+  font-size: 12px;
+}
+
+.md pre code {
+  background: none;
+  padding: 0;
+}
+
+.md table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 0.2rem 0.5rem;
+  overflow-wrap: normal;
+}
+
+.md th {
+  background: var(--raise);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.md kbd {
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 0.3em;
+  font-size: 12px;
+}
+
+.md summary {
+  cursor: pointer;
+}
+
+.md img {
+  max-width: 100%;
+}
+
+.md .md-img {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  max-width: 100%;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.md .md-img:hover,
+.md .md-img:focus-visible {
+  border-color: var(--accent);
+}
+
+.md .md-img.dead {
+  cursor: default;
+  color: var(--dim);
+}
+
+.md .md-img-host {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.md .md-sugg {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.md .md-sugg-h {
+  font-size: 12px;
+  padding: 0.15rem 0.5rem;
+  background: var(--raise);
+  border-bottom: 1px solid var(--line);
+}
+
+.md .md-sugg table.diff,
+.md .md-sugg pre {
+  display: table;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.md .md-sugg pre {
+  display: block;
+}
+
+.md .md-sugg table.diff td {
+  border: 0;
+  padding: 0 0.5rem;
+}
+
+.thread ul.said .md {
+  margin: 0.05rem 0 0.3rem;
 }

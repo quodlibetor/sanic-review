@@ -17,10 +17,13 @@ sanic-runner = { path = "crates/runner" }
 sanic-store = { path = "crates/store" }
 sanic-web = { path = "crates/web" }
 
+ammonia = "4.2"
 axum = "0.8"
 apollo-compiler = "1.33"
 clap = { version = "4.6", features = ["derive"] }
 color-eyre = "0.6"
+# Markdown only: the dashboard highlights code blocks itself.
+comrak = { version = "0.55", default-features = false }
 getrandom = "0.4"
 globset = "0.4"
 http-body-util = "0.1"

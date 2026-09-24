@@ -1,5 +1,6 @@
-//! Syntax highlighting for the files view, as classes that `syntax.css`
-//! colours for the dashboard's light and dark modes.
+//! Syntax highlighting for the files view and code blocks in Markdown, as
+//! classes that `syntax.css` colours for the dashboard's light and dark
+//! modes.
 
 use std::sync::LazyLock;
 
@@ -16,6 +17,9 @@ const STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "sy-" };
 /// Lines longer than this are shown plain: they're rarely code worth
 /// colouring, and the regexes are slowest on them.
 pub const MAX_LINE: usize = 1000;
+
+/// Lines past which a file's diff, or a code block, isn't highlighted.
+pub const MAX_LINES: usize = 2000;
 
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_nonewlines);
 
@@ -59,6 +63,17 @@ impl Highlighter {
             .rsplit_once('.')
             .and_then(|(_, ext)| SYNTAXES.find_syntax_by_extension(ext))
             .or_else(|| SYNTAXES.find_syntax_by_extension(name))?;
+        Some(Self {
+            syntax,
+            state: ParseState::new(syntax),
+            stack: ScopeStack::new(),
+        })
+    }
+
+    /// For a code block's language, by its name or extension (`rust`,
+    /// `rs`); `None` for one syntect doesn't know.
+    pub fn for_lang(lang: &str) -> Option<Self> {
+        let syntax = SYNTAXES.find_syntax_by_token(lang)?;
         Some(Self {
             syntax,
             state: ParseState::new(syntax),

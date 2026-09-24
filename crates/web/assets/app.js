@@ -430,7 +430,30 @@
 
   document.addEventListener("click", function (e) {
     const body = e.target.closest(".dc .body[data-edit]");
-    if (body) editDraft(body.closest(".dc"));
+    // Links, folds and images in its Markdown are for reading it.
+    if (body && !e.target.closest(".md a, .md summary, .md .md-img, .md img")) editDraft(body.closest(".dc"));
+  });
+
+  // An image in Markdown loads only when you ask: its placeholder has
+  // where it's from, and becomes the image on a click, or Enter.
+  function loadImage(placeholder) {
+    const img = document.createElement("img");
+    img.referrerPolicy = "no-referrer";
+    img.alt = placeholder.dataset.alt || "";
+    img.src = placeholder.dataset.src;
+    placeholder.replaceWith(img);
+  }
+  document.addEventListener("click", function (e) {
+    const placeholder = e.target.closest(".md .md-img[data-src]");
+    if (!placeholder) return;
+    // Not the link it may be in, this time.
+    e.preventDefault();
+    loadImage(placeholder);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" || !e.target.matches(".md .md-img[data-src]")) return;
+    e.preventDefault();
+    loadImage(e.target);
   });
   document.addEventListener("focusout", function (e) {
     const box = e.target.matches(".edit textarea") && e.target;

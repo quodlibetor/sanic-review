@@ -1,6 +1,6 @@
 ---
 source: crates/web/src/tests.rs
-expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
+expression: "readable(&f, card)"
 ---
 <article class="draft dc pending" id="draft-2">
 <div class="h">
@@ -8,6 +8,7 @@ expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
 <span class="sev major">major</span>
 <span class="dim conf">high conf.</span>
 <a class="tag-overlap" href="#draft-2-threads" title="An existing review thread is on these lines.">overlaps an existing thread</a>
+<span class="edited">edited</span>
 <span class="sp">
 <form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
@@ -39,11 +40,6 @@ expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
 <td class="code">
 <span class="sign">+</span>    let n = 2;</td>
 </tr>
-<tr class="thread-row">
-<td colspan="3">💬 <b>me</b>: <span class="excerpt" title="hm">hm</span>
-<span class="dim"> +1 more</span>
-</td>
-</tr>
 <tr class="add anchor">
 <td class="num">
 </td>
@@ -51,12 +47,12 @@ expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
 <td class="code">
 <span class="sign">+</span>    let m = n + 1;</td>
 </tr>
-<tr class="thread-row resolved">
-<td colspan="3">💬 <b>carol</b>: <span class="excerpt" title="Name it?">Name it?</span> <span class="chip dim">resolved</span>
-</td>
-</tr>
 <tr class="thread-row">
-<td colspan="3">💬 <b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+<td colspan="3">💬 <b>mallory</b>: <span class="excerpt" title="**Careful** &lt;img src=x onerror=alert(1)&gt; [x](javascript:alert(1))
+
+```suggestion
+    let m = n;
+```">**Careful** &lt;img src=x onerror=alert(1)&gt; [x](javascript:alert(1)) ```suggestion let m = n; ```</span>
 </td>
 </tr>
 <tr class="ctx">
@@ -64,12 +60,6 @@ expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
 <td class="num">4</td>
 <td class="code">
 <span class="sign"> </span>    println!(&quot;{n}&quot;);</td>
-</tr>
-<tr class="thread-row">
-<td colspan="3">💬 <b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
-
-It looks dead.">Is `m` used anywhere? It looks dead.</span>
-</td>
 </tr>
 <tr class="ctx">
 <td class="num">4</td>
@@ -82,46 +72,44 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 <div class="dim">Already said on these lines:</div>
 <div class="thread">
 <div class="th">
-<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3-R4" title="On GitHub, at the reviewed commit">src/lib.rs:3-4</a>
-<span class="dim">1 comment</span>
-<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
-</div>
-<ul class="said">
-<li>
-<b>bob</b>
-<div class="md">
-<p>Is <code>m</code> used anywhere?</p>
-<p>It looks dead.</p>
-</div>
-</li>
-</ul>
-<form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
-<input type="hidden" name="csrf" value="<token>">
-<input type="hidden" name="thread" value="t-range">
-<input type="hidden" name="comment" value="t-range-c1">
-<button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
-<button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
-</form>
-</div>
-<div class="thread">
-<div class="th">
 <a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
-<span class="chip dim">outdated</span>
 <span class="dim">1 comment</span>
-<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-md">on GitHub ↗</a>
 </div>
 <ul class="said">
 <li>
-<b>dave</b>
+<b>mallory</b>
 <div class="md">
-<p>Why 2?</p>
+<p>
+<strong>Careful</strong> <span class="md-img dead">🖼 image</span> <a target="_blank" rel="noopener noreferrer nofollow">x</a>
+</p>
+<div class="md-sugg">
+<div class="md-sugg-h">Suggested change</div>
+<table class="diff">
+<tr class="del">
+<td class="code">
+<span class="sign">-</span>
+<span class="sy-source sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> m <span class="sy-keyword sy-operator sy-rust">=</span> n <span class="sy-keyword sy-operator sy-rust">+</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">1</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</td>
+</tr>
+<tr class="add">
+<td class="code">
+<span class="sign">+</span>
+<span class="sy-source sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> m <span class="sy-keyword sy-operator sy-rust">=</span> n<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</td>
+</tr>
+</table>
+</div>
 </div>
 </li>
 </ul>
 <form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
-<input type="hidden" name="thread" value="t-outdated">
-<input type="hidden" name="comment" value="t-outdated-c1">
+<input type="hidden" name="thread" value="t-md">
+<input type="hidden" name="comment" value="t-md-c1">
 <button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
 <button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
 </form>
@@ -129,12 +117,49 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </div>
 <div class="body" data-edit title="click or e to edit">
 <div class="md">
-<p>Why <code>m</code>?</p>
+<p>Rename it:</p>
+<div class="md-sugg">
+<div class="md-sugg-h">Suggested change</div>
+<table class="diff">
+<tr class="del">
+<td class="code">
+<span class="sign">-</span>
+<span class="sy-source sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> m <span class="sy-keyword sy-operator sy-rust">=</span> n <span class="sy-keyword sy-operator sy-rust">+</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">1</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</td>
+</tr>
+<tr class="add">
+<td class="code">
+<span class="sign">+</span>
+<span class="sy-source sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> total <span class="sy-keyword sy-operator sy-rust">=</span> n <span class="sy-keyword sy-operator sy-rust">+</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">1</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</td>
+</tr>
+</table>
+</div>
+<ul>
+<li>
+<input type="checkbox" disabled checked> checked</li>
+</ul>
+<p>
+<span class="md-img" role="button" tabindex="0" data-src="https://img.example.com/g.png" data-alt="graph" title="Load the image from img.example.com">🖼 <span class="md-img-alt">graph</span> <span class="md-img-host">img.example.com</span>
+</span>
+</p>
 </div>
 </div>
 <form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
-<textarea name="body" rows="4">Why `m`?</textarea>
+<textarea name="body" rows="4">Rename it:
+
+```suggestion
+    let total = n + 1;
+```
+
+- [x] checked
+
+![graph](https://img.example.com/g.png)&lt;/div&gt;</textarea>
 <button class="btn save" type="submit">Save</button>
 </form>
 <details class="revise">

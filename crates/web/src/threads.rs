@@ -7,9 +7,10 @@ use sanic_core::{
     pr::{CONVERSATION_THREAD, Comment, PrKey, Thread},
     run::Side,
 };
+use sanic_runner::diff::DiffIndex;
 use sanic_store::DraftRow;
 
-use crate::links::At;
+use crate::{links::At, markdown};
 
 /// How much of a comment's body an excerpt shows.
 const EXCERPT: usize = 160;
@@ -23,6 +24,8 @@ pub struct Existing<'a> {
     pub head: &'a str,
     /// The PR's head as last polled, for links to GitHub.
     pub pr_head: &'a str,
+    /// The run's diff, for the lines a suggestion in a thread replaces.
+    pub diff: Option<&'a DiffIndex>,
 }
 
 impl<'a> Existing<'a> {
@@ -118,27 +121,36 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
                         (rest.len()) @if rest.len() == 1 { " thread doesn't" } @else { " threads don't" }
                         " overlap a draft"
                     }
-                    @for thread in rest { (thread_box(existing.at(), thread)) }
+                    @for thread in rest { (thread_box(existing.at(), existing.diff, thread)) }
                 }
             }
         }
     }
 }
 
-/// A thread in full: where it is, its state, a link, and an excerpt of
-/// each comment.
-pub fn thread_box(at: At<'_>, thread: &Thread) -> Markup {
-    thread_box_with(at, thread, false, &html! {})
+/// A thread in full: where it is, its state, a link, and each comment,
+/// its suggestions against the lines `diff` has.
+pub fn thread_box(at: At<'_>, diff: Option<&DiffIndex>, thread: &Thread) -> Markup {
+    thread_box_with(at, diff, thread, false, &html! {})
 }
 
 /// [`thread_box`], marked `chosen` if a draft posts in it, with `actions`
 /// under its comments.
-pub fn thread_box_with(at: At<'_>, thread: &Thread, chosen: bool, actions: &Markup) -> Markup {
+pub fn thread_box_with(
+    at: At<'_>,
+    diff: Option<&DiffIndex>,
+    thread: &Thread,
+    chosen: bool,
+    actions: &Markup,
+) -> Markup {
+    let cx = markdown::Context::thread(diff, thread, at.reviewed);
     html! {
         div.thread.resolved[thread.resolved].chosen[chosen] {
             (thread_head(at, thread))
             ul.said {
-                @for comment in &thread.comments { li { (said(comment)) } }
+                @for comment in &thread.comments {
+                    li { b { (comment.author) } (markdown::render(&comment.body, &cx)) }
+                }
             }
             (actions)
         }
