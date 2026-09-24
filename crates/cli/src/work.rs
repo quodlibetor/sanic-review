@@ -276,10 +276,9 @@ impl Worker {
             }
             Ok(Some(Reviewed { result, basis })) => {
                 let stored = match (&run.revision, &basis) {
-                    (Some(revision), Some(basis)) => {
-                        self.store()
-                            .finish_revision(run.id, &result, revision.revises, basis)
-                    }
+                    (Some(revision), Some(basis)) => self
+                        .store()
+                        .finish_revision(run.id, &result, revision, basis),
                     _ => self.store().finish_review(run.id, &result),
                 };
                 if stored.is_ok() {
