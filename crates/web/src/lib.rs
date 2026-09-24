@@ -267,6 +267,7 @@ impl Dashboard {
             .route("/drafts/{id}/status", post(pr::set_draft_status))
             .route("/drafts/{id}/thread", post(pr::choose_thread))
             .route("/assets/{file}", get(assets::asset))
+            .route("/favicon.ico", get(assets::favicon_ico))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&self.app),
                 guard::guard,

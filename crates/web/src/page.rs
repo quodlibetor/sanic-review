@@ -85,7 +85,7 @@ pub fn layout_in(
                 meta name="htmx-config"
                     content=r#"{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}"#;
                 title { (title) " · sanic-review" }
-                link rel="stylesheet" href="/assets/style.css";
+                (icon_and_style())
                 // The files view's highlighting.
                 @if matches!(kind, Kind::Pr) { link rel="stylesheet" href="/assets/syntax.css"; }
                 script src="/assets/htmx.min.js" defer {}
@@ -104,6 +104,14 @@ pub fn layout_in(
                 div #notice hidden {}
             }
         }
+    }
+}
+
+/// The icon and stylesheet every page's `head` links.
+fn icon_and_style() -> Markup {
+    html! {
+        link rel="icon" type="image/svg+xml" href="/assets/favicon.svg";
+        link rel="stylesheet" href="/assets/style.css";
     }
 }
 
@@ -180,7 +188,7 @@ pub fn error(status: StatusCode, message: &str) -> Markup {
             head {
                 meta charset="utf-8";
                 title { (status.as_str()) " · sanic-review" }
-                link rel="stylesheet" href="/assets/style.css";
+                (icon_and_style())
             }
             body {
                 header.top { a.home href="/" { "sanic-review" } }
@@ -227,7 +235,7 @@ pub fn elsewhere(target: &str) -> Markup {
             head {
                 meta charset="utf-8";
                 title { "Continue · sanic-review" }
-                link rel="stylesheet" href="/assets/style.css";
+                (icon_and_style())
             }
             body {
                 header.top { a.home href="/" { "sanic-review" } }

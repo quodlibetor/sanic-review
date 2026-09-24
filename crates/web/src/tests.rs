@@ -1096,6 +1096,7 @@ async fn assets_are_embedded() {
         ("htmx.min.js", "text/javascript"),
         ("app.js", "text/javascript"),
         ("style.css", "text/css"),
+        ("favicon.svg", "image/svg+xml"),
     ] {
         let reply = f.get(&format!("/assets/{file}")).await;
         assert_eq!(reply.status, StatusCode::OK);
@@ -1103,6 +1104,10 @@ async fn assets_are_embedded() {
         assert!(!reply.body.is_empty());
     }
     assert_eq!(f.get("/assets/nope.js").await.status, StatusCode::NOT_FOUND);
+    // Browsers that probe for the old icon path get the SVG.
+    let ico = f.get("/favicon.ico").await;
+    assert_eq!(ico.status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(ico.headers[header::LOCATION], "/assets/favicon.svg");
 }
 
 #[tokio::test]

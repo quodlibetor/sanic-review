@@ -9,3 +9,4 @@ Embedded in the binary; nothing is fetched at runtime.
   copy `package/dist/htmx.min.js` and `package/LICENSE` here.
 - `app.js`: the dashboard's keyboard shortcuts.
 - `style.css`: the dashboard's styles.
+- `favicon.svg`: the dashboard's icon, drawn for this project.

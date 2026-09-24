@@ -161,8 +161,8 @@ async fn check(csrf: &Csrf, req: Request) -> Result<Request, &'static str> {
 /// Whether another site sent you to this page, by a link, a redirect or
 /// `window.open`. Such a page is shown only as a link to itself: keys
 /// you're typing on the other site mustn't land on a confirm page, and
-/// merely opening a PR page marks it seen. Scripts and styles are exempt;
-/// they have no effect.
+/// merely opening a PR page marks it seen. Scripts, styles and the icon are
+/// exempt; they have no effect.
 ///
 /// Browsers that send `Sec-Fetch-Site` say where a navigation came from
 /// outright. Without it, a `Referer` from anywhere but the dashboard at
