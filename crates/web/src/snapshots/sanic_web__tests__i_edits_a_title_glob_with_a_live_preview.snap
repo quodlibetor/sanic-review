@@ -147,6 +147,12 @@ expression: "readable(&f, &page.body)"
 </tr>
 <tr>
 <th>
+<kbd>s</kbd>
+</th>
+<td>in the files changed: one column, or old beside new</td>
+</tr>
+<tr>
+<th>
 <kbd>?, Esc</kbd>
 </th>
 <td>show, close this help</td>

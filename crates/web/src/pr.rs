@@ -21,7 +21,7 @@ use tracing::info;
 
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
-    files::{self, View},
+    files::{self, Layout, View},
     index::{Overview, archive_form, owed_status, why},
     links,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
@@ -35,6 +35,8 @@ pub struct PageQuery {
     run: Option<i64>,
     /// `files` for the files view; see [`View`].
     view: Option<String>,
+    /// `split` for the files view's side-by-side layout; see [`Layout`].
+    layout: Option<String>,
 }
 
 pub async fn page(
@@ -100,6 +102,7 @@ pub async fn page(
     let views = Views {
         shown: View::parse(query.view.as_deref()),
         run: query.run,
+        layout: Layout::parse(query.layout.as_deref()),
     };
     let header = Header {
         pr: &pr,
@@ -310,12 +313,24 @@ pub fn moved_on(reviewed: &str, head: &str) -> Markup {
 struct Views {
     shown: View,
     run: Option<i64>,
+    layout: Layout,
 }
 
 impl Views {
     fn href(&self, key: &PrKey, view: View) -> String {
+        self.href_with(key, view, self.layout)
+    }
+
+    /// The page for `view`, laid out as `layout` when that's the files
+    /// view's split.
+    fn href_with(&self, key: &PrKey, view: View, layout: Layout) -> String {
         let run = self.run.map(|r| format!("run={r}&")).unwrap_or_default();
-        format!("{}?{run}view={}", pr_href(key), view.as_str())
+        let layout = match (view, layout) {
+            (View::Files, Layout::Split) => "&layout=split",
+            (View::Files, Layout::Unified) if self.layout == Layout::Split => "&layout=unified",
+            _ => "",
+        };
+        format!("{}?{run}view={}{layout}", pr_href(key), view.as_str())
     }
 
     /// The two views, as tabs, with how many files the diff has.
@@ -415,6 +430,8 @@ fn drafts_section(
                     diff,
                     drafts,
                     existing,
+                    layout: views.layout,
+                    layout_href: &|layout| views.href_with(&pr.key, View::Files, layout),
                 }))
             }
             _ => {

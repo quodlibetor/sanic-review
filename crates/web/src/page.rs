@@ -56,6 +56,7 @@ const KEYS: &[(&str, &str)] = &[
         "f",
         "on a PR page: the drafts, or the files changed with the drafts in them",
     ),
+    ("s", "in the files changed: one column, or old beside new"),
     ("?, Esc", "show, close this help"),
 ];
 

@@ -367,6 +367,13 @@
         other.click();
         break;
       }
+      case "s": {
+        // The files view's other layout.
+        const other = page === "pr" && document.querySelector("#layouts a[data-layout]:not(.cur)");
+        if (!other) return;
+        other.click();
+        break;
+      }
       case "i": {
         const target = subject();
         const href = target && target.dataset.ignore;
@@ -718,15 +725,84 @@
       // Private windows may refuse; it's only a convenience.
     }
   }
+  // The files view's layout, remembered the same way.
+  const LAYOUT_KEY = "sanic-review.layout";
   if (page === "pr") {
     const params = new URLSearchParams(window.location.search);
-    const want = remembered(VIEW_KEY);
-    const link = want && !params.has("view") && document.querySelector('#views a[data-view="' + want + '"]:not(.cur)');
-    if (link) window.location.replace(link.href);
+    const want = new URLSearchParams(params);
+    if (!params.has("view") && remembered(VIEW_KEY) === "files") want.set("view", "files");
+    if (want.get("view") === "files" && !params.has("layout") && remembered(LAYOUT_KEY) === "split") {
+      want.set("layout", "split");
+    }
+    // Only a page with both views has a view to pick.
+    if (document.getElementById("views") && want.toString() !== params.toString()) {
+      window.location.replace(window.location.pathname + "?" + want.toString() + window.location.hash);
+    }
     document.addEventListener("click", function (e) {
       const tab = e.target.closest("#views a[data-view]");
       if (tab) remember(VIEW_KEY, tab.dataset.view);
+      const layout = e.target.closest("#layouts a[data-layout]");
+      if (layout) remember(LAYOUT_KEY, layout.dataset.layout);
     });
+  }
+
+  // The files view's files: each folds, and ticking one viewed folds it
+  // and keeps it folded next time, for this PR at this head.
+  const files = page === "pr" && document.querySelector("#drafts.files");
+  if (files) {
+    const viewedKey = "sanic-review.viewed:" + files.dataset.viewed;
+    const viewed = new Set();
+    try {
+      JSON.parse(remembered(viewedKey) || "[]").forEach(function (path) {
+        viewed.add(path);
+      });
+    } catch (err) {
+      // Something else wrote it; start over.
+    }
+    const fold = function (file, folded) {
+      file.classList.toggle("folded", folded);
+      const button = file.querySelector(".fold");
+      if (button) button.setAttribute("aria-expanded", String(!folded));
+    };
+    const treeLink = function (file) {
+      return files.querySelector('.tree a[href="#' + file.id + '"]');
+    };
+    files.querySelectorAll(".file").forEach(function (file) {
+      const done = viewed.has(file.dataset.path);
+      const box = file.querySelector(".viewed input");
+      if (box) box.checked = done;
+      const link = treeLink(file);
+      if (link) link.classList.toggle("done", done);
+      if (done) fold(file, true);
+    });
+    files.addEventListener("click", function (e) {
+      const button = e.target.closest(".file .fold");
+      if (button) {
+        const file = button.closest(".file");
+        fold(file, !file.classList.contains("folded"));
+        draw(false);
+        return;
+      }
+      // Jumping to a folded file unfolds it.
+      const link = e.target.closest(".tree a[href^='#']");
+      const target = link && document.getElementById(link.getAttribute("href").slice(1));
+      if (target) fold(target, false);
+    });
+    files.addEventListener("change", function (e) {
+      const box = e.target.closest(".file .viewed input");
+      if (!box) return;
+      const file = box.closest(".file");
+      if (box.checked) viewed.add(file.dataset.path);
+      else viewed.delete(file.dataset.path);
+      remember(viewedKey, JSON.stringify(Array.from(viewed)));
+      const link = treeLink(file);
+      if (link) link.classList.toggle("done", box.checked);
+      fold(file, box.checked);
+      draw(false);
+    });
+    // On a narrow window the file list starts folded, above the files.
+    const tree = files.querySelector(".tree");
+    if (tree && window.matchMedia("(max-width: 1000px)").matches) tree.open = false;
   }
 
   function retally() {

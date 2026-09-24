@@ -3131,7 +3131,7 @@ async fn the_pr_page_links_each_view_keeping_the_run() {
         )),
         "{tabs}"
     );
-    assert!(page.body.contains(r#"<section class="files" id="drafts">"#));
+    assert!(page.body.contains(r#"<section class="files" id="drafts""#));
     // Anything else is the drafts.
     let page = f.get("/pr/org/repo/7?view=nonsense").await;
     assert!(page.body.contains(r#"<section id="drafts">"#));
@@ -3170,7 +3170,7 @@ async fn a_big_file_with_nothing_on_it_loads_only_when_asked() {
     let view = files_view(&page.body);
     assert!(
         view.contains(&format!(
-            r#"hx-get="/pr/org/repo/7/runs/{}/file?path=big.txt""#,
+            r#"hx-get="/pr/org/repo/7/runs/{}/file?path=big.txt&amp;layout=unified""#,
             f.run
         )),
         "{view}"
@@ -3182,4 +3182,50 @@ async fn a_big_file_with_nothing_on_it_loads_only_when_asked() {
         .get(&format!("/pr/org/repo/7/runs/{}/file?path=big.txt", f.run))
         .await;
     assert!(file.body.contains("line 250"), "{}", file.body);
+}
+
+#[tokio::test]
+async fn the_split_layout_puts_the_old_lines_beside_the_new() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    let page = f.get("/pr/org/repo/7?view=files&layout=split").await;
+    let body = &page.body;
+    let table = &body[body.find("<table class=\"d split\">").unwrap()..];
+    // Its end: the draft's own excerpt is a table too, but not the last
+    // thing in its box.
+    let table = &table[..table.find("</table></div>").unwrap() + "</table>".len()];
+    insta::assert_snapshot!(readable(&f, table));
+    // Its links keep the layout, and offer the other.
+    let head = &body[body.find(r#"id="layouts""#).unwrap()..];
+    let head = &head[..head.find("</span>").unwrap()];
+    assert!(
+        head.contains(
+            r#"<a href="/pr/org/repo/7?view=files&amp;layout=unified" data-layout="unified">"#
+        ),
+        "{head}"
+    );
+    assert!(body.contains(r#"href="/pr/org/repo/7?view=drafts" data-view="drafts""#));
+    // A file loaded on its own is laid out the same.
+    let file = f
+        .get(&format!(
+            "/pr/org/repo/7/runs/{}/file?path=src/lib.rs&layout=split",
+            f.run
+        ))
+        .await;
+    assert!(
+        file.body.starts_with("<table class=\"d split\">"),
+        "{}",
+        file.body
+    );
+}
+
+#[tokio::test]
+async fn the_file_list_marks_files_with_drafts_and_threads() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    let body = &page.body;
+    let tree = &body[body.find(r#"<details class="tree" open>"#).unwrap()..];
+    let tree = &tree[..tree.find("</details>").unwrap() + "</details>".len()];
+    insta::assert_snapshot!(readable(&f, tree));
 }
