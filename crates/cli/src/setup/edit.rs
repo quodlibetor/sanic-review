@@ -8,8 +8,9 @@ use sanic_core::{
     config::{contract_path, expand_path},
     pr::TeamRef,
 };
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, RawString, Table, Value};
 
+use super::skills::{Places, ProfileExtras};
 use crate::config_edit::{new_table, set_value};
 
 /// What the user picked. Each list holds every option offered, with whether
@@ -95,6 +96,144 @@ pub fn apply(doc: &mut DocumentMut, sel: &Selections, base: &Path) -> Result<()>
     }
     drop_emptied_profiles(doc);
     Ok(())
+}
+
+/// Adds and removes each profile's skills and instructions as `extras`
+/// chose, writing paths under home with `~/`. Entries that weren't offered
+/// are kept, and a path already present isn't added again. `base` is the
+/// config file's directory.
+pub fn apply_extras(
+    doc: &mut DocumentMut,
+    extras: &[ProfileExtras],
+    base: &Path,
+    places: &Places,
+) -> Result<()> {
+    for extra in extras {
+        let name = &extra.profile;
+        let Some(profile) = doc
+            .get_mut("profile")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|profiles| profiles.get_mut(name))
+            .and_then(Item::as_table_like_mut)
+        else {
+            bail!("there's no `[profile.{name}]` in the config");
+        };
+        for (key, chosen) in [
+            ("skills", &extra.skills),
+            ("instructions", &extra.instructions),
+        ] {
+            let adding = chosen.iter().any(|(_, on)| *on);
+            if !adding && profile.get(key).is_none() {
+                continue;
+            }
+            let item = profile
+                .entry(key)
+                .or_insert(Item::Value(Value::Array(Array::new())));
+            let Some(list) = item.as_array_mut() else {
+                bail!("`profile.{name}.{key}` in the config is not a list");
+            };
+            let selected = |p: &Path| chosen.iter().find(|(c, _)| c == p).map(|(_, on)| *on);
+            let path = |entry: &Value| places.expand(entry.as_str()?, base);
+            remove_keeping_comments(list, |entry| {
+                path(entry).is_some_and(|p| selected(&p) == Some(false))
+            });
+            let mut present: Vec<PathBuf> = list.iter().filter_map(path).collect();
+            for (path, on) in chosen {
+                if *on && !present.contains(path) {
+                    push_on_own_line(list, places.contract(path).into());
+                    present.push(path.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Removes the entries `drop` picks, keeping the comments around them: a
+/// comment after an entry's comma is stored with the next entry, so it's
+/// handed on to whichever entry follows a removed one, or to the end of the
+/// list. Only a comment on the removed entry's own line goes with it.
+fn remove_keeping_comments(list: &mut Array, mut drop: impl FnMut(&Value) -> bool) {
+    let mut i = 0;
+    while let Some(entry) = list.get(i) {
+        if !drop(entry) {
+            i += 1;
+            continue;
+        }
+        let removed = list.remove(i);
+        let before = raw(removed.decor().prefix());
+        if let Some(next) = list.get_mut(i) {
+            let after = raw(next.decor().prefix());
+            // On the removed entry's line, `next` takes its place.
+            let prefix = match after.find('\n') {
+                Some(line_end) => format!("{}{}", up_to_last_line(before), &after[line_end..]),
+                None => before.to_owned(),
+            };
+            next.decor_mut().set_prefix(prefix);
+            continue;
+        }
+        // The last entry: what followed it is its suffix, and after any
+        // trailing comma, the list's trailing space.
+        let after = format!(
+            "{}{}",
+            raw(removed.decor().suffix()),
+            raw(Some(list.trailing()))
+        );
+        let trailing = match after.find('\n') {
+            Some(line_end) => format!("{}{}", up_to_last_line(before), &after[line_end..]),
+            None => after,
+        };
+        if list.is_empty() && trailing.trim().is_empty() {
+            // Emptied with nothing to keep: `[]`, so entries added later
+            // don't start on the `[` line with the `]` on its own.
+            list.set_trailing("");
+            list.set_trailing_comma(false);
+        } else {
+            list.set_trailing(trailing);
+        }
+    }
+}
+
+/// Appends `value`, on a line of its own when the list's last entry is.
+/// Without a trailing comma, what follows the last entry is its suffix,
+/// which is handed on so the new comma goes straight after it.
+fn push_on_own_line(list: &mut Array, mut value: Value) {
+    let trailing_comma = list.trailing_comma();
+    let Some(final_entry) = list.iter_mut().last() else {
+        list.push(value);
+        return;
+    };
+    let before = raw(final_entry.decor().prefix());
+    let indent = before.rfind('\n').map(|end| before[end..].to_owned());
+    let tail = if trailing_comma {
+        String::new()
+    } else {
+        let tail = raw(final_entry.decor().suffix()).to_owned();
+        final_entry.decor_mut().set_suffix("");
+        tail
+    };
+    // A comment after the last entry stays on its line; the space before
+    // the `]` moves after the new entry.
+    let (comment, close) = tail.split_at(tail.rfind('\n').unwrap_or(0));
+    let prefix = match indent {
+        Some(indent) => format!("{comment}{indent}"),
+        None if comment.trim().is_empty() => " ".into(),
+        None => format!("{comment}\n"),
+    };
+    value.decor_mut().set_prefix(prefix);
+    value.decor_mut().set_suffix(close);
+    list.push_formatted(value);
+}
+
+/// A decor's text, blank when unset.
+fn raw(text: Option<&RawString>) -> &str {
+    text.and_then(RawString::as_str).unwrap_or_default()
+}
+
+/// `text` up to its last line break: what precedes an entry on its own
+/// line, without that line's indent.
+fn up_to_last_line(text: &str) -> &str {
+    text.rfind('\n').map_or("", |end| &text[..end])
 }
 
 /// `["*"]` plus an exclusion per deselected team, so teams you join later
@@ -302,6 +441,138 @@ repos = [{ github = "gone-org" }]
         let mut doc: DocumentMut = "runner = \"x\"\n".parse().unwrap();
         let err = apply(&mut doc, &set(Some("n")), Path::new(BASE)).unwrap_err();
         assert!(err.to_string().contains("not a table"), "{err}");
+    }
+
+    #[test]
+    fn skills_and_instructions_are_added_removed_and_kept() {
+        let places = Places {
+            cwd: "/cwd".into(),
+            home: Some("/home/u".into()),
+            user_skills: None,
+        };
+        let text = r#"# top comment
+[profile.vuln]
+# Skills for vuln reviews.
+skills = [
+  "~/s/keep",   # mine
+  "~/s/drop",
+  "/abs/untouched",
+]
+repos = ["/x"]
+
+[profile.bare]
+repos = ["/y"] # only repos
+"#;
+        let extras = [
+            ProfileExtras {
+                profile: "vuln".into(),
+                skills: vec![
+                    ("/home/u/s/keep".into(), true),
+                    ("/home/u/s/drop".into(), false),
+                    ("/home/u/s/new".into(), true),
+                    ("/home/u/s/new".into(), true),
+                    ("/elsewhere/unpicked".into(), false),
+                ],
+                instructions: vec![("/home/u/vuln.md".into(), true)],
+            },
+            ProfileExtras {
+                profile: "bare".into(),
+                skills: vec![("/home/u/s/unpicked".into(), false)],
+                instructions: vec![("/etc/review.md".into(), true)],
+            },
+        ];
+        let mut doc: DocumentMut = text.parse().unwrap();
+        apply_extras(&mut doc, &extras, Path::new(BASE), &places).unwrap();
+        assert_eq!(
+            doc.to_string(),
+            r#"# top comment
+[profile.vuln]
+# Skills for vuln reviews.
+skills = [
+  "~/s/keep",   # mine
+  "/abs/untouched",
+  "~/s/new",
+]
+repos = ["/x"]
+instructions = ["~/vuln.md"]
+
+[profile.bare]
+repos = ["/y"] # only repos
+instructions = ["/etc/review.md"]
+"#
+        );
+        // Applied again, nothing changes.
+        let once = doc.to_string();
+        apply_extras(&mut doc, &extras, Path::new(BASE), &places).unwrap();
+        assert_eq!(doc.to_string(), once);
+
+        let missing = [ProfileExtras {
+            profile: "nope".into(),
+            ..ProfileExtras::default()
+        }];
+        let err = apply_extras(&mut doc, &missing, Path::new(BASE), &places).unwrap_err();
+        assert!(err.to_string().contains("`[profile.nope]`"), "{err}");
+    }
+
+    #[test]
+    fn removed_entries_hand_on_the_comment_before_them() {
+        let edit = |text: &str, add: Option<&str>| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            let list = doc["l"].as_array_mut().unwrap();
+            remove_keeping_comments(list, |v| v.as_str() == Some("x"));
+            if let Some(add) = add {
+                push_on_own_line(list, add.into());
+            }
+            doc.to_string()
+        };
+        assert_eq!(
+            edit("l = [\n  \"a\", # on a\n  \"x\", # on x\n]\n", None),
+            "l = [\n  \"a\", # on a\n]\n"
+        );
+        assert_eq!(
+            edit("l = [\n  \"x\",\n  \"b\",\n]\n", Some("c")),
+            "l = [\n  \"b\",\n  \"c\",\n]\n"
+        );
+        assert_eq!(
+            edit("l = [\"x\", \"b\"]\n", Some("c")),
+            "l = [\"b\", \"c\"]\n"
+        );
+        assert_eq!(edit("l = [\"x\"]\n", Some("c")), "l = [\"c\"]\n");
+        assert_eq!(edit("l = [ \"a\", \"x\" ]\n", None), "l = [ \"a\" ]\n");
+        // Comment lines before the next entry, or before the `]`, stay.
+        assert_eq!(
+            edit("l = [\n  \"x\",\n  # the good one\n  \"b\",\n]\n", None),
+            "l = [\n  # the good one\n  \"b\",\n]\n"
+        );
+        assert_eq!(
+            edit("l = [\n  \"a\",\n  \"x\",\n  # more to come\n]\n", None),
+            "l = [\n  \"a\",\n  # more to come\n]\n"
+        );
+        // An emptied list is `[]`, so what's added isn't split around it.
+        assert_eq!(edit("l = [\n  \"x\",\n]\n", None), "l = []\n");
+        assert_eq!(edit("l = [\n  \"x\",\n]\n", Some("c")), "l = [\"c\"]\n");
+    }
+
+    #[test]
+    fn entries_are_appended_after_a_last_entry_without_a_comma() {
+        let push = |text: &str| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            push_on_own_line(doc["l"].as_array_mut().unwrap(), "c".into());
+            doc.to_string()
+        };
+        assert_eq!(
+            push("l = [\n  \"a\",\n  \"b\"\n]\n"),
+            "l = [\n  \"a\",\n  \"b\",\n  \"c\"\n]\n"
+        );
+        assert_eq!(
+            push("l = [\n  \"a\",\n  \"b\"  # last\n]\n"),
+            "l = [\n  \"a\",\n  \"b\",  # last\n  \"c\"\n]\n"
+        );
+        assert_eq!(
+            push("l = [ \"a\", \"b\" ]\n"),
+            "l = [ \"a\", \"b\", \"c\" ]\n"
+        );
+        assert_eq!(push("l = []\n"), "l = [\"c\"]\n");
     }
 
     #[test]

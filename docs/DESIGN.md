@@ -176,6 +176,23 @@ uses its own bare mirror and never touches your checkout.
   Claude settings (`settings.json` in `$CLAUDE_CONFIG_DIR`, else
   `~/.claude`), and the `ANTHROPIC_*MODEL` variables from that file's `env`
   block and your environment; any other id is accepted too.
+- **Skills and instructions:** for each profile, including ones just
+  created, asks whether to change its `skills` and `instructions`. Each list
+  offers the profile's current entries, pre-selected, so deselecting one
+  removes it; then what's found for it. Skills are the `SKILL.md`
+  directories under `.claude/skills` in the profile's local checkouts and
+  in your user-level Claude directory, listed with the `name` and
+  `description` from their frontmatter; skills already covered by an entry,
+  or by an entry for their parent directory, aren't offered again.
+  Instructions are `CLAUDE.md`, `AGENTS.md` and `.claude/CLAUDE.md` in
+  those checkouts. A path-scoped checkout is searched first in the
+  directories its globs name up to the first wildcard, and their parents,
+  nearest first, then at its root. A chosen skill is written as its own
+  directory, so the agent can't read the other skills beside it. Then you
+  can type more paths, with tab completion and `~`, until a blank answer:
+  a skill path must be a directory holding a `SKILL.md`, itself or in a
+  subdirectory, and an instruction path a file. Paths are written with
+  `~/` when under home, and one already listed isn't added again.
 
 Current config values are pre-selected. Entries setup doesn't manage
 (`owner/name`, path-scoped or remote-override entries) are never removed.

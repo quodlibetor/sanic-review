@@ -493,6 +493,15 @@ impl PathContext<'_> {
 /// Expands a config path: `~` is the home directory, and relative paths
 /// resolve against `base` (the config file's directory).
 pub fn expand_path(raw: &str, base: &Path) -> Result<PathBuf> {
+    expand_path_in(raw, base, std::env::home_dir().as_deref())
+}
+
+/// [`expand_path`] with `home` as the home directory, if it's known.
+pub fn expand_path_in(raw: &str, base: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    let home = || {
+        home.map(Path::to_path_buf)
+            .ok_or_else(|| eyre!("cannot determine the home directory"))
+    };
     let path = match raw.strip_prefix("~/") {
         Some(rest) => home()?.join(rest),
         None if raw == "~" => home()?,
@@ -509,10 +518,13 @@ pub fn expand_path(raw: &str, base: &Path) -> Result<PathBuf> {
 /// directory are written with `~/`.
 #[must_use]
 pub fn contract_path(path: &Path) -> String {
-    match home()
-        .ok()
-        .and_then(|h| path.strip_prefix(h).ok().map(Path::to_path_buf))
-    {
+    contract_path_in(path, home().ok().as_deref())
+}
+
+/// [`contract_path`] with `home` as the home directory, if it's known.
+#[must_use]
+pub fn contract_path_in(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok().map(Path::to_path_buf)) {
         Some(rest) if rest.as_os_str().is_empty() => "~".into(),
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),

@@ -27,13 +27,18 @@ pub fn read_claude_settings() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// `settings.json` in `$CLAUDE_CONFIG_DIR`, falling back to `~/.claude`.
+/// `settings.json` in [`claude_dir`].
 fn settings_path(env: impl Fn(&str) -> Option<String>, home: Option<&Path>) -> Option<PathBuf> {
-    let dir = env("CLAUDE_CONFIG_DIR")
+    Some(claude_dir(env, home)?.join("settings.json"))
+}
+
+/// Your user-level Claude directory: `$CLAUDE_CONFIG_DIR`, falling back to
+/// `~/.claude`.
+pub fn claude_dir(env: impl Fn(&str) -> Option<String>, home: Option<&Path>) -> Option<PathBuf> {
+    env("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| home.map(|h| h.join(".claude")))?;
-    Some(dir.join("settings.json"))
+        .or_else(|| home.map(|h| h.join(".claude")))
 }
 
 /// [`AUTO_MODEL`], then `current`, the aliases, and the models named in the
