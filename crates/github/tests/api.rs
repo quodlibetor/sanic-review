@@ -15,8 +15,8 @@ use sanic_core::{
     repo::RepoName,
 };
 use sanic_github::{
-    ApiError, Client, NewComment, NewReaction, NewReply, NewReview, NotificationPoll, ReviewEvent,
-    ReviewStatus, Token,
+    ApiError, Client, NewComment, NewReaction, NewReply, NewReview, NotificationPoll,
+    PostedComment, ReviewEvent, ReviewStatus, Token,
 };
 use serde_json::{Value, json};
 use wiremock::{
@@ -754,4 +754,33 @@ async fn your_thumbs_up_is_found_among_the_comments_reactions() {
     };
     assert!(has("PRRC_1").await);
     assert!(!has("PRRC_2").await);
+}
+
+#[tokio::test]
+async fn a_posted_reviews_comments_leave_out_its_replies() {
+    let server = MockServer::start().await;
+    let comment = |id: &str, body: &str, reply_to: Value| json!({ "id": id, "path": "src/lib.rs", "body": body, "replyTo": reply_to });
+    mutation(
+        "PullRequestReview { comments",
+        &json!({ "review": "PRR_5" }),
+    )
+    .respond_with(ok(&json!({ "node": { "comments": { "nodes": [
+            comment("PRRC_1", "Why `m`?", Value::Null),
+            comment("PRRC_2", "Agreed.", json!({ "id": "PRRC_0" })),
+        ] } } })))
+    .expect(1)
+    .mount(&server)
+    .await;
+    let comments = client(&server)
+        .review_comments(&key("org/repo", 7), "PRR_5")
+        .await
+        .unwrap();
+    assert_eq!(
+        comments,
+        [PostedComment {
+            id: "PRRC_1".into(),
+            path: "src/lib.rs".into(),
+            body: "Why `m`?".into(),
+        }]
+    );
 }

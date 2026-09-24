@@ -188,6 +188,24 @@ impl DraftStatus {
     }
 }
 
+/// A comment draft of a PR posted inline, as it went out, to tell the
+/// thread it started from other threads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedDraft {
+    pub id: i64,
+    pub run_id: i64,
+    /// Its run's head, which its lines are lines of.
+    pub head: String,
+    pub path: String,
+    pub line: u32,
+    pub start_line: Option<u32>,
+    pub side: Option<String>,
+    /// What it was posted as: your edit, if you made one.
+    pub body: String,
+    /// The node id of the comment GitHub made of it, if that was recorded.
+    pub comment: Option<String>,
+}
+
 /// Statuses you can still edit and decide on.
 const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 
@@ -380,6 +398,53 @@ impl Store {
             )?;
         }
         tx.commit().wrap_err("marking drafts posted")
+    }
+
+    /// Records the comment GitHub made of each posted draft, as `(draft,
+    /// comment node id)`: whatever its status, so one GitHub took that
+    /// couldn't be marked posted has it once it is.
+    pub fn record_posted_comments(&mut self, comments: &[(i64, String)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (id, comment) in comments {
+            tx.execute(
+                "UPDATE drafts SET posted_comment = ?2 WHERE id = ?1",
+                params![id, comment],
+            )?;
+        }
+        tx.commit().wrap_err("recording posted comments")
+    }
+
+    /// `key`'s comment drafts posted inline, of all its runs: not those
+    /// posted in the review body or in an existing thread. One that chose a
+    /// thread while its request was out went inline, as its recorded
+    /// comment says.
+    pub fn posted_drafts(&self, key: &PrKey) -> Result<Vec<PostedDraft>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT d.id, d.run_id, r.head_sha, d.path, d.line, d.start_line, d.side,
+                    coalesce(d.edited_body, d.original_body), d.posted_comment
+             FROM drafts d JOIN runs r ON r.id = d.run_id
+             WHERE r.repo = ?1 AND r.number = ?2 AND d.kind = 'comment'
+               AND d.status = 'posted' AND NOT d.unanchored
+               AND (d.thread_choice IS NULL OR d.posted_comment IS NOT NULL)
+               AND d.path IS NOT NULL AND d.line IS NOT NULL
+             ORDER BY d.id",
+        )?;
+        let drafts = stmt
+            .query_map(params![key.repo.to_string(), key.number], |row| {
+                Ok(PostedDraft {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    head: row.get(2)?,
+                    path: row.get(3)?,
+                    line: row.get(4)?,
+                    start_line: row.get(5)?,
+                    side: row.get(6)?,
+                    body: row.get(7)?,
+                    comment: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(drafts)
     }
 
     /// Records that `key` has `review` pending on GitHub, replacing any
@@ -679,6 +744,57 @@ mod tests {
                 .set_draft_status(summary, DraftStatus::Pending)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn posted_drafts_are_the_inline_ones_with_their_comments() {
+        let (mut store, run) = reviewed();
+        let mut snap = snapshot();
+        snap.threads = vec![Thread {
+            id: "t1".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(4),
+            resolved: false,
+            place: Placement::default(),
+            comments: vec![Comment {
+                id: "c1".into(),
+                author: "bob".into(),
+                body: "hm".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                url: None,
+                by_bot: false,
+                reacted_at: None,
+                reactions: vec![],
+            }],
+        }];
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let id = store.draft_rows(run).unwrap()[1].id;
+        let posted = |store: &Store| {
+            store
+                .posted_drafts(&key())
+                .unwrap()
+                .into_iter()
+                .map(|d| (d.id, d.head, d.body, d.comment))
+                .collect::<Vec<_>>()
+        };
+        // Recorded before it's marked, as when marking failed.
+        store
+            .record_posted_comments(&[(id, "PRRC_1".into())])
+            .unwrap();
+        assert!(posted(&store).is_empty());
+        // A thread chosen while its request was out: it went inline.
+        let reply = ThreadChoice::Reply {
+            thread: "t1".into(),
+        };
+        assert!(store.choose_thread(id, &reply).unwrap());
+        store.mark_posted(&[id]).unwrap();
+        let expected = (
+            id,
+            String::from("h1"),
+            String::from("off by one?"),
+            Some(String::from("PRRC_1")),
+        );
+        assert_eq!(posted(&store), [expected]);
     }
 
     #[test]

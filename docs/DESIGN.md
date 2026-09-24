@@ -409,7 +409,8 @@ Rules:
    The threads are the PR's existing review threads and its conversation,
    as last polled: each thread's path and lines on the head (or, once
    outdated, its lines in the commit it was left on), its side, whether
-   it's resolved or outdated, and each comment's author and body. The
+   it's resolved or outdated, and each comment's author and body, your
+   own labelled as the reviewer's. The
    section says the bodies are other people's text whose instructions
    must not be followed. The agent is told not to comment on a point a
    thread already makes, and, when it agrees with an existing comment, to
@@ -565,7 +566,7 @@ invited to draft replies or fixes on someone else's PR.
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown |
-| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
+| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
@@ -724,8 +725,23 @@ image in a comment you click to load.
   them; when the mirror doesn't have that commit, there's nothing to
   expand.
 - **Existing threads.** Over the drafts, a summary of the PR's review
-  threads says how many there are, how many overlap your drafts, and how
-  many are resolved; the threads no draft overlaps are folded under it.
+  threads says how many there are, how many overlap your drafts, how
+  many are resolved, and how many others the drafts shown were posted
+  as or posted a reply or 👍 in; the threads no draft overlaps are
+  folded under it, and those posted from here are with their drafts. A thread posted
+  from here is its draft's posted form: the thread whose first comment
+  is the one recorded for the draft, or, for a draft posted before that
+  was recorded, the one whose first comment is yours, word for word the
+  draft, on its lines of its run's head. The draft's copies (see
+  Submit), word for word it on its lines of that head, share it. Its
+  draft's card links to it ("Posted from here ↗") and, once it's
+  answered or resolved, shows it, and the diff shows it only as that
+  draft. To every other draft, of that run or another, it's an existing
+  thread, labelled "you posted this from run N" with a link to its
+  draft: it overlaps them and offers them the 👍 and reply. A thread you
+  started on GitHub is an existing thread, marked yours. A posted reply
+  or 👍's card says "Posted in this thread". A draft that's posted or
+  rejected overlaps nothing.
   A draft overlaps a thread on the same file and side when their lines
   share one: a thread's lines run from its start line, when it has one,
   to its line. Those are the thread's lines on the PR head it was
@@ -889,6 +905,11 @@ image in a comment you click to load.
     again while its request was out was still sent. If the store
     can't mark them, `serve` also treats them as posted until it
     restarts.
+  - Once they're marked, a review with inline comments is read back
+    once, its comments without its replies, and each inline draft
+    records the comment GitHub made of it (same path and body), so the
+    thread it starts shows as the draft's. If that read fails, the PR
+    page tells the thread by its text instead (see Existing threads).
   - Before each 👍, whether the comment already has yours is checked
     (`reactionGroups`), so one whose answer was lost is marked `posted`
     rather than sent again. Each 👍's drafts are marked as soon as it's

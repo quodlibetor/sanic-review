@@ -19,8 +19,8 @@ use sanic_core::{
     run::Side,
 };
 use sanic_github::{
-    ApiError, NewComment, NewReaction, NewReply, NewReview, PostError, ReviewEvent, ReviewStatus,
-    Step, find_review_step, review_state_step,
+    ApiError, CreatedReview, NewComment, NewReaction, NewReply, NewReview, PostError, ReviewEvent,
+    ReviewStatus, Step, find_review_step, review_state_step,
 };
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, OnGithub, PendingReview, PrPage, ReviewRun, SentReview, ThreadChoice};
@@ -66,6 +66,8 @@ pub struct Built {
     pub reactions: Vec<Reaction>,
     /// Everything that's marked posted once GitHub has the review.
     pub included: Vec<i64>,
+    /// The drafts the review's inline comments are, in order.
+    pub inline: Vec<i64>,
     /// The included drafts' bodies, as they go out, by draft.
     pub bodies: Vec<(i64, String)>,
     /// Accepted comments GitHub won't take inline, posted in the body.
@@ -179,6 +181,7 @@ pub fn build(
     let mut sections = Vec::new();
     let mut included = Vec::new();
     let mut comments = Vec::new();
+    let mut inline_drafts = Vec::new();
     let mut replies = Vec::new();
     let mut reactions: Vec<Reaction> = Vec::new();
     let mut in_body = 0;
@@ -197,6 +200,7 @@ pub fn build(
         included.push(draft.id);
         if let Some(comment) = inline(draft) {
             comments.push(comment);
+            inline_drafts.push(draft.id);
         } else {
             let anchor = pr::anchor(draft);
             let heading = match blob_link(draft, &run.head_sha) {
@@ -246,6 +250,7 @@ pub fn build(
         replies,
         reactions,
         included,
+        inline: inline_drafts,
         in_body,
         unthreaded: accepted().filter(|d| d.kind == "reply").count(),
         pending: drafts
@@ -794,7 +799,7 @@ fn readable_review(at: links::At<'_>, diff: Option<&DiffIndex>, built: &Built) -
         h2.sec { "👍 on existing comments " span.dim { (built.reactions.len()) } }
         @for reaction in &built.reactions {
             div.rv {
-                (threads::thread_head(at, &reaction.thread))
+                (threads::thread_head(at, &reaction.thread, threads::Mine::Theirs))
                 div { "👍 on " (threads::said(&reaction.comment)) }
                 div.dim {
                     "in place of "
@@ -867,14 +872,15 @@ pub async fn submit(
     let (mut copies, mut copies_marked) = (Vec::new(), true);
     if let Some(review) = &built.review {
         match post_review(&app, key, path.run, review, &built).await {
-            Ok(review) => {
-                info!(url = %key.url(), review = %review, "review posted");
+            Ok(created) => {
+                info!(url = %key.url(), review = %created.html_url, "review posted");
                 posted_before.insert(sent.clone());
                 let failed;
                 (copies, failed) = mark_review(&app, key, path.run, &built);
                 copies_marked = failed.is_none();
                 marking.extend(failed);
-                posted = Some(review);
+                link_comments(&app, key, &created.node_id, &built).await;
+                posted = Some(created.html_url);
             }
             Err(failure) => {
                 let content = review_failed(&pr, &built, &failure, &back);
@@ -1183,7 +1189,39 @@ fn copies_of(
 /// may be dated and still be it, for GitHub's clock being behind ours.
 const CLOCK_SKEW: Duration = Duration::from_mins(10);
 
-/// Posts `review` with `built`'s replies, returning its page. The record
+/// Records the comment GitHub made of each of `built`'s inline drafts,
+/// which review `node_id` posted, so the thread it started shows as the
+/// draft's. It's one request; if it fails, the PR page tells your
+/// threads from the drafts by their text instead.
+async fn link_comments(app: &App, key: &PrKey, node_id: &str, built: &Built) {
+    let Some(review) = built.review.as_ref().filter(|r| !r.comments.is_empty()) else {
+        return;
+    };
+    let mut found = match app.github.review_comments(key, node_id).await {
+        Ok(found) => found,
+        Err(err) => {
+            warn!(url = %key.url(), "listing the posted review's comments failed: {err}");
+            return;
+        }
+    };
+    let linked: Vec<(i64, String)> = review
+        .comments
+        .iter()
+        .zip(&built.inline)
+        .filter_map(|(sent, &draft)| {
+            // In order, so drafts alike get GitHub's comments as sent.
+            let at = found
+                .iter()
+                .position(|c| c.path == sent.path && c.body == sent.body)?;
+            Some((draft, found.remove(at).id))
+        })
+        .collect();
+    if let Err(err) = app.store().record_posted_comments(&linked) {
+        warn!(url = %key.url(), "recording the posted comments failed: {err:?}");
+    }
+}
+
+/// Posts `review` with `built`'s replies, returning it. The record
 /// made here makes the next submit look for it first, so a submit that
 /// failed after GitHub took it isn't posted twice; it stays until the
 /// caller has marked its drafts posted.
@@ -1198,7 +1236,7 @@ async fn post_review(
     run: i64,
     review: &NewReview,
     built: &Built,
-) -> Result<String, Failure> {
+) -> Result<CreatedReview, Failure> {
     let github = &app.github;
     if built.replies.is_empty() {
         let after = app
@@ -1221,7 +1259,7 @@ async fn post_review(
             .record_pending_review(key, &sent)
             .map_err(Failure::NotRecorded)?;
         return match github.create_review(key, review).await {
-            Ok(created) => Ok(created.html_url),
+            Ok(created) => Ok(created),
             // Known not to be posted, so there's nothing to look for.
             Err(PostError::Refused(err)) => {
                 forget(app, key);
@@ -1265,7 +1303,7 @@ async fn post_review(
         .submit_review(key, node_id, review)
         .await
         .map_err(Failure::NotSubmitted)?;
-    Ok(created.html_url)
+    Ok(created)
 }
 
 /// Forgets the PR's recorded review. If that fails, the next submit

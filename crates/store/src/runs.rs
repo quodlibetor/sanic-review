@@ -827,8 +827,8 @@ impl Store {
     }
 
     /// The PR's title, description, author and threads as last polled, for a
-    /// brief.
-    pub fn pr_context(&self, key: &PrKey) -> Result<Option<PrContext>> {
+    /// brief drafted for `viewer`.
+    pub fn pr_context(&self, key: &PrKey, viewer: &str) -> Result<Option<PrContext>> {
         let repo = key.repo.to_string();
         let Some((title, body, url, author)) = self
             .conn
@@ -848,6 +848,7 @@ impl Store {
             author,
             threads: self.threads(key)?,
             in_progress: self.in_progress_review(key)?,
+            viewer: viewer.to_owned(),
         }))
     }
 
@@ -2354,7 +2355,10 @@ mod tests {
 
         let mut store = store();
         let key = snapshot().key;
-        assert_eq!(store.pr_context(&key).unwrap().unwrap().in_progress, None);
+        assert_eq!(
+            store.pr_context(&key, "me").unwrap().unwrap().in_progress,
+            None
+        );
         let yours = InProgressReview {
             id: "PRR_1".into(),
             comments: vec![InProgressComment {
@@ -2372,7 +2376,7 @@ mod tests {
         };
         store.record(&with, "me", "default", &[]).unwrap();
         assert_eq!(
-            store.pr_context(&key).unwrap().unwrap().in_progress,
+            store.pr_context(&key, "me").unwrap().unwrap().in_progress,
             Some(yours)
         );
 
@@ -2432,7 +2436,10 @@ mod tests {
             .record(&polled("PRR_ours"), "me", "default", &[])
             .unwrap();
         assert_eq!(store.in_progress_review(&key).unwrap(), None);
-        assert_eq!(store.pr_context(&key).unwrap().unwrap().in_progress, None);
+        assert_eq!(
+            store.pr_context(&key, "me").unwrap().unwrap().in_progress,
+            None
+        );
         // Settled, its copy from the last poll goes with it.
         store.clear_pending_review(&key).unwrap();
         assert_eq!(store.in_progress_review(&key).unwrap(), None);
@@ -2447,7 +2454,8 @@ mod tests {
     #[test]
     fn context_has_threads_oldest_comment_first() {
         let store = store();
-        let ctx = store.pr_context(&snapshot().key).unwrap().unwrap();
+        let ctx = store.pr_context(&snapshot().key, "me").unwrap().unwrap();
+        assert_eq!(ctx.viewer, "me");
         assert_eq!(ctx.title, "Add thing");
         assert_eq!(ctx.body, "Adds the thing.\n\nFixes #3.");
         assert_eq!(ctx.threads.len(), 1);

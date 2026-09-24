@@ -28,7 +28,7 @@ use crate::{
     links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href, submit,
-    threads::{self, Existing},
+    threads::{self, Existing, Posted},
 };
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +49,7 @@ pub async fn page(
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
     let owed = overview.owed.iter().find(|o| o.key == key);
-    let (pr, state, runs, shown, drafts, threads) = {
+    let (pr, state, runs, shown, drafts, threads, posted) = {
         let store = app.store();
         let load = || -> color_eyre::Result<_> {
             let Some(pr) = store.pr_page(&key)? else {
@@ -79,9 +79,9 @@ pub async fn page(
                 Some(run) => store.draft_rows(run.id)?,
                 None => Vec::new(),
             };
-            let threads = store.threads(&key)?;
+            let (threads, posted) = threads::load(&store, &key, &app.me)?;
             store.record_view(&key)?;
-            Ok(Some((pr, state, runs, shown, drafts, threads)))
+            Ok(Some((pr, state, runs, shown, drafts, threads, posted)))
         };
         load()
             .map_err(Error::pr(&key))?
@@ -119,7 +119,7 @@ pub async fn page(
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
-            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads, &views, &revise))
+            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), (&threads, &posted), &views, &revise))
         } @else if runs.is_empty() {
             p.dim { "No reviews yet." }
         } @else {
@@ -431,7 +431,7 @@ fn drafts_section(
     run: &ReviewRun,
     drafts: &[DraftRow],
     diff: Option<&DiffIndex>,
-    threads: &[Thread],
+    (threads, posted): (&[Thread], &Posted),
     views: &Views,
     revise: &Revise,
 ) -> Markup {
@@ -439,8 +439,11 @@ fn drafts_section(
         key: &pr.key,
         threads,
         head: &run.head_sha,
+        run: run.id,
         pr_head: &pr.head_sha,
         diff,
+        me: &app.me,
+        posted,
     };
     let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
     let preselect = if suggested == "request_changes" {
@@ -620,11 +623,12 @@ pub fn draft_card(
                             }
                         }
                     } @else {
-                        span.st.(draft.status) { (draft.status) }
+                        (settled(draft, existing.posted_as(draft.id)))
                     }
                 }
             }
             @if let Some(context) = context { (context) }
+            @if let Some(thread) = existing.posted_as(draft.id) { (posted_thread(existing, thread)) }
             @if open { (in_threads(app, draft, existing, &overlapping, editable)) }
             div.body data-edit[editable] title=[editable.then_some("click or e to edit")] {
                 (markdown::render(draft.body(), &markdown::Context::draft(diff, draft)))
@@ -731,6 +735,30 @@ fn private_note(note: &str) -> Markup {
     }
 }
 
+/// A draft that can't be changed any more: its status, and the thread
+/// it was `posted_as`, if it was, on GitHub.
+fn settled(draft: &DraftRow, posted_as: Option<&Thread>) -> Markup {
+    html! {
+        span.st.(draft.status) { (draft.status) }
+        @if let Some(url) = posted_as.and_then(threads::link) {
+            a.gh href=(url) title="The thread it started on GitHub" { "Posted from here ↗" }
+        }
+    }
+}
+
+/// The thread a draft was posted as, under its card once someone's
+/// answered in it or resolved it.
+fn posted_thread(existing: Existing<'_>, thread: &Thread) -> Markup {
+    html! {
+        @if thread.comments.len() > 1 || thread.resolved {
+            div.overlaps {
+                div.dim { "On GitHub:" }
+                (threads::thread_box(existing.at(), existing.diff, thread))
+            }
+        }
+    }
+}
+
 /// What an accepted draft says it posts: where, if it's in `chosen`, an
 /// existing thread; else whether that's separately from threads it
 /// `overlaps`.
@@ -753,10 +781,15 @@ fn accepted_label(draft: &DraftRow, chosen: Option<&Thread>, overlaps: bool) -> 
     }
 }
 
-/// The thread `draft` is accepted to post in, if it's still on the PR.
+/// The thread `draft` is accepted to post in, if it's still on the PR:
+/// none if it was posted as a thread of its own, as one that chose a
+/// thread while the review it went inline in was out was.
 fn chosen<'a>(draft: &DraftRow, existing: Existing<'a>) -> Option<&'a Thread> {
     let choice = draft.choice.as_ref()?;
-    existing.inline().find(|t| t.id == choice.thread())
+    if existing.posted.thread_of(draft.id).is_some() {
+        return None;
+    }
+    existing.with_comments().find(|t| t.id == choice.thread())
 }
 
 /// The existing threads under `draft`: those it's `overlapping`, and the
@@ -779,7 +812,13 @@ fn in_threads(
         @if !shown.is_empty() {
             div.overlaps #{ "draft-" (draft.id) "-threads" } {
                 div.dim {
-                    @if overlapping.is_empty() { "Posts in this thread:" } @else { "Already said on these lines:" }
+                    @if !overlapping.is_empty() {
+                        "Already said on these lines:"
+                    } @else if draft.status == "posted" {
+                        "Posted in this thread:"
+                    } @else {
+                        "Posts in this thread:"
+                    }
                 }
                 @for thread in shown {
                     @let actions = if choosable { choose_form(app, draft, thread) } else { html! {} };
@@ -787,6 +826,7 @@ fn in_threads(
                         existing.at(),
                         existing.diff,
                         thread,
+                        existing.mine(thread),
                         chosen.is_some_and(|c| c.id == thread.id),
                         &actions,
                     ))
@@ -982,7 +1022,7 @@ fn decided(
     headers: &HeaderMap,
     change: impl FnOnce(&sanic_store::Store) -> color_eyre::Result<bool>,
 ) -> Result<Response, Error> {
-    let (draft, threads, head, pr_head, revise) = {
+    let (draft, threads, posted, head, pr_head, revise) = {
         let store = app.store();
         let Some(draft) = store.draft_row(id)? else {
             return Err(Error::NotFound(format!("there's no draft {id}")));
@@ -1007,7 +1047,8 @@ fn decided(
                 .pr_page(&key)?
                 .map(|pr| pr.head_sha)
                 .unwrap_or_default();
-            Ok((draft, store.threads(&key)?, head, pr_head, revise))
+            let (threads, posted) = threads::load(&store, &key, &app.me)?;
+            Ok((draft, threads, posted, head, pr_head, revise))
         };
         load().map_err(Error::pr(&key))?
     };
@@ -1017,8 +1058,11 @@ fn decided(
             key: &draft.key,
             threads: &threads,
             head: &head,
+            run: draft.run_id,
             pr_head: &pr_head,
             diff: diff.as_ref(),
+            me: &app.me,
+            posted: &posted,
         };
         return Ok(draft_card(app, &draft, diff.as_ref(), existing, &revise).into_response());
     }

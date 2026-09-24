@@ -25,7 +25,7 @@ use crate::{
     pr::{self, short},
     pr_href,
     submit::RunPath,
-    threads::{self, Existing},
+    threads::{self, Existing, Posted},
 };
 
 /// Diff lines past which a file with nothing of yours on it is only
@@ -620,7 +620,7 @@ impl<'a> Rows<'a> {
                 tr.inl {
                     td colspan=(columns) {
                         @for thread in threads {
-                            (threads::thread_box(f.existing.at(), Some(f.diff), thread))
+                            (f.existing.thread_box(thread))
                         }
                         @for draft in drafts {
                             (pr::draft_card(f.app, draft, Some(f.diff), f.existing, f.revise))
@@ -730,13 +730,7 @@ pub async fn file(
 ) -> Result<Markup, Error> {
     let key = path.pr().key()?;
     let loaded = Loaded::load(&app, &key, path.run)?;
-    let existing = Existing {
-        key: &key,
-        threads: &loaded.threads,
-        head: &loaded.run.head_sha,
-        pr_head: &loaded.pr_head,
-        diff: Some(&loaded.diff),
-    };
+    let existing = loaded.existing(&key, &app.me);
     let Some(file) = loaded.diff.file(&query.path) else {
         return Err(Error::NotFound(format!(
             "run {} of {} doesn't change `{}`",
@@ -863,13 +857,7 @@ pub async fn context(
         return Ok(html! {});
     };
 
-    let existing = Existing {
-        key: &key,
-        threads: &loaded.threads,
-        head: &loaded.run.head_sha,
-        pr_head: &loaded.pr_head,
-        diff: Some(&loaded.diff),
-    };
+    let existing = loaded.existing(&key, &app.me);
     let no_links = |_: Layout| String::new();
     let f = Files {
         app: &app,
@@ -959,14 +947,29 @@ struct Loaded {
     pr_head: String,
     drafts: Vec<DraftRow>,
     threads: Vec<Thread>,
+    posted: Posted,
     diff: DiffIndex,
     revise: pr::Revise,
 }
 
 impl Loaded {
+    /// The threads its drafts are shown with, for `me`.
+    fn existing<'a>(&'a self, key: &'a PrKey, me: &'a str) -> Existing<'a> {
+        Existing {
+            key,
+            threads: &self.threads,
+            head: &self.run.head_sha,
+            run: self.run.id,
+            pr_head: &self.pr_head,
+            diff: Some(&self.diff),
+            me,
+            posted: &self.posted,
+        }
+    }
+
     fn load(app: &App, key: &PrKey, run_id: i64) -> Result<Self, Error> {
         let missing = || Error::NotFound(format!("{} has no run {run_id}", key.url()));
-        let (run, pr_head, drafts, threads, revise) = {
+        let (run, pr_head, drafts, threads, posted, revise) = {
             let store = app.store();
             let load = || -> color_eyre::Result<_> {
                 let Some(pr) = store.pr_page(key)? else {
@@ -977,13 +980,8 @@ impl Loaded {
                 };
                 let drafts = store.draft_rows(run.id)?;
                 let revise = pr::Revise::load(&store, key, &run)?;
-                Ok(Some((
-                    run,
-                    pr.head_sha,
-                    drafts,
-                    store.threads(key)?,
-                    revise,
-                )))
+                let (threads, posted) = threads::load(&store, key, &app.me)?;
+                Ok(Some((run, pr.head_sha, drafts, threads, posted, revise)))
             };
             load().map_err(Error::pr(key))?.ok_or_else(missing)?
         };
@@ -994,6 +992,7 @@ impl Loaded {
             pr_head,
             drafts,
             threads,
+            posted,
             diff,
             revise,
         })
