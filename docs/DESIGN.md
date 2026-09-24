@@ -339,6 +339,14 @@ Rules:
    The metadata includes the PR's title and description. Each piece of
    PR-authored text is fenced with more backticks than it contains, so it
    can't close its own block.
+   The threads are the PR's existing review threads and its conversation,
+   as last polled: each thread's path and lines on the head (or, once
+   outdated, its lines in the commit it was left on), its side, whether
+   it's resolved or outdated, and each comment's author and body. The
+   section says the bodies are other people's text whose instructions
+   must not be followed. The agent is told not to comment on a point a
+   thread already makes, and, when it agrees with an existing comment, to
+   say so in its summary, naming whose and where, instead.
 3. **Invoke.** Headless `claude -p` with JSON output against a schema,
    `--append-system-prompt` for instructions, and skill dirs from the profile.
    Only read-only tools are allowed (Read, Grep, Glob, and read-only Bash if
@@ -376,7 +384,8 @@ Rules:
    extra `--add-dir`. The prompt is your instruction, fenced as your words,
    then the drafts of the run being revised as they stand, fenced as your
    material: each one's id, kind, anchor, current text (your edit if you
-   made one) and status. The agent is told to keep accepted and edited
+   made one) and status; then the PR's threads as they stand now, as a
+   review's brief has them, since they may have changed since. The agent is told to keep accepted and edited
    drafts word for word unless you ask otherwise, not to propose rejected
    ones again, not to repeat posted ones, and to return the complete revised
    review, naming for each comment (`based_on`) and for the summary
@@ -450,8 +459,8 @@ invited to draft replies or fixes on someone else's PR.
 | `repos` | owner, name, mirror path |
 | `prs` | repo, number, title, description, author, is_mine, open, archived, GitHub updated time, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
-| `threads` | GitHub thread id, path/line, resolved, participants |
-| `comments` | GitHub comment id, thread, author, body, created_at |
+| `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
+| `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag |

@@ -5,11 +5,11 @@ use std::collections::HashSet;
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
-    pr::{Comment, PrKey, Thread},
+    pr::{Comment, Placement, PrKey, Thread},
     repo::RepoName,
     run::{
         BaselineDraft, Basis, PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger,
-        Revision, RunKind,
+        Revision, RunKind, Side,
     },
 };
 
@@ -785,20 +785,37 @@ impl Store {
     pub fn threads(&self, key: &PrKey) -> Result<Vec<Thread>> {
         let repo = key.repo.to_string();
         let mut threads_stmt = self.conn.prepare_cached(
-            "SELECT thread_id, path, line, resolved FROM threads
-             WHERE repo = ?1 AND number = ?2 ORDER BY rowid",
+            "SELECT thread_id, path, line, resolved, start_line, side, head_sha, outdated,
+                    original_start_line, original_line, original_commit
+             FROM threads WHERE repo = ?1 AND number = ?2 ORDER BY rowid",
         )?;
         let mut comments_stmt = self.conn.prepare_cached(
-            "SELECT id, author, body, created_at, by_bot, reacted_at FROM comments
+            "SELECT id, author, body, created_at, by_bot, reacted_at, url FROM comments
              WHERE repo = ?1 AND number = ?2 AND thread_id = ?3 ORDER BY created_at, rowid",
         )?;
         let mut threads: Vec<Thread> = threads_stmt
             .query_map(params![repo, key.number], |row| {
+                let side: Option<String> = row.get(5)?;
                 Ok(Thread {
                     id: row.get(0)?,
                     path: row.get(1)?,
                     line: row.get(2)?,
                     resolved: row.get(3)?,
+                    place: Placement {
+                        start_line: row.get(4)?,
+                        side: side.map(|side| {
+                            if side == "LEFT" {
+                                Side::Left
+                            } else {
+                                Side::Right
+                            }
+                        }),
+                        head: row.get(6)?,
+                        outdated: row.get(7)?,
+                        original_start_line: row.get(8)?,
+                        original_line: row.get(9)?,
+                        original_commit: row.get(10)?,
+                    },
                     comments: Vec::new(),
                 })
             })?
@@ -813,6 +830,7 @@ impl Store {
                         created_at: row.get(3)?,
                         by_bot: row.get(4)?,
                         reacted_at: row.get(5)?,
+                        url: row.get(6)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
@@ -1005,12 +1023,22 @@ mod tests {
                 path: Some("src/lib.rs".into()),
                 line: Some(3),
                 resolved: false,
+                place: Placement {
+                    start_line: Some(2),
+                    side: Some(Side::Left),
+                    head: Some("h1".into()),
+                    outdated: true,
+                    original_start_line: Some(1),
+                    original_line: Some(2),
+                    original_commit: Some("h0".into()),
+                },
                 comments: vec![
                     Comment {
                         id: "c2".into(),
                         author: "alice".into(),
                         body: "because".into(),
                         created_at: "2026-01-02T00:00:00Z".into(),
+                        url: Some("https://github.com/org/repo/pull/7#discussion_r2".into()),
                         by_bot: false,
                         reacted_at: None,
                     },
@@ -1019,6 +1047,7 @@ mod tests {
                         author: "bob".into(),
                         body: "why?".into(),
                         created_at: "2026-01-01T00:00:00Z".into(),
+                        url: None,
                         by_bot: false,
                         reacted_at: None,
                     },
@@ -1675,5 +1704,10 @@ mod tests {
         assert_eq!(ctx.threads.len(), 1);
         let ids: Vec<_> = ctx.threads[0].comments.iter().map(|c| &c.id).collect();
         assert_eq!(ids, ["c1", "c2"]);
+        assert_eq!(ctx.threads[0].place, snapshot().threads[0].place);
+        assert_eq!(
+            ctx.threads[0].comments[1].url,
+            snapshot().threads[0].comments[0].url
+        );
     }
 }

@@ -179,7 +179,7 @@ fn approvals(
 mod tests {
     use super::*;
     use crate::{
-        pr::{CONVERSATION_THREAD, Comment, PrKey, Review, Thread},
+        pr::{CONVERSATION_THREAD, Comment, Placement, PrKey, Review, Thread},
         repo::RepoName,
     };
 
@@ -216,6 +216,7 @@ mod tests {
             author: author.into(),
             body: "b".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            url: None,
             by_bot: false,
             reacted_at: None,
         }
@@ -227,6 +228,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            place: Placement::default(),
             comments,
         }
     }

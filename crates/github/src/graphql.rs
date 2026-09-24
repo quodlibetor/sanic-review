@@ -3,10 +3,11 @@
 use color_eyre::eyre::{WrapErr, eyre};
 use sanic_core::{
     pr::{
-        CONVERSATION_THREAD, Comment, PrKey, PrSnapshot, Review, ReviewState, TeamRef, Thread,
-        is_login,
+        CONVERSATION_THREAD, Comment, Placement, PrKey, PrSnapshot, Review, ReviewState, TeamRef,
+        Thread, is_login,
     },
     repo::RepoName,
+    run::Side,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -43,10 +44,10 @@ query($owner: String!, $name: String!, $number: Int!) {
       reviewThreads(last: 100) {
         pageInfo { hasPreviousPage }
         nodes {
-          id path line isResolved
+          id path line startLine diffSide isResolved isOutdated originalLine originalStartLine
           comments(last: 100) {
             pageInfo { hasPreviousPage }
-            nodes { ...comment }
+            nodes { ...comment ... on PullRequestReviewComment { originalCommit { oid } } }
           }
         }
       }
@@ -59,6 +60,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 # double the query's rate-limit cost, so only the conversation gets them.
 fragment comment on Comment {
   id author { __typename login } body createdAt
+  ... on UniformResourceLocatable { url }
   ... on Reactable { reactionGroups { viewerHasReacted } }
 }";
 
@@ -471,6 +473,12 @@ struct RawComment {
     created_at: String,
     // Always asked for; hand-written mocks may omit it.
     #[serde(default)]
+    url: Option<String>,
+    /// Only asked for on thread comments.
+    #[serde(default)]
+    original_commit: Option<RawCommit>,
+    // Always asked for; hand-written mocks may omit it.
+    #[serde(default)]
     reaction_groups: Vec<RawReactionGroup>,
     /// Only asked for on conversation comments.
     #[serde(default)]
@@ -517,7 +525,18 @@ struct RawThread {
     id: String,
     path: Option<String>,
     line: Option<u32>,
+    // Always asked for; hand-written mocks may omit them.
+    #[serde(default)]
+    start_line: Option<u32>,
+    #[serde(default)]
+    diff_side: Option<Side>,
     is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    #[serde(default)]
+    original_line: Option<u32>,
+    #[serde(default)]
+    original_start_line: Option<u32>,
     comments: Connection<RawComment>,
 }
 
@@ -552,6 +571,7 @@ impl RawComment {
             author: self.author.map_or_else(|| "ghost".into(), |a| a.login),
             body: self.body,
             created_at,
+            url: self.url,
             by_bot,
             reacted_at,
         }
@@ -610,6 +630,7 @@ impl RawPr {
             path: None,
             line: None,
             resolved: false,
+            place: Placement::default(),
             comments: self
                 .comments
                 .into_nodes("conversation comments", &key)
@@ -618,17 +639,27 @@ impl RawPr {
                 .collect(),
         }];
         for t in self.review_threads.into_nodes("review threads", &key) {
+            let comments = t.comments.into_nodes("thread comments", &key);
+            // The thread's first comment is where it was left.
+            let original_commit = comments
+                .first()
+                .and_then(|c| c.original_commit.as_ref())
+                .map(|c| c.oid.clone());
             threads.push(Thread {
-                comments: t
-                    .comments
-                    .into_nodes("thread comments", &key)
-                    .into_iter()
-                    .map(|c| c.into_comment(me))
-                    .collect(),
+                comments: comments.into_iter().map(|c| c.into_comment(me)).collect(),
                 id: t.id,
                 path: t.path,
                 line: t.line,
                 resolved: t.is_resolved,
+                place: Placement {
+                    start_line: t.start_line,
+                    side: t.diff_side,
+                    head: Some(self.head_ref_oid.clone()),
+                    outdated: t.is_outdated,
+                    original_start_line: t.original_start_line,
+                    original_line: t.original_line,
+                    original_commit,
+                },
             });
         }
         PrSnapshot {

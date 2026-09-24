@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use sanic_core::run::Side;
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, PrKey, ReviewState, TeamRef},
+    pr::{CONVERSATION_THREAD, Placement, PrKey, ReviewState, TeamRef},
     repo::RepoName,
 };
 use sanic_github::{ApiError, Client, NewComment, NewReview, NotificationPoll, ReviewEvent, Token};
@@ -232,6 +232,24 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
     assert_eq!(snap.threads[0].id, CONVERSATION_THREAD);
     assert_eq!(snap.threads[1].path.as_deref(), Some("src/retry.rs"));
     assert_eq!(snap.threads[1].comments[1].author, "alice");
+    // Where it sits: its range on the head as fetched, and where it was
+    // left, from its first comment.
+    assert_eq!(
+        snap.threads[1].place,
+        Placement {
+            start_line: Some(40),
+            side: Some(Side::Right),
+            head: Some("aaa111".into()),
+            outdated: false,
+            original_start_line: Some(36),
+            original_line: Some(38),
+            original_commit: Some("fff000".into()),
+        }
+    );
+    assert_eq!(
+        snap.threads[1].comments[0].url.as_deref(),
+        Some("https://github.com/org/repo/pull/7#discussion_r1")
+    );
     assert_eq!(
         snap.files.as_deref(),
         Some(

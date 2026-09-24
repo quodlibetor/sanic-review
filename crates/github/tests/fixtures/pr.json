@@ -83,7 +83,12 @@
               "id": "RT_1",
               "path": "src/retry.rs",
               "line": 42,
+              "startLine": 40,
+              "diffSide": "RIGHT",
               "isResolved": false,
+              "isOutdated": false,
+              "originalLine": 38,
+              "originalStartLine": 36,
               "comments": {
                 "pageInfo": { "hasPreviousPage": false },
                 "nodes": [
@@ -91,7 +96,9 @@
                     "id": "RC_1",
                     "author": { "login": "me" },
                     "body": "why 3?",
-                    "createdAt": "2026-09-20T08:30:00Z"
+                    "createdAt": "2026-09-20T08:30:00Z",
+                    "url": "https://github.com/org/repo/pull/7#discussion_r1",
+                    "originalCommit": { "oid": "fff000" }
                   },
                   {
                     "id": "RC_2",

@@ -269,7 +269,7 @@ fn unanswered(facts: &StateFacts<'_>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::{CONVERSATION_THREAD, Comment};
+    use crate::pr::{CONVERSATION_THREAD, Comment, Placement};
 
     fn comment(author: &str, at: &str) -> Comment {
         Comment {
@@ -277,6 +277,7 @@ mod tests {
             author: author.into(),
             body: String::new(),
             created_at: format!("2026-01-01T00:00:{at}Z"),
+            url: None,
             by_bot: false,
             reacted_at: None,
         }
@@ -288,6 +289,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            place: Placement::default(),
             comments,
         }
     }
