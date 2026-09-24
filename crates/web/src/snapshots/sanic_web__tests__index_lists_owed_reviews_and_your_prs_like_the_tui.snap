@@ -353,6 +353,12 @@ and more detail</pre>
 </tr>
 <tr>
 <th>
+<kbd>f</kbd>
+</th>
+<td>on a PR page: the drafts, or the files changed with the drafts in them</td>
+</tr>
+<tr>
+<th>
 <kbd>?, Esc</kbd>
 </th>
 <td>show, close this help</td>

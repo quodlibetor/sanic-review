@@ -12,7 +12,9 @@ mod assets;
 mod cells;
 mod chat;
 mod diff;
+mod files;
 mod guard;
+mod highlight;
 mod ignore;
 mod index;
 mod links;
@@ -221,6 +223,10 @@ impl Dashboard {
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/submit",
                 post(submit::submit),
+            )
+            .route(
+                "/pr/{owner}/{name}/{number}/runs/{run}/file",
+                get(files::file),
             )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/regenerate",

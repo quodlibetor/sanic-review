@@ -15,6 +15,7 @@ pub async fn asset(Path(file): Path<String>) -> Response {
         "htmx.min.js" => (HTMX, "text/javascript"),
         "app.js" => (APP, "text/javascript"),
         "style.css" => (STYLE, "text/css"),
+        "syntax.css" => (crate::highlight::css(), "text/css"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, kind)], body).into_response()

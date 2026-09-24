@@ -1,0 +1,396 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, view)"
+---
+<nav class="views" id="views">
+<a href="/pr/org/repo/7?view=drafts" data-view="drafts">Drafts</a>
+<a class="cur" href="/pr/org/repo/7?view=files" data-view="files">Files changed <span class="cnt">1</span>
+</a>
+<span class="k">f</span>
+</nav>
+<section class="files" id="drafts">
+<div class="fv-head">
+<span>The diff this run reviewed, at <code>head7</code>
+</span>
+<span class="stats">1 file <span class="a">+2</span> <span class="d">−1</span>
+</span>
+</div>
+<div class="fv-top">
+<article class="draft dc pending summary" id="draft-1">
+<div class="h">
+<span class="anc">Summary</span>
+<span class="tag-sum">the review body</span>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/1/status" hx-post="/drafts/1/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<div class="body" data-edit title="click or e to edit">Mostly fine.</div>
+<form class="edit" method="post" action="/drafts/1/edit" hx-post="/drafts/1/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">Mostly fine.</textarea>
+<button class="btn save" type="submit">Save</button>
+</form>
+</article>
+<article class="draft dc pending" id="draft-3">
+<div class="h">
+<a class="anc" href="https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40" title="On GitHub, at the reviewed commit">src/gone.rs:40</a>
+<span class="sev major">major</span>
+<span class="dim conf">high conf.</span>
+<span class="tag-body" title="Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body.">not in the diff → goes in the body</span>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/3/status" hx-post="/drafts/3/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<div class="body" data-edit title="click or e to edit">This file isn't in the diff.</div>
+<form class="edit" method="post" action="/drafts/3/edit" hx-post="/drafts/3/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">This file isn't in the diff.</textarea>
+<button class="btn save" type="submit">Save</button>
+</form>
+</article>
+</div>
+<div class="fv-files">
+<div class="file" id="diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759" data-path="src/lib.rs">
+<div class="fh">
+<span class="fp">src/lib.rs</span>
+<span class="stats">
+<span class="a">+2</span> <span class="d">−1</span>
+</span>
+<a class="gh" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759" title="This file on GitHub">on GitHub ↗</a>
+</div>
+<div class="fb">
+<table class="d">
+<tr class="hh">
+<td class="n" colspan="2">
+</td>
+<td class="c">@@ -1,4 +1,5 @@</td>
+</tr>
+<tr class="ctx">
+<td class="n">1</td>
+<td class="n">1</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-storage sy-type sy-function sy-rust">fn</span> </span>
+<span class="sy-entity sy-name sy-function sy-rust">main</span>
+</span>
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-function sy-parameters sy-rust">
+<span class="sy-punctuation sy-section sy-parameters sy-begin sy-rust">(</span>
+</span>
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-function sy-parameters sy-rust">
+<span class="sy-punctuation sy-section sy-parameters sy-end sy-rust">)</span>
+</span>
+</span>
+</span>
+<span class="sy-meta sy-function sy-rust"> </span>
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">
+<span class="sy-punctuation sy-section sy-block sy-begin sy-rust">{</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+<tr class="del">
+<td class="n">2</td>
+<td class="n">
+</td>
+<td class="c">
+<span class="sign">-</span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> n <span class="sy-keyword sy-operator sy-rust">=</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">1</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+<tr class="add">
+<td class="n">
+</td>
+<td class="n">2</td>
+<td class="c">
+<span class="sign">+</span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> n <span class="sy-keyword sy-operator sy-rust">=</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">2</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+<tr class="inl">
+<td colspan="3">
+<div class="thread">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R2" title="On GitHub, at the reviewed commit">src/lib.rs:2</a>
+<span class="dim">2 comments</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t1">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>me</b>: <span class="excerpt" title="hm">hm</span>
+</li>
+<li>
+<b>alice</b>: <span class="excerpt" title="hm">hm</span>
+</li>
+</ul>
+</div>
+</td>
+</tr>
+<tr class="add mark">
+<td class="n">
+</td>
+<td class="n">3</td>
+<td class="c">
+<span class="sign">+</span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">    <span class="sy-storage sy-type sy-rust">let</span> m <span class="sy-keyword sy-operator sy-rust">=</span> n <span class="sy-keyword sy-operator sy-rust">+</span> <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">1</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+<tr class="inl">
+<td colspan="3">
+<div class="thread resolved">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
+<span class="chip dim">resolved</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-resolved">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>carol</b>: <span class="excerpt" title="Name it?">Name it?</span>
+</li>
+</ul>
+</div>
+<div class="thread">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
+<span class="chip dim">outdated</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</li>
+</ul>
+</div>
+<article class="draft dc pending" id="draft-2">
+<div class="h">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
+<span class="sev major">major</span>
+<span class="dim conf">high conf.</span>
+<a class="tag-overlap" href="#draft-2-threads" title="An existing review thread is on these lines.">overlaps an existing thread</a>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted" title="As a comment of its own, not in the existing thread.">Post separately<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<table class="diff">
+<tr class="ctx">
+<td class="num">1</td>
+<td class="num">1</td>
+<td class="code">
+<span class="sign"> </span>fn main() {</td>
+</tr>
+<tr class="del">
+<td class="num">2</td>
+<td class="num">
+</td>
+<td class="code">
+<span class="sign">-</span>    let n = 1;</td>
+</tr>
+<tr class="add">
+<td class="num">
+</td>
+<td class="num">2</td>
+<td class="code">
+<span class="sign">+</span>    let n = 2;</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>me</b>: <span class="excerpt" title="hm">hm</span>
+<span class="dim"> +1 more</span>
+</td>
+</tr>
+<tr class="add anchor">
+<td class="num">
+</td>
+<td class="num">3</td>
+<td class="code">
+<span class="sign">+</span>    let m = n + 1;</td>
+</tr>
+<tr class="thread-row resolved">
+<td colspan="3">💬 <b>carol</b>: <span class="excerpt" title="Name it?">Name it?</span> <span class="chip dim">resolved</span>
+</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="num">3</td>
+<td class="num">4</td>
+<td class="code">
+<span class="sign"> </span>    println!(&quot;{n}&quot;);</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="num">4</td>
+<td class="num">5</td>
+<td class="code">
+<span class="sign"> </span>}</td>
+</tr>
+</table>
+<div class="overlaps" id="draft-2-threads">
+<div class="dim">Already said on these lines:</div>
+<div class="thread">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3-R4" title="On GitHub, at the reviewed commit">src/lib.rs:3-4</a>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</li>
+</ul>
+<form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="thread" value="t-range">
+<input type="hidden" name="comment" value="t-range-c1">
+<button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
+<button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
+</form>
+</div>
+<div class="thread">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
+<span class="chip dim">outdated</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</li>
+</ul>
+<form class="choose" method="post" action="/drafts/2/thread" hx-post="/drafts/2/thread" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="thread" value="t-outdated">
+<input type="hidden" name="comment" value="t-outdated-c1">
+<button class="btn" name="choice" value="react" title="Post a 👍 on that comment, and not the draft's text">👍 instead</button>
+<button class="btn" name="choice" value="reply" title="Post the draft as a reply in this thread">Reply here instead</button>
+</form>
+</div>
+</div>
+<div class="body" data-edit title="click or e to edit">Why `m`?</div>
+<form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">Why `m`?</textarea>
+<button class="btn save" type="submit">Save</button>
+</form>
+</article>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">3</td>
+<td class="n">4</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">    <span class="sy-support sy-macro sy-rust">println!</span>
+<span class="sy-meta sy-group sy-rust">
+<span class="sy-punctuation sy-section sy-group sy-begin sy-rust">(</span>
+</span>
+<span class="sy-meta sy-group sy-rust">
+<span class="sy-string sy-quoted sy-double sy-rust">
+<span class="sy-punctuation sy-definition sy-string sy-begin sy-rust">&quot;</span>
+<span class="sy-constant sy-other sy-placeholder sy-rust">{n}</span>
+<span class="sy-punctuation sy-definition sy-string sy-end sy-rust">&quot;</span>
+</span>
+</span>
+<span class="sy-meta sy-group sy-rust">
+<span class="sy-punctuation sy-section sy-group sy-end sy-rust">)</span>
+</span>
+<span class="sy-punctuation sy-terminator sy-rust">;</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+<tr class="inl">
+<td colspan="3">
+<div class="thread">
+<div class="th">
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3-R4" title="On GitHub, at the reviewed commit">src/lib.rs:3-4</a>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</li>
+</ul>
+</div>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">4</td>
+<td class="n">5</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">
+<span class="sy-meta sy-function sy-rust">
+<span class="sy-meta sy-block sy-rust">
+</span>
+<span class="sy-meta sy-block sy-rust">
+<span class="sy-punctuation sy-section sy-block sy-end sy-rust">}</span>
+</span>
+</span>
+</span>
+</td>
+</tr>
+</table>
+</div>
+</div>
+</div>
+</section>

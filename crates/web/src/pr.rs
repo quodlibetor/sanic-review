@@ -21,6 +21,7 @@ use tracing::info;
 
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
+    files::{self, View},
     index::{Overview, archive_form, owed_status, why},
     links,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
@@ -32,6 +33,8 @@ use crate::{
 pub struct PageQuery {
     /// The run whose drafts to show; the latest that succeeded by default.
     run: Option<i64>,
+    /// `files` for the files view; see [`View`].
+    view: Option<String>,
 }
 
 pub async fn page(
@@ -94,6 +97,10 @@ pub async fn page(
             .is_some(),
         _ => false,
     };
+    let views = Views {
+        shown: View::parse(query.view.as_deref()),
+        run: query.run,
+    };
     let header = Header {
         pr: &pr,
         state,
@@ -107,7 +114,7 @@ pub async fn page(
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
-            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads))
+            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads, &views))
         } @else if runs.is_empty() {
             p.dim { "No reviews yet." }
         } @else {
@@ -118,7 +125,8 @@ pub async fn page(
         p.help-foot {
             (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
             (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
-            " reject · " (keycap("u")) " undo · " (keycap("p")) " preview · "
+            " reject · " (keycap("u")) " undo · " (keycap("f")) " files · "
+            (keycap("p")) " preview · "
             (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c")) " act on the PR · "
             (keycap("q")) " index"
         }
@@ -133,7 +141,7 @@ pub async fn page(
 }
 
 /// A run's stored diff, parsed; `None` if it's gone.
-fn read_diff(app: &App, run: i64) -> Option<DiffIndex> {
+pub fn read_diff(app: &App, run: i64) -> Option<DiffIndex> {
     let path = app
         .data_dir
         .join("runs")
@@ -297,6 +305,36 @@ pub fn moved_on(reviewed: &str, head: &str) -> Markup {
     }
 }
 
+/// Which view of the drafts the page shows, and the run it was asked
+/// for, which the links to the other view keep.
+struct Views {
+    shown: View,
+    run: Option<i64>,
+}
+
+impl Views {
+    fn href(&self, key: &PrKey, view: View) -> String {
+        let run = self.run.map(|r| format!("run={r}&")).unwrap_or_default();
+        format!("{}?{run}view={}", pr_href(key), view.as_str())
+    }
+
+    /// The two views, as tabs, with how many files the diff has.
+    fn tabs(&self, key: &PrKey, files: usize) -> Markup {
+        html! {
+            nav.views #views {
+                @for (view, label) in [(View::Drafts, "Drafts"), (View::Files, "Files changed")] {
+                    a class=[(view == self.shown).then_some("cur")] href=(self.href(key, view))
+                        data-view=(view.as_str()) {
+                        (label)
+                        @if view == View::Files { " " span.cnt { (files) } }
+                    }
+                }
+                (keycap("f"))
+            }
+        }
+    }
+}
+
 fn drafts_section(
     app: &App,
     pr: &PrPage,
@@ -304,6 +342,7 @@ fn drafts_section(
     drafts: &[DraftRow],
     diff: Option<&DiffIndex>,
     threads: &[Thread],
+    views: &Views,
 ) -> Markup {
     let existing = Existing {
         key: &pr.key,
@@ -365,8 +404,24 @@ fn drafts_section(
             div.banner { "This run's diff is gone, so drafts are shown without context." }
         }
         (threads::summary(existing, drafts))
-        section #drafts {
-            @for draft in drafts { (draft_card(app, draft, diff, existing)) }
+        // The files view needs the diff.
+        @if let Some(diff) = diff { (views.tabs(&pr.key, diff.files().len())) }
+        @match (views.shown, diff) {
+            (View::Files, Some(diff)) => {
+                (files::section(&files::Files {
+                    app,
+                    run,
+                    pr_head: &pr.head_sha,
+                    diff,
+                    drafts,
+                    existing,
+                }))
+            }
+            _ => {
+                section #drafts {
+                    @for draft in drafts { (draft_card(app, draft, diff, existing)) }
+                }
+            }
         }
     }
 }

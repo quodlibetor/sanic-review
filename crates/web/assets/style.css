@@ -1767,3 +1767,177 @@ form.choose select {
   max-width: 22rem;
   font-size: 12px;
 }
+
+/* The PR page's two views of a run's drafts, as tabs. */
+nav.views {
+  display: flex;
+  gap: 0.2rem 1rem;
+  align-items: baseline;
+  border-bottom: 1px solid var(--line);
+  margin: 0.75rem 0 0;
+  font-size: 14px;
+}
+
+nav.views a,
+nav.views > span.dim {
+  padding: 0.25rem 0.1rem;
+  text-decoration: none;
+  color: var(--dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+nav.views a.cur {
+  color: var(--fg);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* The files view: the whole diff, as GitHub lays it out, with room for
+   it. */
+main:has(#drafts.files) {
+  max-width: 96rem;
+}
+
+.fv-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 1rem;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--dim);
+  margin: 0.6rem 0;
+}
+
+.stats .a {
+  color: var(--ok);
+}
+
+.stats .d {
+  color: var(--bad);
+}
+
+.file {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 0.75rem 0;
+  /* Long lines scroll inside the file, never the page. */
+  overflow: hidden;
+}
+
+.file .fh {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  align-items: baseline;
+  padding: 0.35rem 0.6rem;
+  background: var(--raise);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  position: sticky;
+  top: 0;
+}
+
+.file .fp {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.file .fh .stats {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.file .fh .gh {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.chip.fadd {
+  color: var(--ok);
+}
+
+.chip.fdel {
+  color: var(--bad);
+}
+
+.file .fb {
+  overflow-x: auto;
+}
+
+.file .note,
+.file .lazy {
+  margin: 0;
+  padding: 0.6rem;
+  font-size: 13px;
+  color: var(--dim);
+}
+
+table.d {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+table.d td {
+  padding: 0 0.5rem;
+  vertical-align: top;
+}
+
+table.d td.c {
+  white-space: pre;
+}
+
+table.d td.n {
+  width: 1%;
+  min-width: 2.5rem;
+  text-align: right;
+  color: var(--dim);
+  user-select: none;
+  white-space: nowrap;
+}
+
+table.d tr.add td {
+  background: var(--add);
+}
+
+table.d tr.del td {
+  background: var(--del);
+}
+
+table.d tr.mark td.c {
+  box-shadow: inset 3px 0 var(--held);
+  background: var(--mark);
+}
+
+table.d tr.hh td {
+  background: var(--select);
+  color: var(--dim);
+  padding: 0.15rem 0.5rem;
+}
+
+/* A draft or thread under the line it ends on: text, not code, and as
+   wide as the file's box however far its lines scroll. */
+table.d tr.inl > td {
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  white-space: normal;
+  padding: 0.3rem 0.6rem;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+table.d tr.inl .dc,
+table.d tr.inl .thread {
+  max-width: min(60rem, calc(100vw - 4rem));
+  position: sticky;
+  left: 0.6rem;
+}
+
+/* The diff is right there, so an inline draft leaves out its excerpt. */
+.fv-files .dc table.diff {
+  display: none;
+}

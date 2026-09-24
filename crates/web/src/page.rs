@@ -52,6 +52,10 @@ const KEYS: &[(&str, &str)] = &[
         "c",
         "chat with the agent that reviewed it: shows the command",
     ),
+    (
+        "f",
+        "on a PR page: the drafts, or the files changed with the drafts in them",
+    ),
     ("?, Esc", "show, close this help"),
 ];
 
@@ -81,6 +85,8 @@ pub fn layout_in(
                     content=r#"{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}"#;
                 title { (title) " · sanic-review" }
                 link rel="stylesheet" href="/assets/style.css";
+                // The files view's highlighting.
+                @if matches!(kind, Kind::Pr) { link rel="stylesheet" href="/assets/syntax.css"; }
                 script src="/assets/htmx.min.js" defer {}
                 script src="/assets/app.js" defer {}
             }

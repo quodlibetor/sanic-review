@@ -220,7 +220,7 @@ impl Verdict {
 }
 
 /// Which side of the diff an inline comment is on, as GitHub names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Left,

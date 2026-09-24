@@ -3075,3 +3075,111 @@ async fn once_the_pr_moves_on_a_drafts_lines_link_to_the_file_at_the_reviewed_he
         "{card}"
     );
 }
+
+/// The PR page's files view, from its tabs to the end of the diff.
+fn files_view(html: &str) -> &str {
+    let start = html.find(r#"<nav class="views""#).unwrap();
+    let end = start + html[start..].find("</section>").unwrap() + "</section>".len();
+    &html[start..end]
+}
+
+#[tokio::test]
+async fn the_files_view_shows_the_diff_with_drafts_and_threads_at_their_lines() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let view = files_view(&page.body);
+    // The summary and the draft that isn't on a line of the diff are over
+    // it; the inline draft is under its line, 3.
+    let top = &view[view.find("fv-top").unwrap()..view.find("fv-files").unwrap()];
+    for (i, shown) in [(0, true), (1, false), (2, true)] {
+        assert_eq!(
+            top.contains(&format!("id=\"draft-{}\"", f.drafts[i])),
+            shown,
+            "{i}: {top}"
+        );
+    }
+    insta::assert_snapshot!(readable(&f, view));
+}
+
+#[tokio::test]
+async fn the_pr_page_links_each_view_keeping_the_run() {
+    let f = fixture(false).await;
+    let page = f.get("/pr/org/repo/7").await;
+    let tabs = &page.body[page.body.find(r#"<nav class="views""#).unwrap()..];
+    let tabs = &tabs[..tabs.find("</nav>").unwrap()];
+    assert!(
+        tabs.contains(r#"<a class="cur" href="/pr/org/repo/7?view=drafts" data-view="drafts">"#),
+        "{tabs}"
+    );
+    assert!(
+        tabs.contains(r#"href="/pr/org/repo/7?view=files" data-view="files""#),
+        "{tabs}"
+    );
+    assert!(page.body.contains(r#"<section id="drafts">"#));
+
+    let page = f
+        .get(&format!("/pr/org/repo/7?run={}&view=files", f.run))
+        .await;
+    let tabs = &page.body[page.body.find(r#"<nav class="views""#).unwrap()..];
+    let tabs = &tabs[..tabs.find("</nav>").unwrap()];
+    assert!(
+        tabs.contains(&format!(
+            r#"<a class="cur" href="/pr/org/repo/7?run={}&amp;view=files" data-view="files">"#,
+            f.run
+        )),
+        "{tabs}"
+    );
+    assert!(page.body.contains(r#"<section class="files" id="drafts">"#));
+    // Anything else is the drafts.
+    let page = f.get("/pr/org/repo/7?view=nonsense").await;
+    assert!(page.body.contains(r#"<section id="drafts">"#));
+}
+
+#[tokio::test]
+async fn a_files_diff_loads_on_its_own_for_the_view_to_fetch() {
+    let f = fixture(false).await;
+    let uri = |path: &str| format!("/pr/org/repo/7/runs/{}/file?path={path}", f.run);
+    let file = f.get(&uri("src/lib.rs")).await;
+    assert_eq!(file.status, StatusCode::OK);
+    assert!(
+        file.body.starts_with("<table class=\"d\">"),
+        "{}",
+        file.body
+    );
+    assert!(file.body.contains(&format!("id=\"draft-{}\"", f.drafts[1])));
+    assert_eq!(
+        f.get(&uri("elsewhere.rs")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let other = f.get("/pr/org/repo/7/runs/999/file?path=src/lib.rs").await;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_big_file_with_nothing_on_it_loads_only_when_asked() {
+    let f = fixture(false).await;
+    let big = (1..=500).fold(String::new(), |big, n| big + &format!("+line {n}\n"));
+    let diff = format!(
+        "{DIFF}diff --git a/big.txt b/big.txt\nnew file mode 100644\n--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,500 @@\n{big}"
+    );
+    let run_dir = f.data.path().join("runs").join(f.run.to_string());
+    std::fs::write(run_dir.join("pr.diff"), diff).unwrap();
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    let view = files_view(&page.body);
+    assert!(
+        view.contains(&format!(
+            r#"hx-get="/pr/org/repo/7/runs/{}/file?path=big.txt""#,
+            f.run
+        )),
+        "{view}"
+    );
+    assert!(!view.contains("line 250"), "{view}");
+    // The file with a draft on it shows as ever.
+    assert!(view.contains(&format!("id=\"draft-{}\"", f.drafts[1])));
+    let file = f
+        .get(&format!("/pr/org/repo/7/runs/{}/file?path=big.txt", f.run))
+        .await;
+    assert!(file.body.contains("line 250"), "{}", file.body);
+}
