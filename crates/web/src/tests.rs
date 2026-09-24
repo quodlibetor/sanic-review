@@ -865,6 +865,8 @@ async fn nothing_accepted_means_nothing_to_submit_except_an_approval() {
     let uri = f.picked_preview_uri("APPROVE").await;
     let preview = f.get(&uri).await.body;
     assert!(preview.contains(">Approve this PR<"), "{preview}");
+    // Its button says it approves; nothing in the checklist repeats it.
+    assert!(!preview.contains("You picked Approve"), "{preview}");
     assert!(!preview.contains(r#"type="checkbox""#));
     let pick = hidden_value(&preview, "pick");
     assert!(uri.ends_with(&format!("&pick={pick}")), "{uri}");
