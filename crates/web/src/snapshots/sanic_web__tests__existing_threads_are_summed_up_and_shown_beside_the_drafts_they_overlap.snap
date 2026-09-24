@@ -128,4 +128,17 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 <textarea name="body" rows="4">Why `m`?</textarea>
 <button class="btn save" type="submit">Save</button>
 </form>
+<details class="revise">
+<summary class="btn" title="Revise just this draft with the agent, from your note">Revise…<span class="k">a</span>
+</summary>
+<form method="post" action="/drafts/2/revise">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="instruction" rows="2" required placeholder="e.g. not true because …; focus on the fix; reword">
+</textarea>
+<div class="go">
+<button class="btn go" type="submit">Revise with the agent</button>
+<span class="dim">Spends tokens. The result is a new run: this draft revised or dropped, the others as they stand.</span>
+</div>
+</form>
+</details>
 </article>

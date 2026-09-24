@@ -19,7 +19,7 @@ use color_eyre::eyre::{Result, eyre};
 use sanic_core::{
     config::{Config, RunnerSettings},
     pr::PrKey,
-    run::{QueuedRun, ReviewResult},
+    run::{DraftRevision, QueuedRun, ReviewResult, Revision},
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use sanic_store::Store;
@@ -274,7 +274,7 @@ impl Worker {
                 info!("stopped: a newer head of the PR was queued");
                 self.store().supersede_run(run.id)
             }
-            Ok(Some(Reviewed { result, basis })) => {
+            Ok(Some(Reviewed::Review { result, basis })) => {
                 let stored = match (&run.revision, &basis) {
                     (Some(revision), Some(basis)) => self
                         .store()
@@ -286,6 +286,26 @@ impl Worker {
                 }
                 stored
             }
+            Ok(Some(Reviewed::Draft {
+                revised,
+                session_id,
+                transcript_path,
+            })) => match &run.revision {
+                Some(revision) => {
+                    let stored = self.store().finish_draft_revision(
+                        run.id,
+                        revision,
+                        &revised,
+                        session_id.as_deref(),
+                        &transcript_path,
+                    );
+                    if stored.is_ok() {
+                        log_draft_revision(revision, &revised);
+                    }
+                    stored
+                }
+                None => Err(eyre!("run {} revised a draft it wasn't given", run.id)),
+            },
             Err(err) => {
                 warn!(url = %run.request.key.url(), "review failed: {err:?}");
                 self.store().fail_run(run.id, &format!("{err:#}"))
@@ -337,11 +357,20 @@ impl Worker {
             .pr_context(&req.key)?
             .ok_or_else(|| eyre!("{} is not in the database", req.key.url()))?;
         if let Some(revision) = &run.revision {
-            info!(
-                head = %req.head_sha,
-                source_run = revision.source_run,
-                "regenerating with your instruction"
-            );
+            if let Some(draft) = revision.draft {
+                info!(
+                    head = %req.head_sha,
+                    source_run = revision.source_run,
+                    draft,
+                    "revising a draft with your note"
+                );
+            } else {
+                info!(
+                    head = %req.head_sha,
+                    source_run = revision.source_run,
+                    "regenerating with your instruction"
+                );
+            }
         } else {
             info!(head = %req.head_sha, trigger = req.trigger.as_str(), "reviewing");
         }
@@ -411,6 +440,19 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
         Err(panic) => panic
             .downcast_ref::<&str>()
             .map_or_else(|| "panicked".to_owned(), |s| (*s).to_owned()),
+    }
+}
+
+fn log_draft_revision(revision: &Revision, revised: &DraftRevision) {
+    let draft = revision.draft.unwrap_or_default();
+    match revised {
+        DraftRevision::Dropped { reason } => {
+            let headline = reason.lines().next().unwrap_or_default();
+            info!(draft, "draft dropped: {headline}");
+        }
+        DraftRevision::Summary { .. } | DraftRevision::Comment(_) => {
+            info!(draft, "draft revised");
+        }
     }
 }
 
@@ -680,7 +722,7 @@ mod tests {
             &config,
         ));
         let (runs, runs_rx) = mpsc::unbounded_channel();
-        runs.send(run.clone()).unwrap();
+        runs.send((*run).clone()).unwrap();
         drop(runs);
         tokio::time::timeout(std::time::Duration::from_secs(20), worker.work(runs_rx))
             .await

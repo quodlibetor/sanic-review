@@ -62,8 +62,8 @@ The instructions and skills below may be written for an interactive session. \
 Map their steps onto this one:
 - Presenting findings for triage, or explaining them to the user: put that in \
 each draft's private `note` (`summary_note` for the summary).
-- Revising from the user's verdicts: the reviewer's revision requests arrive \
-later, in a prompt that resumes this session.
+- Revising from the user's verdicts: the reviewer's revision requests, for the \
+whole review or one draft, arrive later, in a prompt that resumes this session.
 - Delivering, posting or confirming: stop at the drafts.
 - Steps that need tools you don't have: skip them silently. They aren't \
 failures; don't report them.
@@ -222,21 +222,27 @@ fn discussion(threads: &[Thread]) -> String {
     out
 }
 
-/// The prompt for a `regenerate` run, which resumes the review's session:
-/// your instruction, fenced as your words rather than PR text, then the
-/// PR's threads as they stand now, which may have changed since the review.
-#[must_use]
-pub fn revision(instruction: &str, baseline: &[BaselineDraft], threads: &[Thread]) -> String {
-    let drafts = serde_json::to_string_pretty(baseline).unwrap_or_else(|_| "[]".into());
+/// The PR's threads as they stand now, for a prompt that resumes the
+/// review's session: they may have changed since. Empty if there are none.
+fn discussion_now(threads: &[Thread]) -> String {
     let discussion = discussion(threads);
-    let discussion = if discussion.is_empty() {
+    if discussion.is_empty() {
         discussion
     } else {
         format!(
             "{discussion}\nThat's the PR's discussion as it stands now; it may have changed \
              since your review. Don't repeat points it already makes.\n"
         )
-    };
+    }
+}
+
+/// The prompt for a `regenerate` run, which resumes the review's session:
+/// your instruction, fenced as your words rather than PR text, then the
+/// PR's threads as they stand now, which may have changed since the review.
+#[must_use]
+pub fn revision(instruction: &str, baseline: &[BaselineDraft], threads: &[Thread]) -> String {
+    let drafts = serde_json::to_string_pretty(baseline).unwrap_or_else(|_| "[]".into());
+    let discussion = discussion_now(threads);
     format!(
         "The reviewer asked you to revise your review. Their request, in their own \
          words:\n\n{}\n\
@@ -255,6 +261,42 @@ pub fn revision(instruction: &str, baseline: &[BaselineDraft], threads: &[Thread
          `summary_based_on`; leave them out for anything new.\n{discussion}",
         fenced(instruction, "text"),
         fenced(&drafts, "json")
+    )
+}
+
+/// The prompt for a `regenerate` run of one draft, which resumes the
+/// review's session: your note on it, fenced as your words, the draft as
+/// it stands, and the PR's threads as they stand now. The answer is that
+/// draft's replacement, or why it should go.
+#[must_use]
+pub fn draft_revision(instruction: &str, draft: &BaselineDraft, threads: &[Thread]) -> String {
+    let shown = serde_json::to_string_pretty(draft).unwrap_or_else(|_| "{}".into());
+    let (field, format) = if draft.kind == "summary" {
+        (
+            "`summary`",
+            "the review body's new text, with `summary_note` as its private note",
+        )
+    } else {
+        (
+            "`comment`",
+            "one inline comment in the same format as before, with its private `note`",
+        )
+    };
+    format!(
+        "The reviewer asked you to revise one of your drafts, and only that one. Their \
+         note on it, in their own words:\n\n{}\n\
+         The draft as it stands after the reviewer went through it: its `id`, `kind`, \
+         anchor, current `text` (the reviewer's edit if `edited`), `status`, and your \
+         private `note` if you wrote one:\n\n{}\n\
+         Apply the note without arguing it again. If the reviewer says the draft is \
+         wrong, check that against the code: where they're right, or it can't stand \
+         without what they rule out, drop it. Answer with exactly one of:\n\
+         - {field}: its replacement, {format}. Say in the note what changed and why.\n\
+         - `drop_reason`: why it should go, for the reviewer.\n\n\
+         Your other drafts stay as they are; don't repeat them here.\n{}",
+        fenced(instruction, "text"),
+        fenced(&shown, "json"),
+        discussion_now(threads)
     )
 }
 

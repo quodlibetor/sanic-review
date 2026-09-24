@@ -109,8 +109,8 @@
     return target.isContentEditable || /^(TEXTAREA|SELECT)$/.test(target.tagName);
   }
 
-  // What r and a act on: the selected row on the index, the PR itself on a
-  // PR page.
+  // What r, x, c and i act on: the selected row on the index, the PR itself
+  // on a PR page.
   function subject() {
     return page === "index" ? currentRow() : document.getElementById("pr-actions");
   }
@@ -307,6 +307,18 @@
         const button = row && row.querySelector('button[name="status"][value="' + status + '"]');
         if (!button) return;
         button.click();
+        break;
+      }
+      case "a": {
+        // Opens the selected draft's Revise box, ready for your note.
+        const row = page === "pr" && currentRow();
+        const revise = row && row.querySelector("details.revise");
+        if (!revise) {
+          if (page === "pr") say("a revises the selected draft with the agent, when its run has a session");
+          return;
+        }
+        revise.open = true;
+        revise.querySelector("textarea").focus();
         break;
       }
       case "p": {

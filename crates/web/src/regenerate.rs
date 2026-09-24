@@ -122,7 +122,7 @@ pub async fn regenerate(
     }
     let started = app
         .control
-        .regenerate(run.id, &instruction)
+        .regenerate(run.id, None, &instruction)
         .map_err(Error::pr(&pr.key))?;
     match started {
         Ok(new) => {

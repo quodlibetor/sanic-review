@@ -43,6 +43,9 @@ pub struct ReviewRun {
     /// For a regeneration: the review it revises, and what you asked for.
     pub source_run: Option<i64>,
     pub instruction: Option<String>,
+    /// For a regeneration of one draft: that draft, and the run it's of.
+    pub draft_id: Option<i64>,
+    pub draft_run: Option<i64>,
 }
 
 /// A stored draft with everything the dashboard shows and edits.
@@ -73,6 +76,9 @@ pub struct DraftRow {
     pub choice: Option<ThreadChoice>,
     /// The agent's private note on it, for you: never posted.
     pub note: Option<String>,
+    /// Why the agent dropped it when asked to revise it, until you decide
+    /// on it again.
+    pub drop_reason: Option<String>,
 }
 
 /// What an accepted draft that overlaps an existing review thread posts,
@@ -184,7 +190,8 @@ const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 
 const DRAFT_COLUMNS: &str = "r.repo, r.number, d.id, d.run_id, d.kind, d.path, d.line,
     d.start_line, d.side, d.severity, d.confidence, d.original_body, d.edited_body,
-    d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to, d.note";
+    d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to, d.note,
+    d.drop_reason";
 
 fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     Ok(DraftRow {
@@ -209,6 +216,7 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
             row.get(18)?,
         ),
         note: row.get(19)?,
+        drop_reason: row.get(20)?,
     })
 }
 
@@ -243,7 +251,8 @@ impl Store {
     pub fn review_runs(&self, key: &PrKey) -> Result<Vec<ReviewRun>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
-                    source_run, instruction
+                    source_run, instruction, draft_id,
+                    (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id)
              FROM runs
              WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
@@ -262,6 +271,8 @@ impl Store {
                         finished_at: row.get(6)?,
                         source_run: row.get(7)?,
                         instruction: row.get(8)?,
+                        draft_id: row.get(9)?,
+                        draft_run: row.get(10)?,
                     })
                 },
             )?
@@ -311,12 +322,13 @@ impl Store {
 
     /// Accepts or rejects a draft, or puts it back to pending. Accepted
     /// this way, a comment is posted on its own, whatever thread choice it
-    /// had. `false` if the draft doesn't exist or is stale or posted.
+    /// had. Either way, it forgets why the agent dropped it, if it did.
+    /// `false` if the draft doesn't exist or is stale or posted.
     pub fn set_draft_status(&self, id: i64, status: DraftStatus) -> Result<bool> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE drafts SET status = ?2, thread_choice = NULL, thread_id = NULL,
-                     react_to = NULL, updated_at = {NOW}
+                     react_to = NULL, drop_reason = NULL, updated_at = {NOW}
                  WHERE id = ?1 AND status IN {DECIDABLE}"
             ),
             params![id, status.as_str()],
@@ -333,7 +345,7 @@ impl Store {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE drafts SET status = 'accepted', thread_choice = ?2, thread_id = ?3,
-                     react_to = ?4, updated_at = {NOW}
+                     react_to = ?4, drop_reason = NULL, updated_at = {NOW}
                  WHERE id = ?1 AND kind = 'comment' AND status IN {DECIDABLE}
                    AND EXISTS (
                        SELECT 1 FROM threads t JOIN runs r

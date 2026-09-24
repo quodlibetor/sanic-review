@@ -1654,6 +1654,7 @@ mod tests {
             unanchored: true,
             choice: None,
             note: None,
+            drop_reason: None,
         }
     }
 

@@ -11,16 +11,19 @@ use std::{
     time::Duration,
 };
 
-use color_eyre::eyre::{Result, WrapErr, bail};
+use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use sanic_core::{
     config::{Profile, RunnerSettings},
-    run::{Basis, DraftComment, PrContext, QueuedRun, ReviewOutput, ReviewResult, RevisedOutput},
+    run::{
+        BaselineDraft, Basis, DraftComment, DraftOutput, DraftRevision, PrContext, QueuedRun,
+        ReviewOutput, ReviewResult, RevisedOutput,
+    },
 };
 use serde_json::{Value, json};
 
 use crate::{
     chat,
-    claude::{Claude, Invocation},
+    claude::{Claude, Invocation, Outcome},
     diff::DiffIndex,
     mirror::{Mirrors, Worktree},
     prompt,
@@ -236,11 +239,15 @@ impl ReviewRunner {
         let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
-        let brief = match &run.revision {
-            Some(revision) => {
+        let target = target(run)?;
+        let brief = match (&run.revision, target) {
+            (Some(revision), Some(target)) => {
+                prompt::draft_revision(&revision.instruction, target, &ctx.threads)
+            }
+            (Some(revision), None) => {
                 prompt::revision(&revision.instruction, &revision.baseline, &ctx.threads)
             }
-            None => prompt::brief(&run.request, ctx, &diff, &diff_path),
+            (None, _) => prompt::brief(&run.request, ctx, &diff, &diff_path),
         };
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
@@ -258,10 +265,10 @@ impl ReviewRunner {
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
         let transcript = run_dir.join("transcript.jsonl");
-        let schema = if run.revision.is_some() {
-            revision_schema()
-        } else {
-            review_schema()
+        let schema = match (&run.revision, target) {
+            (Some(_), Some(target)) => draft_revision_schema(&target.kind),
+            (Some(_), None) => revision_schema(),
+            (None, _) => review_schema(),
         };
         let outcome = claude
             .run(&Invocation {
@@ -276,6 +283,46 @@ impl ReviewRunner {
                 resume: run.revision.as_ref().map(|r| r.session_id.as_str()),
             })
             .await?;
+        let index = DiffIndex::parse(&diff);
+        match target {
+            Some(target) => Self::draft_revised(outcome, target, &index, &transcript),
+            None => Self::reviewed(outcome, &index, run, &transcript),
+        }
+    }
+
+    /// A regeneration of one draft's answer, `target`'s revision checked
+    /// against the diff, or its drop.
+    fn draft_revised(
+        outcome: Outcome,
+        target: &BaselineDraft,
+        index: &DiffIndex,
+        transcript: &Path,
+    ) -> Result<Reviewed> {
+        let output: DraftOutput = serde_json::from_value(outcome.output)
+            .wrap_err("the agent's answer doesn't match the draft revision schema")?;
+        let revised = output
+            .for_kind(&target.kind, |comment| index.anchors(comment))
+            .ok_or_else(|| {
+                eyre!(
+                    "the agent's answer neither revises nor drops the {}",
+                    target.kind
+                )
+            })?;
+        Ok(Reviewed::Draft {
+            revised,
+            session_id: outcome.session_id,
+            transcript_path: transcript.display().to_string(),
+        })
+    }
+
+    /// A review's answer, or a whole regeneration's, checked against the
+    /// diff.
+    fn reviewed(
+        outcome: Outcome,
+        index: &DiffIndex,
+        run: &QueuedRun,
+        transcript: &Path,
+    ) -> Result<Reviewed> {
         let (output, basis) = if run.revision.is_some() {
             let revised: RevisedOutput = serde_json::from_value(outcome.output)
                 .wrap_err("the agent's answer doesn't match the revision schema")?;
@@ -287,7 +334,6 @@ impl ReviewRunner {
             (output, None)
         };
 
-        let index = DiffIndex::parse(&diff);
         let result = ReviewResult {
             summary: output.summary,
             summary_note: output.summary_note,
@@ -303,16 +349,38 @@ impl ReviewRunner {
             session_id: outcome.session_id,
             transcript_path: transcript.display().to_string(),
         };
-        Ok(Reviewed { result, basis })
+        Ok(Reviewed::Review { result, basis })
     }
 }
 
-/// A finished review, and for a regeneration, which of the drafts it
-/// started from each of its own is based on.
+/// For a regeneration of one draft, that draft as the agent is shown it.
+fn target(run: &QueuedRun) -> Result<Option<&BaselineDraft>> {
+    let Some((revision, id)) = run.revision.as_ref().and_then(|r| Some((r, r.draft?))) else {
+        return Ok(None);
+    };
+    let draft = revision
+        .baseline
+        .iter()
+        .find(|d| d.id == id)
+        .ok_or_else(|| eyre!("draft {id} isn't one of run {}'s", revision.revises))?;
+    Ok(Some(draft))
+}
+
+/// What a finished run answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reviewed {
-    pub result: ReviewResult,
-    pub basis: Option<Basis>,
+pub enum Reviewed {
+    /// A review, and for a regeneration, which of the drafts it started
+    /// from each of its own is based on.
+    Review {
+        result: ReviewResult,
+        basis: Option<Basis>,
+    },
+    /// A regeneration of one draft: that draft revised, or dropped.
+    Draft {
+        revised: DraftRevision,
+        session_id: Option<String>,
+        transcript_path: String,
+    },
 }
 
 /// The directories in `dirs` that exist; a missing one is only a warning,
@@ -367,6 +435,29 @@ pub fn review_schema() -> Value {
                 }
             }
         }
+    })
+}
+
+/// The JSON Schema for [`DraftOutput`], answering a regeneration of one
+/// draft of `kind`: a comment's replacement as `comment`, in
+/// [`review_schema`]'s form, or the summary's as `summary` and
+/// `summary_note`; or else `drop_reason`.
+#[must_use]
+pub fn draft_revision_schema(kind: &str) -> Value {
+    let review = review_schema();
+    let mut properties = json!({ "drop_reason": { "type": ["string", "null"] } });
+    if kind == "summary" {
+        properties["summary"] = json!({ "type": ["string", "null"] });
+        properties["summary_note"] = review["properties"]["summary_note"].clone();
+    } else {
+        let mut comment = review["properties"]["comments"]["items"].clone();
+        comment["type"] = json!(["object", "null"]);
+        properties["comment"] = comment;
+    }
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties
     })
 }
 
