@@ -29,7 +29,7 @@ use sanic_core::{
     trigger::Trigger,
 };
 use sanic_github::{ApiError, Client, Token};
-use sanic_runner::{review::RunSettings, vcs::VcsResolver};
+use sanic_runner::{mirror::Mirrors, review::RunSettings, vcs::VcsResolver};
 use sanic_store::{Refusal, Regeneration, Store};
 use sanic_web::Dashboard;
 use tokio::{
@@ -302,6 +302,7 @@ impl Live {
             store: Store::open(&data_dir.join("state.db"))?,
             github: github.clone(),
             control: Arc::new(control),
+            sources: Arc::new(Mirrors::in_data_dir(data_dir)),
             due: due.clone(),
             skips: self.skips.subscribe(),
             window: self.recency.subscribe(),

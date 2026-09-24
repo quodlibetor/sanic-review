@@ -101,7 +101,7 @@ expression: "readable(&f, view)"
 <div class="fb">
 <table class="d">
 <tr class="hh">
-<td class="n" colspan="2">
+<td class="n xs" colspan="2">
 </td>
 <td class="c">@@ -1,4 +1,5 @@</td>
 </tr>

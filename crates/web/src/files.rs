@@ -1,15 +1,19 @@
 //! The files view: the diff a run reviewed, laid out as GitHub's Files
 //! changed tab, with each draft and existing thread at its lines.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::extract::{Path, Query, State};
+use color_eyre::eyre::WrapErr;
 use maud::{Markup, html};
 use sanic_core::{
     pr::{PrKey, Thread},
     run::Side,
 };
-use sanic_runner::diff::{Change, DiffFile, DiffIndex, DiffLine, Hunk};
+use sanic_runner::diff::{CONTEXT, Change, DiffFile, DiffIndex, DiffLine, Hunk};
 use sanic_store::{DraftRow, ReviewRun};
 use serde::Deserialize;
 
@@ -101,11 +105,34 @@ pub struct Files<'a> {
     pub layout: Layout,
     /// The page's own link with `layout=` set to each layout.
     pub layout_href: &'a dyn Fn(Layout) -> String,
+    /// The mirror has the run's head, so the unchanged lines the diff
+    /// leaves out can be shown.
+    pub expandable: bool,
 }
 
 impl Files<'_> {
     fn key(&self) -> &PrKey {
         self.existing.key
+    }
+
+    /// Where `dir` of `gap`'s lines of `path` load from.
+    fn context_href(&self, path: &str, gap: Gap, dir: Dir) -> String {
+        let (start, end) = (gap.start.to_string(), gap.end.map(|e| e.to_string()));
+        let mut query = vec![
+            ("path", path),
+            ("start", &start),
+            ("dir", dir.as_str()),
+            ("layout", self.layout.as_str()),
+        ];
+        if let Some(end) = &end {
+            query.push(("end", end));
+        }
+        format!(
+            "{}/runs/{}/context?{}",
+            pr_href(self.key()),
+            self.run.id,
+            serde_urlencoded::to_string(&query).unwrap_or_default()
+        )
     }
 
     /// Where the lazy parts of the view load from.
@@ -329,36 +356,17 @@ fn file_box(f: &Files<'_>, file: &DiffFile, placed: &HashSet<i64>, eager: bool) 
 /// threads that end on a line under its row.
 fn table(f: &Files<'_>, file: &DiffFile, placed: &HashSet<i64>) -> Markup {
     let path = file.path.as_str();
-    let mut ending: HashMap<(Side, u32), Vec<&DraftRow>> = HashMap::new();
-    let mut marked: Vec<(Side, u32, u32)> = Vec::new();
-    for draft in f.drafts.iter().filter(|d| placed.contains(&d.id)) {
-        if let Some((p, side, (first, last))) = threads::lines(draft)
-            && p == path
-        {
-            ending.entry((side, last)).or_default().push(draft);
-            if draft.status != "rejected" {
-                marked.push((side, first, last));
-            }
-        }
-    }
-    let rows = Rows {
-        f,
-        path,
-        ending,
-        marked,
-    };
+    let rows = Rows::new(f, path, placed);
     let highlight = size(file) <= HIGHLIGHT_LINES;
     let split = f.layout == Layout::Split;
+    let gaps = gaps(file);
     html! {
         table.d.split[split] {
             // A fixed layout takes its widths from here, not the first row.
             @if split { colgroup { col.n; col; col.n; col; } }
-            @for hunk in &file.hunks {
+            @for (hunk, gap) in file.hunks.iter().zip(&gaps) {
                 @let code = highlighted(path, hunk, highlight);
-                tr.hh {
-                    td.n colspan=[(!split).then_some(2)] {}
-                    td.c colspan=[split.then_some(3)] { (hunk_header(hunk)) }
-                }
+                (gap_row(f, path, *gap, Some(&hunk_header(hunk))))
                 @if split {
                     @for (left, right) in pairs(&hunk.lines) {
                         @let side = |i: Option<usize>| i.map(|i| (&hunk.lines[i], &code[i]));
@@ -369,6 +377,143 @@ fn table(f: &Files<'_>, file: &DiffFile, placed: &HashSet<i64>) -> Markup {
                         (rows.unified(line, code))
                     }
                 }
+            }
+            // The lines after the last hunk, to the end of the file.
+            @if let Some(gap) = gaps.get(file.hunks.len()).copied().flatten().filter(|_| f.expandable) {
+                (gap_row(f, path, Some(gap), None))
+            }
+        }
+    }
+}
+
+/// Lines to show per click on an expander.
+const EXPAND: u32 = 20;
+
+/// The most unchanged lines one request shows.
+const MAX_EXPAND: u32 = 10 * EXPAND;
+
+/// Unchanged lines the diff leaves out, numbered in the new file: before
+/// a hunk, between two, or after the last to the end of the file
+/// (`end: None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Gap {
+    start: u32,
+    end: Option<u32>,
+    /// What to add to a line's number in the new file for its number in
+    /// the old: they're the same lines, shifted by the hunks before.
+    offset: i64,
+}
+
+/// Which of a gap's lines an expander shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Dir {
+    /// Up from the hunk below.
+    Up,
+    /// Down from the hunk above.
+    Down,
+    /// All of it, as far as one request shows.
+    All,
+}
+
+impl Dir {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::All => "all",
+        }
+    }
+}
+
+/// A hunk's lines on one side as `first..end`, where an empty side, which
+/// git numbers by the line before it, starts after that line.
+fn span(range: &std::ops::Range<u32>) -> (u32, u32) {
+    let first = if range.is_empty() {
+        range.start + 1
+    } else {
+        range.start
+    };
+    (first, first + (range.end - range.start))
+}
+
+/// The gap before each of `file`'s hunks, then the one after the last,
+/// each `None` where there's nothing left out: a new file's hunk is all of
+/// it, and a deleted file has nothing left to show.
+fn gaps(file: &DiffFile) -> Vec<Option<Gap>> {
+    if file.change == Change::Deleted {
+        return vec![None; file.hunks.len() + 1];
+    }
+    let mut gaps = Vec::with_capacity(file.hunks.len() + 1);
+    let mut next = 1;
+    for hunk in &file.hunks {
+        let ((first, end), (old_first, _)) = (span(&hunk.new), span(&hunk.old));
+        gaps.push((next < first).then_some(Gap {
+            start: next,
+            end: Some(first - 1),
+            offset: i64::from(old_first) - i64::from(first),
+        }));
+        next = end;
+    }
+    // git gives each hunk `CONTEXT` unchanged lines after its last
+    // change, or fewer where the file ends; so a last hunk with fewer is
+    // at the end, and only one with all of them may have lines after.
+    let after = file
+        .hunks
+        .last()
+        .filter(|last| {
+            let trailing = last
+                .lines
+                .iter()
+                .rev()
+                .take_while(|l| l.old.is_some() && l.new.is_some())
+                .count();
+            file.change != Change::Added && trailing >= CONTEXT
+        })
+        .map(|last| {
+            let ((_, end), (_, old_end)) = (span(&last.new), span(&last.old));
+            Gap {
+                start: end,
+                end: None,
+                offset: i64::from(old_end) - i64::from(end),
+            }
+        });
+    gaps.push(after);
+    gaps
+}
+
+/// A hunk's header, `header`, with the expanders for the `gap` before it
+/// when the mirror has the run's head; or, without a header, the expander
+/// for the lines after the last hunk.
+fn gap_row(f: &Files<'_>, path: &str, gap: Option<Gap>, header: Option<&str>) -> Markup {
+    let split = f.layout == Layout::Split;
+    let gap = gap.filter(|_| f.expandable);
+    let button = |dir: Dir, label: &str, title: &str| {
+        html! {
+            @if let Some(gap) = gap {
+                button.x type="button" hx-get=(f.context_href(path, gap, dir))
+                    hx-target="closest tr" hx-swap="outerHTML" title=(title) { (label) }
+            }
+        }
+    };
+    let size = gap.and_then(|g| Some(g.end? + 1 - g.start));
+    html! {
+        tr.hh {
+            td.n.xs colspan=[(!split).then_some(2)] {
+                @match (gap, size) {
+                    (None, _) => {}
+                    (Some(_), Some(n)) if n <= EXPAND => {
+                        (button(Dir::All, "↕", &format!("Show the {n} lines left out here")))
+                    }
+                    (Some(g), _) => {
+                        // Down from the hunk above, and up from the one below.
+                        @if g.start > 1 { (button(Dir::Down, "↓", "Show more lines below the hunk above")) }
+                        @if g.end.is_some() { (button(Dir::Up, "↑", "Show more lines above this hunk")) }
+                    }
+                }
+            }
+            td.c colspan=[split.then_some(3)] {
+                @if let Some(header) = header { (header) }
             }
         }
     }
@@ -383,7 +528,28 @@ struct Rows<'a> {
     marked: Vec<(Side, u32, u32)>,
 }
 
-impl Rows<'_> {
+impl<'a> Rows<'a> {
+    fn new(f: &'a Files<'a>, path: &'a str, placed: &HashSet<i64>) -> Self {
+        let mut ending: HashMap<(Side, u32), Vec<&DraftRow>> = HashMap::new();
+        let mut marked = Vec::new();
+        for draft in f.drafts.iter().filter(|d| placed.contains(&d.id)) {
+            if let Some((p, side, (first, last))) = threads::lines(draft)
+                && p == path
+            {
+                ending.entry((side, last)).or_default().push(draft);
+                if draft.status != "rejected" {
+                    marked.push((side, first, last));
+                }
+            }
+        }
+        Self {
+            f,
+            path,
+            ending,
+            marked,
+        }
+    }
+
     fn marked(&self, side: Side, n: Option<u32>) -> bool {
         n.is_some_and(|n| {
             self.marked
@@ -571,6 +737,15 @@ pub async fn file(
         head: &loaded.run.head_sha,
         pr_head: &loaded.pr_head,
     };
+    let Some(file) = loaded.diff.file(&query.path) else {
+        return Err(Error::NotFound(format!(
+            "run {} of {} doesn't change `{}`",
+            path.run,
+            key.url(),
+            query.path
+        )));
+    };
+    let expandable = expandable(&app, &key, &loaded.run.head_sha).await;
     // Only the page has layout links.
     let no_links = |_: Layout| String::new();
     let f = Files {
@@ -582,7 +757,40 @@ pub async fn file(
         existing,
         layout: Layout::parse(query.layout.as_deref()),
         layout_href: &no_links,
+        expandable,
     };
+    Ok(table(&f, file, &placed(&loaded.diff, &loaded.drafts)))
+}
+
+/// Whether the mirror has `head`, so the view can show lines the diff
+/// leaves out.
+pub async fn expandable(app: &Shared, key: &PrKey, head: &str) -> bool {
+    let (sources, repo, head) = (Arc::clone(&app.sources), key.repo.clone(), head.to_owned());
+    tokio::task::spawn_blocking(move || sources.has_commit(&repo, &head))
+        .await
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContextQuery {
+    path: String,
+    /// The lines still left out, as the expander that asked has them.
+    start: u32,
+    end: Option<u32>,
+    dir: Dir,
+    layout: Option<String>,
+}
+
+/// Unchanged lines a gap in a file's diff leaves out, read from the
+/// mirror at the run's head, as rows to put in place of the expander that
+/// asked, with one for what's still left out.
+pub async fn context(
+    State(app): State<Shared>,
+    Path(path): Path<RunPath>,
+    Query(query): Query<ContextQuery>,
+) -> Result<Markup, Error> {
+    let key = path.pr().key()?;
+    let loaded = Loaded::load(&app, &key, path.run)?;
     let Some(file) = loaded.diff.file(&query.path) else {
         return Err(Error::NotFound(format!(
             "run {} of {} doesn't change `{}`",
@@ -591,7 +799,155 @@ pub async fn file(
             query.path
         )));
     };
-    Ok(table(&f, file, &placed(&loaded.diff, &loaded.drafts)))
+    // The gap the lines are in: they must be ones the diff leaves out.
+    let gaps = gaps(file);
+    let within = |gap: &Gap| {
+        gap.start <= query.start
+            && match (gap.end, query.end) {
+                (None, _) => true,
+                (Some(gap), Some(end)) => end <= gap,
+                (Some(_), None) => false,
+            }
+    };
+    let Some((i, gap)) = gaps
+        .iter()
+        .enumerate()
+        .find_map(|(i, gap)| gap.filter(within).map(|gap| (i, gap)))
+    else {
+        return Err(Error::Refused(format!(
+            "those lines of `{}` are in its diff already",
+            query.path
+        )));
+    };
+    let header = file.hunks.get(i).map(hunk_header);
+
+    let (sources, repo, head, file_path) = (
+        Arc::clone(&app.sources),
+        key.repo.clone(),
+        loaded.run.head_sha.clone(),
+        query.path.clone(),
+    );
+    let read = tokio::task::spawn_blocking(move || sources.file_at(&repo, &head, &file_path))
+        .await
+        .wrap_err("reading from the mirror")
+        .and_then(std::convert::identity)
+        .map_err(Error::pr(&key))?;
+    let layout = Layout::parse(query.layout.as_deref());
+    let Some(text) = read else {
+        // In place of the expander's row, which is the hunk's header.
+        let split = layout == Layout::Split;
+        return Ok(html! {
+            tr.hh {
+                td.n.xs colspan=[(!split).then_some(2)] {}
+                td.c colspan=[split.then_some(3)] {
+                    @if let Some(header) = &header { (header) " " }
+                    span.dim { "The local mirror no longer has this file at the reviewed commit." }
+                }
+            }
+        });
+    };
+    let text = String::from_utf8_lossy(&text);
+    let lines: Vec<&str> = text.lines().collect();
+    let last = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let asked = Gap {
+        start: query.start.max(1),
+        end: query.end,
+        ..gap
+    };
+    let Some(Reveal {
+        lines: (from, to),
+        rest,
+    }) = reveal(query.dir, asked, last)
+    else {
+        return Ok(html! {});
+    };
+
+    let existing = Existing {
+        key: &key,
+        threads: &loaded.threads,
+        head: &loaded.run.head_sha,
+        pr_head: &loaded.pr_head,
+    };
+    let no_links = |_: Layout| String::new();
+    let f = Files {
+        app: &app,
+        run: &loaded.run,
+        pr_head: &loaded.pr_head,
+        diff: &loaded.diff,
+        drafts: &loaded.drafts,
+        existing,
+        layout,
+        layout_href: &no_links,
+        expandable: true,
+    };
+    let shown = shown(&f, &query.path, &lines, (from, to), gap.offset);
+    let rest = rest.map_or_else(
+        || html! {},
+        |rest| gap_row(&f, &query.path, Some(rest), header.as_deref()),
+    );
+    Ok(html! {
+        @if query.dir == Dir::Up { (rest) (shown) } @else { (shown) (rest) }
+    })
+}
+
+/// What a click on an expander shows.
+struct Reveal {
+    /// The first and last line, in the new file.
+    lines: (u32, u32),
+    /// What's still left out.
+    rest: Option<Gap>,
+}
+
+/// Which of `asked`'s lines a click `dir` shows, in a file of `last`
+/// lines; `None` if there's nothing there.
+fn reveal(dir: Dir, asked: Gap, last: u32) -> Option<Reveal> {
+    let (start, end) = (asked.start, asked.end.unwrap_or(last).min(last));
+    if start > end {
+        return None;
+    }
+    let (from, to) = match dir {
+        Dir::Up => ((end + 1).saturating_sub(EXPAND).max(start), end),
+        Dir::Down => (start, (start + EXPAND - 1).min(end)),
+        Dir::All => (start, (start + MAX_EXPAND - 1).min(end)),
+    };
+    let rest = if dir == Dir::Up {
+        (start < from).then_some(Gap {
+            end: Some(from - 1),
+            ..asked
+        })
+    } else {
+        (to < end).then_some(Gap {
+            start: to + 1,
+            ..asked
+        })
+    };
+    Some(Reveal {
+        lines: (from, to),
+        rest,
+    })
+}
+
+/// Lines `from` to `to` of `lines`, the file at the run's head, as rows of
+/// unchanged lines: each is the old file's line `offset` away.
+fn shown(f: &Files<'_>, path: &str, lines: &[&str], (from, to): (u32, u32), offset: i64) -> Markup {
+    let rows = Rows::new(f, path, &HashSet::new());
+    let mut highlighter = Highlighter::for_path(path);
+    html! {
+        @for n in from..=to {
+            @let text = lines.get(n as usize - 1).copied().unwrap_or_default();
+            @let line = DiffLine {
+                old: u32::try_from(i64::from(n) + offset).ok(),
+                new: Some(n),
+                text: text.to_owned(),
+            };
+            @let code = if let Some(h) = &mut highlighter { h.line(text) } else { html! { (text) } };
+            @if f.layout == Layout::Split {
+                (rows.split(Some((&line, &code)), Some((&line, &code))))
+            } @else {
+                (rows.unified(&line, &code))
+            }
+        }
+    }
 }
 
 /// A run of a PR with what its files view needs.

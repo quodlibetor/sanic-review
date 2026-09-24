@@ -2109,3 +2109,32 @@ table.d td.c.mark {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* Expanders: show the unchanged lines a hunk's header leaves out. They
+   need the script. Less padded than the header's other cell, to leave
+   two of them room in split's number column. */
+table.d tr.hh td.xs {
+  white-space: nowrap;
+  padding: 0 0.25rem;
+}
+
+button.x {
+  display: none;
+  font: inherit;
+  line-height: 1.3;
+  padding: 0 0.35rem;
+  margin: 0.1rem 0.1rem;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.js button.x {
+  display: inline;
+}
+
+button.x:hover {
+  border-color: var(--accent);
+}

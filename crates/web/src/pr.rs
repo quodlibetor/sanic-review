@@ -99,11 +99,7 @@ pub async fn page(
             .is_some(),
         _ => false,
     };
-    let views = Views {
-        shown: View::parse(query.view.as_deref()),
-        run: query.run,
-        layout: Layout::parse(query.layout.as_deref()),
-    };
+    let views = Views::new(&app, &key, &query, shown.as_ref(), diff.is_some()).await;
     let header = Header {
         pr: &pr,
         state,
@@ -314,9 +310,34 @@ struct Views {
     shown: View,
     run: Option<i64>,
     layout: Layout,
+    /// The files view can show the lines its diff leaves out.
+    expandable: bool,
 }
 
 impl Views {
+    /// As `query` asks, for the `shown` run, which may have a diff.
+    async fn new(
+        app: &Shared,
+        key: &PrKey,
+        query: &PageQuery,
+        shown: Option<&ReviewRun>,
+        diff: bool,
+    ) -> Self {
+        let view = View::parse(query.view.as_deref());
+        let expandable = match shown {
+            Some(run) if view == View::Files && diff => {
+                files::expandable(app, key, &run.head_sha).await
+            }
+            _ => false,
+        };
+        Self {
+            shown: view,
+            run: query.run,
+            layout: Layout::parse(query.layout.as_deref()),
+            expandable,
+        }
+    }
+
     fn href(&self, key: &PrKey, view: View) -> String {
         self.href_with(key, view, self.layout)
     }
@@ -432,6 +453,7 @@ fn drafts_section(
                     existing,
                     layout: views.layout,
                     layout_href: &|layout| views.href_with(&pr.key, View::Files, layout),
+                    expandable: views.expandable,
                 }))
             }
             _ => {

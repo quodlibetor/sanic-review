@@ -49,7 +49,7 @@ use sanic_core::{
     skip::SkipRules,
 };
 use sanic_github::Client;
-use sanic_runner::review::RunSettings;
+use sanic_runner::{mirror::Mirrors, review::RunSettings};
 use sanic_store::{Refusal, Store};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -92,6 +92,27 @@ pub trait Control: Send + Sync {
     fn set_window(&self, choice: Option<WindowChoice>) -> Result<()>;
 }
 
+/// Files at a PR's commits, for the files view's expanding context. They
+/// come from the mirrors the runner keeps, never from GitHub; both calls
+/// block.
+pub trait Sources: Send + Sync {
+    /// Whether `commit` of `repo` can be read.
+    fn has_commit(&self, repo: &RepoName, commit: &str) -> bool;
+
+    /// `path` at `commit` of `repo`; `None` if it can't be read there.
+    fn file_at(&self, repo: &RepoName, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
+}
+
+impl Sources for Mirrors {
+    fn has_commit(&self, repo: &RepoName, commit: &str) -> bool {
+        Mirrors::has_commit(self, repo, commit)
+    }
+
+    fn file_at(&self, repo: &RepoName, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        Mirrors::file_at(self, repo, commit, path)
+    }
+}
+
 /// Everything the dashboard reads and acts through.
 pub struct Context {
     /// The GitHub login everything is judged relative to.
@@ -107,6 +128,8 @@ pub struct Context {
     /// Posts reviews, their replies and thumbs-ups, and nothing else.
     pub github: Client,
     pub control: Arc<dyn Control>,
+    /// The files the diffs are of: the runner's mirrors.
+    pub sources: Arc<dyn Sources>,
     /// When the scheduler will queue each debounced review.
     pub due: watch::Receiver<HashMap<PrKey, Instant>>,
     /// Which PRs aren't reviewed automatically; follows config reloads.
@@ -124,6 +147,7 @@ struct App {
     store: Mutex<Store>,
     github: Client,
     control: Arc<dyn Control>,
+    sources: Arc<dyn Sources>,
     due: watch::Receiver<HashMap<PrKey, Instant>>,
     skips: watch::Receiver<SkipRules>,
     window: watch::Receiver<RecencyWindow>,
@@ -173,6 +197,7 @@ impl Dashboard {
             store,
             github,
             control,
+            sources,
             due,
             skips,
             window,
@@ -187,6 +212,7 @@ impl Dashboard {
                 store: Mutex::new(store),
                 github,
                 control,
+                sources,
                 due,
                 skips,
                 window,
@@ -227,6 +253,10 @@ impl Dashboard {
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/file",
                 get(files::file),
+            )
+            .route(
+                "/pr/{owner}/{name}/{number}/runs/{run}/context",
+                get(files::context),
             )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/regenerate",

@@ -353,9 +353,10 @@ Rules:
    Remove the worktree when the run finishes. Your own PRs with auto-fix are
    handled differently; see Auto-fix.
    The base is fetched by SHA, since that's what the PR snapshot records.
-   The diff runs from the merge base of base and head, as GitHub's does, and
-   fetches never prompt for credentials: they use your git credential
-   helper or fail.
+   The diff runs from the merge base of base and head, as GitHub's does,
+   with GitHub's context around each change whatever your `diff.context`
+   says. Fetches never prompt for credentials: they use your git
+   credential helper or fail.
 2. **Prompt.** Assembled from the profile's instruction files and a generated
    brief: PR metadata, the diff or interdiff, relevant threads, previous drafts
    and how you handled them. PR text goes in as quoted data, never as
@@ -625,6 +626,14 @@ embedded in the binary, so nothing is fetched at runtime.
   the lines out in one column or the old beside the new; like the view,
   it's in the URL and remembered. Long lines scroll inside their file in
   unified and wrap in split, so the page never scrolls sideways.
+  Each hunk's header, and a row after the last hunk unless it has less
+  than the diff's context after its change (so the file ends there),
+  offer the unchanged lines the diff leaves out, a click's worth at a
+  time up or down, or all of a short gap at once. They're read from the
+  repo's mirror at the reviewed head (`sanic_web::Sources`, never
+  GitHub), with the old file's numbers worked out from the hunks around
+  them; when the mirror doesn't have that commit, there's nothing to
+  expand.
 - **Existing threads.** Over the drafts, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, and how
   many are resolved; the threads no draft overlaps are folded under it.

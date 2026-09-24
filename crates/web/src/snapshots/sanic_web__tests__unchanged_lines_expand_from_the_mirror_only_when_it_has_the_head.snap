@@ -1,0 +1,191 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &rows.body)"
+---
+<tr class="ctx">
+<td class="n">5</td>
+<td class="n">6</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">6</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">6</td>
+<td class="n">7</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">7</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">7</td>
+<td class="n">8</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">8</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">8</td>
+<td class="n">9</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">9</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">9</td>
+<td class="n">10</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">10</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">10</td>
+<td class="n">11</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">11</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">11</td>
+<td class="n">12</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">12</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">12</td>
+<td class="n">13</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">13</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">13</td>
+<td class="n">14</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">14</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">14</td>
+<td class="n">15</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">15</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">15</td>
+<td class="n">16</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">16</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">16</td>
+<td class="n">17</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">17</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">17</td>
+<td class="n">18</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">18</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">18</td>
+<td class="n">19</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">19</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">19</td>
+<td class="n">20</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">20</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">20</td>
+<td class="n">21</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">21</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">21</td>
+<td class="n">22</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">22</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">22</td>
+<td class="n">23</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">23</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">23</td>
+<td class="n">24</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">24</span>
+</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="n">24</td>
+<td class="n">25</td>
+<td class="c">
+<span class="sign"> </span>
+<span class="sy-source sy-rust">line <span class="sy-constant sy-numeric sy-integer sy-decimal sy-rust">25</span>
+</span>
+</td>
+</tr>
+<tr class="hh">
+<td class="n xs" colspan="2">
+<button class="x" type="button" hx-get="/pr/org/repo/7/runs/1/context?path=src%2Flib.rs&amp;start=26&amp;dir=down&amp;layout=unified" hx-target="closest tr" hx-swap="outerHTML" title="Show more lines below the hunk above">↓</button>
+</td>
+<td class="c">
+</td>
+</tr>

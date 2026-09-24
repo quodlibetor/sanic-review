@@ -36,7 +36,7 @@ use wiremock::{
     matchers::{any, body_json, body_partial_json, body_string_contains, method, path},
 };
 
-use crate::{Context, Control, Dashboard};
+use crate::{Context, Control, Dashboard, Sources};
 
 const HOST: &str = "127.0.0.1:7117";
 
@@ -110,6 +110,38 @@ impl Control for FakeServe {
             &config.github.git_url,
             vec![],
         ))
+    }
+}
+
+/// The runner's mirrors, as far as the files view reads them: file
+/// contents by commit and path.
+#[derive(Default)]
+struct FakeMirror(Mutex<HashMap<(String, String), String>>);
+
+impl FakeMirror {
+    fn add(&self, commit: &str, path: &str, text: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert((commit.into(), path.into()), text.into());
+    }
+}
+
+impl Sources for FakeMirror {
+    fn has_commit(&self, _: &RepoName, commit: &str) -> bool {
+        self.0.lock().unwrap().keys().any(|(c, _)| c == commit)
+    }
+
+    fn file_at(
+        &self,
+        _: &RepoName,
+        commit: &str,
+        path: &str,
+    ) -> color_eyre::Result<Option<Vec<u8>>> {
+        let files = self.0.lock().unwrap();
+        Ok(files
+            .get(&(commit.into(), path.into()))
+            .map(|text| text.clone().into_bytes()))
     }
 }
 
@@ -190,6 +222,8 @@ diff --git a/src/lib.rs b/src/lib.rs
 struct Fixture {
     dashboard: Dashboard,
     serve: Arc<FakeServe>,
+    /// Empty until a test adds files.
+    mirror: Arc<FakeMirror>,
     github: MockServer,
     /// When the scheduler would queue each debounced review.
     due: watch::Sender<HashMap<PrKey, Instant>>,
@@ -310,6 +344,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     });
     *serve.window.lock().unwrap() = Some(window);
     let clock = Arc::new(FixedClock::default());
+    let mirror = Arc::new(FakeMirror::default());
     let dashboard = Dashboard::new(Context {
         me: "me".into(),
         manual_reviews,
@@ -318,6 +353,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         store,
         github: Client::new(&github.uri(), Token::new("t0ken".into())).unwrap(),
         control: Arc::clone(&serve) as Arc<dyn Control>,
+        sources: Arc::clone(&mirror) as Arc<dyn Sources>,
         due: due_rx,
         skips: watch::channel(skip_rules()).1,
         window: window_rx,
@@ -327,6 +363,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     Fixture {
         dashboard,
         serve,
+        mirror,
         github,
         due,
         run,
@@ -3228,4 +3265,150 @@ async fn the_file_list_marks_files_with_drafts_and_threads() {
     let tree = &body[body.find(r#"<details class="tree" open>"#).unwrap()..];
     let tree = &tree[..tree.find("</details>").unwrap() + "</details>".len()];
     insta::assert_snapshot!(readable(&f, tree));
+}
+
+/// `n` lines of a file, `line 1` to `line n`.
+fn numbered(n: u32) -> String {
+    (1..=n).fold(String::new(), |text, i| text + &format!("line {i}\n"))
+}
+
+/// The expander buttons in `html`, by their `hx-get`, unescaped.
+fn expanders(html: &str) -> Vec<String> {
+    html.split(r#"<button class="x" type="button" hx-get=""#)
+        .skip(1)
+        .map(|rest| rest[..rest.find('"').unwrap()].replace("&amp;", "&"))
+        .collect()
+}
+
+#[tokio::test]
+async fn unchanged_lines_expand_from_the_mirror_only_when_it_has_the_head() {
+    let f = fixture(false).await;
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    assert!(expanders(&page.body).is_empty(), "{}", page.body);
+
+    // The hunk is lines 1 to 5 of 35, with all of git's context after its
+    // change, so there may be more; old line n is new line n+1 after it,
+    // since it adds a line.
+    let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,5 @@
+ line 1
++line 2
+ line 3
+ line 4
+ line 5
+";
+    let run_dir = f.data.path().join("runs").join(f.run.to_string());
+    std::fs::write(run_dir.join("pr.diff"), diff).unwrap();
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    assert!(expanders(&page.body).is_empty(), "{}", page.body);
+    f.mirror.add("head7", "src/lib.rs", &numbered(35));
+    let page = f.get("/pr/org/repo/7?view=files").await;
+    let run = f.run;
+    let down = format!(
+        "/pr/org/repo/7/runs/{run}/context?path=src%2Flib.rs&start=6&dir=down&layout=unified"
+    );
+    assert_eq!(expanders(&page.body), [down.as_str()]);
+    let rows = f.get(&down).await;
+    assert_eq!(rows.status, StatusCode::OK);
+    insta::assert_snapshot!(readable(&f, &rows.body));
+    // The rest, to the end of the file, and then nothing more.
+    let rest = format!(
+        "/pr/org/repo/7/runs/{run}/context?path=src%2Flib.rs&start=26&dir=down&layout=unified"
+    );
+    assert_eq!(expanders(&rows.body), [rest.as_str()]);
+    let rows = f.get(&rest).await;
+    assert!(
+        rows.body.contains(r#"<td class="n">35</td>"#),
+        "{}",
+        rows.body
+    );
+    assert!(expanders(&rows.body).is_empty(), "{}", rows.body);
+}
+
+/// A run's diff of `two.txt`, 32 lines long: a hunk at each end, with
+/// lines 4 to 29 left out between them.
+const TWO_HUNKS: &str = "\
+diff --git a/two.txt b/two.txt
+--- a/two.txt
++++ b/two.txt
+@@ -1,3 +1,3 @@
+ line 1
+-old 2
++line 2
+ line 3
+@@ -30,3 +30,3 @@
+ line 30
+-old 31
++line 31
+ line 32
+";
+
+#[tokio::test]
+async fn a_gap_between_hunks_expands_up_down_or_all_at_once() {
+    let f = fixture(false).await;
+    let run_dir = f.data.path().join("runs").join(f.run.to_string());
+    std::fs::write(run_dir.join("pr.diff"), TWO_HUNKS).unwrap();
+    f.mirror.add("head7", "two.txt", &numbered(32));
+    let page = f.get("/pr/org/repo/7?view=files&layout=split").await;
+    let base = format!("/pr/org/repo/7/runs/{}/context?path=two.txt", f.run);
+    // Lines 4 to 29 are left out, more than one click's worth. The last
+    // hunk has less context after its change than git gives, so the file
+    // ends there.
+    assert_eq!(
+        expanders(&page.body),
+        [
+            format!("{base}&start=4&dir=down&layout=split&end=29"),
+            format!("{base}&start=4&dir=up&layout=split&end=29"),
+        ]
+    );
+    // Up from the hunk below, whose header moves over what's left.
+    let up = f
+        .get(&format!("{base}&start=4&dir=up&layout=split&end=29"))
+        .await;
+    let body = &up.body;
+    assert!(body.starts_with(r#"<tr class="hh">"#), "{body}");
+    assert!(body.contains("@@ -30,3 +30,3 @@"), "{body}");
+    assert!(
+        body.contains("line 10") && body.contains("line 29"),
+        "{body}"
+    );
+    assert!(!body.contains("line 9<"), "{body}");
+    // What's left fits in one click.
+    assert_eq!(
+        expanders(body),
+        [format!("{base}&start=4&dir=all&layout=split&end=9")]
+    );
+    let all = f
+        .get(&format!("{base}&start=4&dir=all&layout=split&end=9"))
+        .await;
+    assert!(all.body.contains("line 4") && all.body.contains("line 9"));
+    assert!(expanders(&all.body).is_empty(), "{}", all.body);
+    // Lines in the diff aren't a gap.
+    let inside = f
+        .get(&format!("{base}&start=2&dir=all&layout=split&end=3"))
+        .await;
+    assert_eq!(inside.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_expander_keeps_its_hunk_header_when_the_mirror_loses_the_file() {
+    let f = fixture(false).await;
+    let run_dir = f.data.path().join("runs").join(f.run.to_string());
+    std::fs::write(run_dir.join("pr.diff"), TWO_HUNKS).unwrap();
+    // The mirror has the head, but not the file there.
+    f.mirror.add("head7", "elsewhere.txt", "");
+    let up = f
+        .get(&format!(
+            "/pr/org/repo/7/runs/{}/context?path=two.txt&start=4&dir=up&layout=unified&end=29",
+            f.run
+        ))
+        .await;
+    assert_eq!(up.status, StatusCode::OK);
+    let body = &up.body;
+    assert!(body.contains("@@ -30,3 +30,3 @@"), "{body}");
+    assert!(body.contains("no longer has this file"), "{body}");
+    assert!(expanders(body).is_empty(), "{body}");
 }
