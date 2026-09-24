@@ -43,8 +43,8 @@ const KEYS: &[(&str, &str)] = &[
     ("g/G, Home/End", "first, last row"),
     ("Enter", "open the selected PR"),
     ("r", "review now: failed, held or skipped (asks first)"),
-    ("a", "archive or unarchive the selected PR"),
-    ("A", "show or hide archived PRs"),
+    ("x", "archive or unarchive the selected PR"),
+    ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
     (
         "c",

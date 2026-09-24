@@ -315,14 +315,14 @@
         else say(RERUN_HINT);
         break;
       }
-      case "a": {
+      case "x": {
         const target = subject();
         const form = target && target.querySelector("form.archive");
         if (form) form.requestSubmit();
-        else say("a archives the selected PR");
+        else say("x archives the selected PR");
         break;
       }
-      case "A": {
+      case "X": {
         const panes = document.getElementById("panes");
         const shown = panes && panes.dataset.showArchived === "true";
         go("/?archived=" + !shown);

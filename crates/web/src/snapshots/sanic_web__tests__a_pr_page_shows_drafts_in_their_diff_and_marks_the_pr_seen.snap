@@ -39,7 +39,7 @@ expression: "readable(&f, &page.body)"
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="pr">
-<button class="btn" type="submit">Archive<span class="k">a</span>
+<button class="btn" type="submit">Archive<span class="k">x</span>
 </button>
 </form>
 </span>
@@ -248,7 +248,7 @@ expression: "readable(&f, &page.body)"
 <p class="help-foot">
 <span class="k">j</span>
 <span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">p</span> preview · <span class="k">r</span>
-<span class="k">a</span>
+<span class="k">x</span>
 <span class="k">i</span>
 <span class="k">c</span> act on the PR · <span class="k">q</span> index</p>
 </main>
@@ -294,13 +294,13 @@ expression: "readable(&f, &page.body)"
 </tr>
 <tr>
 <th>
-<kbd>a</kbd>
+<kbd>x</kbd>
 </th>
 <td>archive or unarchive the selected PR</td>
 </tr>
 <tr>
 <th>
-<kbd>A</kbd>
+<kbd>X</kbd>
 </th>
 <td>show or hide archived PRs</td>
 </tr>

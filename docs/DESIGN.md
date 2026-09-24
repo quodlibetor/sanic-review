@@ -300,8 +300,8 @@ Rules:
 - **Archive.** Archiving a PR is yours alone to set and clear: new pushes
   and comments don't clear it. An archived PR is silent: it gets no
   automatic runs of any kind, and archiving supersedes every run of it
-  that's queued but not started; a running one finishes. Use the TUI's `x` key,
-  or `sanic-review archive <PR url>` and `sanic-review unarchive <PR url>`,
+  that's queued but not started; a running one finishes. Use `x` in the TUI
+  or the dashboard, or `sanic-review archive <PR url>` and `sanic-review unarchive <PR url>`,
   which write the store directly and work while `serve` runs.
 - **Idempotency.** A `review` is keyed by `(pr, head_sha)`. A key that
   already has a queued, running or succeeded run is skipped; one whose run
@@ -673,9 +673,8 @@ embedded in the binary, so nothing is fetched at runtime.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
-  opens the review-now confirm, `a` archives or unarchives, `A` shows
-  archived PRs (the TUI's `x` and `X`, since its `a` jumps to Activity),
-  `i` opens the ignore editor, `c` the chat commands.
+  opens the review-now confirm, `x` archives or unarchives, `X` shows
+  archived PRs, `i` opens the ignore editor, `c` the chat commands.
   `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
   skip a folded group. `q` closes the help, or else goes back to
   the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`

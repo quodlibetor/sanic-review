@@ -52,7 +52,7 @@ expression: "readable(&f, &page.body)"
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button class="linkbtn" type="submit">archive <span class="k">a</span>
+<button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
 </span>
@@ -79,7 +79,7 @@ and more detail">claude exited with 1</span>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button class="linkbtn" type="submit">archive <span class="k">a</span>
+<button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
 </span>
@@ -109,7 +109,7 @@ and more detail">claude exited with 1</span>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button class="linkbtn" type="submit">archive <span class="k">a</span>
+<button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
 </span>
@@ -139,7 +139,7 @@ and more detail">claude exited with 1</span>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
-<button class="linkbtn" type="submit">archive <span class="k">a</span>
+<button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
 </span>
@@ -148,9 +148,9 @@ and more detail">claude exited with 1</span>
 <p class="help-foot">
 <span class="k">j</span>
 <span class="k">k</span> move (a folded group is skipped) · <span class="k">Tab</span> other list · <span class="k">Enter</span> open · <span class="k">r</span>
-<span class="k">a</span>
+<span class="k">x</span>
 <span class="k">i</span>
-<span class="k">c</span> act on the selected row · <span class="k">A</span> archived · <span class="k">?</span> all keys</p>
+<span class="k">c</span> act on the selected row · <span class="k">X</span> archived · <span class="k">?</span> all keys</p>
 </div>
 </main>
 <div class="overlay" id="help" hidden>
@@ -195,13 +195,13 @@ and more detail">claude exited with 1</span>
 </tr>
 <tr>
 <th>
-<kbd>a</kbd>
+<kbd>x</kbd>
 </th>
 <td>archive or unarchive the selected PR</td>
 </tr>
 <tr>
 <th>
-<kbd>A</kbd>
+<kbd>X</kbd>
 </th>
 <td>show or hide archived PRs</td>
 </tr>
