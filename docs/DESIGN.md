@@ -513,8 +513,8 @@ available when tuning instruction files.
 ## Dashboard
 
 `serve` serves it on `http://127.0.0.1:<port>/`. Pages are rendered on the
-server with maud, and htmx handles in-place edits. Every script and style is
-embedded in the binary, so nothing is fetched at runtime.
+server with maud, and htmx handles in-place edits. Every script, style and
+icon is embedded in the binary, so nothing is fetched at runtime.
 
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by

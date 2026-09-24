@@ -9,6 +9,7 @@ expression: "readable(&f, &page.body)"
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
 <title>Ignore by title · sanic-review</title>
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/style.css">
 <script src="/assets/htmx.min.js" defer>
 </script>
