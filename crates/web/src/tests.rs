@@ -826,6 +826,23 @@ async fn githubs_refusal_is_shown_and_not_retried() {
         reply.body
     );
     assert!(reply.body.contains("nothing is retried"), "{}", reply.body);
+    // A refusal is known not to be posted: it says so, not that GitHub
+    // may have it, and the next submit has nothing to look for.
+    assert!(
+        reply
+            .body
+            .contains("GitHub refused it, so it wasn't posted."),
+        "{}",
+        reply.body
+    );
+    assert!(!reply.body.contains("may have taken it"), "{}", reply.body);
+    assert_eq!(
+        f.dashboard.app.store().pending_review(&key(7)).unwrap(),
+        None
+    );
+    let again = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(!again.contains("never answered"), "{again}");
+    assert!(!again.contains("your newest reviews"), "{again}");
     for i in 0..3 {
         assert_eq!(f.status(i), "accepted");
     }
@@ -880,10 +897,21 @@ async fn nothing_accepted_means_nothing_to_submit_except_an_approval() {
         ("payload", payload.as_str()),
         ("pick", pick.as_str()),
     ];
+    // Its preview shows the one request it sends, and it sends only that.
+    assert_eq!(
+        preview.matches("Exactly what's sent").count(),
+        1,
+        "{preview}"
+    );
+    assert!(
+        preview.contains("&quot;event&quot;: &quot;APPROVE&quot;"),
+        "{preview}"
+    );
     assert_eq!(
         f.post(&f.submit_uri(), &confirm).await.status,
         StatusCode::OK
     );
+    assert_eq!(f.github.received_requests().await.unwrap().len(), 1);
     // Posting used the pick up: neither the confirm nor its preview, from
     // history, comes back.
     let again = f.post(&f.submit_uri(), &confirm).await;
@@ -2297,7 +2325,7 @@ async fn a_thumbs_up_is_sent_after_the_review_in_place_of_the_draft() {
         preview.contains("GraphQL addReaction (THUMBS_UP), unless you have, with"),
         "{preview}"
     );
-    assert!(preview.contains("4 of 4"), "{preview}");
+    assert!(preview.contains("3 of 3"), "{preview}");
     let payload = hidden_value(&preview, "payload");
 
     let review = json!({
@@ -2539,26 +2567,16 @@ async fn after_a_failed_thumbs_up_a_retry_sends_only_what_github_lacks() {
     );
 }
 
-/// GitHub taking `review`, a create-review body with its verdict, once:
-/// created pending as `PRR_5`, then submitted with the verdict.
+/// GitHub taking `review`, a create-review body with its verdict, once,
+/// in the one call that creates and submits it, as `PRR_5`.
 async fn takes_review(f: &Fixture, review: &serde_json::Value) {
-    let mut pending = review.clone();
-    let event = pending.as_object_mut().unwrap().remove("event").unwrap();
     Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
-        .and(body_json(&pending))
+        .and(body_json(review))
         .respond_with(created("PRR_5"))
         .expect(1)
         .mount(&f.github)
         .await;
-    mutation(
-        "submitPullRequestReview",
-        &json!({ "review": "PRR_5", "event": event, "body": review["body"] }),
-    )
-    .respond_with(submitted())
-    .expect(1)
-    .mount(&f.github)
-    .await;
 }
 
 /// GitHub's answer to creating pending review `node_id`.
@@ -2575,8 +2593,8 @@ fn submitted() -> ResponseTemplate {
     data(&json!({ "submitPullRequestReview": { "pullRequestReview": { "id": "PRR" } } }))
 }
 
-/// PR 7 with drafts `accepted`, after a submit whose last step, the
-/// submit of pending review `PRR_5`, failed.
+/// PR 7 with drafts `accepted`, after a submit whose one call, creating
+/// and submitting the review, failed as a lost answer would.
 async fn submit_failed(accepted: &[usize]) -> Fixture {
     let f = fixture(false).await;
     for &i in accepted {
@@ -2585,10 +2603,43 @@ async fn submit_failed(accepted: &[usize]) -> Fixture {
     let payload = f.previewed_payload("COMMENT").await;
     let review = Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
+        .and(body_partial_json(json!({ "event": "COMMENT" })))
+        .respond_with(ResponseTemplate::new(502))
+        .expect(1)
+        .mount_as_scoped(&f.github)
+        .await;
+    let failed = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(failed.status, StatusCode::BAD_GATEWAY, "{}", failed.body);
+    assert!(
+        failed.body.contains("looks for it first"),
+        "{}",
+        failed.body
+    );
+    assert_eq!(f.status(0), "accepted");
+    drop(review);
+    f
+}
+
+/// PR 7 after a submit with a reply, so through a pending review, whose
+/// last step, the submit of pending review `PRR_5`, failed.
+async fn pending_submit_failed() -> Fixture {
+    let f = fixture(false).await;
+    record_threads(&f);
+    accept(&f, 0).await;
+    choose(&f, 1, "reply", "t-range", "").await;
+    let payload = f.previewed_payload("COMMENT").await;
+    let review = Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
         .respond_with(created("PRR_5"))
         .expect(1)
         .mount_as_scoped(&f.github)
         .await;
+    let reply = replied(&f, "PRR_5").await;
     let submit = mutation("submitPullRequestReview", &json!({ "review": "PRR_5" }))
         .respond_with(ResponseTemplate::new(502))
         .expect(1)
@@ -2603,8 +2654,60 @@ async fn submit_failed(accepted: &[usize]) -> Fixture {
     assert_eq!(failed.status, StatusCode::BAD_GATEWAY, "{}", failed.body);
     assert!(failed.body.contains("checks it first"), "{}", failed.body);
     assert_eq!(f.status(0), "accepted");
-    drop((review, submit));
+    drop((review, reply, submit));
     f
+}
+
+/// GitHub taking the reply in `t-range` in pending review `review`, once.
+async fn replied(f: &Fixture, review: &str) -> wiremock::MockGuard {
+    mutation(
+        "addPullRequestReviewThreadReply",
+        &json!({ "review": review, "thread": "t-range" }),
+    )
+    .respond_with(data(
+        &json!({ "addPullRequestReviewThreadReply": { "comment": { "id": "C" } } }),
+    ))
+    .expect(1)
+    .mount_as_scoped(&f.github)
+    .await
+}
+
+/// Your newest reviews of PR 7, as looking for one sent without an answer
+/// finds them: with `found`, the COMMENT review `submit_failed` sent, with
+/// inline comments `comments`, posted after all; either way, one just like
+/// it from before it was sent, and one since with another comment too.
+async fn my_reviews(f: &Fixture, found: bool, comments: &[&str]) {
+    let review = |at: &str, n: u32, comments: &[&str]| {
+        let nodes: Vec<_> = comments
+            .iter()
+            .map(|body| json!({ "body": body }))
+            .collect();
+        json!({
+            "url": format!("https://github.com/org/repo/pull/7#pullrequestreview-{n}"),
+            "state": "COMMENTED", "body": "Mostly fine.", "submittedAt": at,
+            "commit": { "oid": "head7" },
+            "comments": { "totalCount": nodes.len(), "nodes": nodes },
+        })
+    };
+    let mut more = comments.to_vec();
+    more.push("An earlier point.");
+    let mut nodes = vec![
+        review("2026-09-23T15:00:00Z", 1, comments),
+        review("2026-09-23T16:30:00Z", 2, &more),
+    ];
+    if found {
+        nodes.push(review("2026-09-23T16:33:52Z", 5, comments));
+    }
+    mutation(
+        "reviews(last:",
+        &json!({ "owner": "org", "name": "repo", "number": 7, "author": "me" }),
+    )
+    .respond_with(data(&json!({
+        "repository": { "pullRequest": { "reviews": { "nodes": nodes } } },
+    })))
+    .expect(1)
+    .mount(&f.github)
+    .await;
 }
 
 /// The review state query for `node_id`, answered `state`.
@@ -2617,8 +2720,70 @@ async fn review_is(f: &Fixture, node_id: &str, state: &str) {
 }
 
 #[tokio::test]
-async fn a_review_submitted_despite_an_error_is_found_and_not_posted_again() {
+async fn a_review_whose_answer_was_lost_is_found_and_not_posted_again() {
     let f = submit_failed(&[0]).await;
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(
+        preview.contains("An earlier submit on this PR sent a review GitHub never answered."),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("GraphQL repository (your newest reviews of the PR), with"),
+        "{preview}"
+    );
+    let payload = hidden_value(&preview, "payload");
+    // Nothing is sent again: GitHub has it.
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    my_reviews(&f, true, &[]).await;
+    let found = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(found.status, StatusCode::CONFLICT, "{}", found.body);
+    assert!(found.body.contains("submitted after all"), "{}", found.body);
+    assert!(found.body.contains("pullrequestreview-5"), "{}", found.body);
+    assert_eq!(f.status(0), "posted");
+    // And it's forgotten: the next preview has nothing to post.
+    assert_eq!(
+        f.get(&f.preview_uri("COMMENT")).await.status,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn a_review_github_never_got_is_sent_again_once() {
+    let f = submit_failed(&[0]).await;
+    let payload = f.previewed_payload("COMMENT").await;
+    // Only a like review from before this one was sent, which isn't it.
+    my_reviews(&f, false, &[]).await;
+    takes_review(
+        &f,
+        &json!({ "commit_id": "head7", "body": "Mostly fine.", "event": "COMMENT", "comments": [] }),
+    )
+    .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert_eq!(f.status(0), "posted");
+    // Its answer came back, so nothing is left to look for.
+    let store = f.dashboard.app.store();
+    assert_eq!(store.pending_review(&key(7)).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_review_left_pending_that_github_submitted_is_not_posted_again() {
+    let f = pending_submit_failed().await;
     let preview = f.get(&f.preview_uri("COMMENT")).await.body;
     assert!(
         preview.contains("An earlier submit on this PR left a review pending."),
@@ -2629,7 +2794,6 @@ async fn a_review_submitted_despite_an_error_is_found_and_not_posted_again() {
         "{preview}"
     );
     let payload = hidden_value(&preview, "payload");
-    // Nothing is created or submitted: GitHub has it.
     Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
         .respond_with(ResponseTemplate::new(500))
@@ -2646,16 +2810,12 @@ async fn a_review_submitted_despite_an_error_is_found_and_not_posted_again() {
     assert_eq!(found.status, StatusCode::CONFLICT, "{}", found.body);
     assert!(found.body.contains("submitted after all"), "{}", found.body);
     assert_eq!(f.status(0), "posted");
-    // And it's forgotten: the next preview has nothing to post.
-    assert_eq!(
-        f.get(&f.preview_uri("COMMENT")).await.status,
-        StatusCode::CONFLICT
-    );
+    assert_eq!(f.status(1), "posted");
 }
 
 #[tokio::test]
 async fn a_review_left_pending_is_deleted_before_it_is_posted_afresh() {
-    let f = submit_failed(&[0]).await;
+    let f = pending_submit_failed().await;
     let payload = f.previewed_payload("COMMENT").await;
     review_is(&f, "PRR_5", "PENDING").await;
     mutation("deletePullRequestReview", &json!({ "review": "PRR_5" }))
@@ -2671,6 +2831,7 @@ async fn a_review_left_pending_is_deleted_before_it_is_posted_afresh() {
         .expect(1)
         .mount(&f.github)
         .await;
+    let _reply = replied(&f, "PRR_6").await;
     mutation("submitPullRequestReview", &json!({ "review": "PRR_6" }))
         .respond_with(submitted())
         .expect(1)
@@ -2689,6 +2850,7 @@ async fn a_review_left_pending_is_deleted_before_it_is_posted_afresh() {
         posted.body
     );
     assert_eq!(f.status(0), "posted");
+    assert_eq!(f.status(1), "posted");
 }
 
 /// GitHub saying you haven't given comment `id` a thumbs-up, however often
@@ -2787,11 +2949,11 @@ async fn a_regeneration_after_a_review_github_took_anyway_does_not_post_it_again
     let uri = format!("/pr/org/repo/7/runs/{regeneration}/preview?event=COMMENT");
     let preview = f.get(&uri).await.body;
     assert!(
-        preview.contains("An earlier submit on this PR left a review pending."),
+        preview.contains("An earlier submit on this PR sent a review GitHub never answered."),
         "{preview}"
     );
     let payload = hidden_value(&preview, "payload");
-    review_is(&f, "PRR_5", "COMMENTED").await;
+    my_reviews(&f, true, &["Why `m`?"]).await;
     Mock::given(method("POST"))
         .and(path("/repos/org/repo/pulls/7/reviews"))
         .respond_with(ResponseTemplate::new(500))
@@ -2830,7 +2992,7 @@ async fn a_review_github_took_anyway_marks_its_copies_in_a_regeneration_posted()
     // The run the review is from is submitted again, not the regeneration.
     let preview = f.get(&f.preview_uri("COMMENT")).await.body;
     let payload = hidden_value(&preview, "payload");
-    review_is(&f, "PRR_5", "COMMENTED").await;
+    my_reviews(&f, true, &["Why `m`?"]).await;
     let found = f
         .post(
             &f.submit_uri(),

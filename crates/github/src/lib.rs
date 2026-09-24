@@ -15,7 +15,7 @@ mod token;
 pub use client::{ApiError, Client};
 pub use notifications::{Notification, NotificationPoll};
 pub use review::{
-    NewComment, NewReaction, NewReply, NewReview, PENDING_REVIEW, PendingReview, ReviewEvent,
-    ReviewStatus, Step, review_state_step,
+    CreatedReview, NewComment, NewReaction, NewReply, NewReview, PENDING_REVIEW, PostError,
+    ReviewEvent, ReviewStatus, SentReview, Step, find_review_step, review_state_step,
 };
 pub use token::Token;
