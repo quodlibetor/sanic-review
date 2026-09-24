@@ -42,7 +42,7 @@ use crate::{
     ServeArgs, Ui, config_edit, logging,
     poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
-    tui::{Request, Shared, Tui},
+    tui::{Request, Shared, SystemBrowser, Tui},
     watch::ConfigWatcher,
     work::Worker,
 };
@@ -115,7 +115,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         config_path: config_path.clone(),
         worker: Arc::clone(&worker),
     };
-    let web = live.dashboard(&me, args.manual_reviews, &data_dir, &github, control, &due)?;
+    // Bound before the TUI starts, so it knows the address to open.
+    let web = live
+        .dashboard(&me, args.manual_reviews, &data_dir, &github, control, &due)?
+        .bind(args.port)
+        .await?;
     let mut ui = match logs {
         Some(logs) => Some(Tui::start(
             &db_path,
@@ -133,6 +137,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 data_dir: data_dir.clone(),
                 runtime: tokio::runtime::Handle::current(),
                 chatting: Arc::clone(&chatting),
+                dashboard: web.url(),
+                opener: Arc::new(SystemBrowser),
             },
         )?),
         None => None,
@@ -167,7 +173,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             start: started,
         }) => Ok(()),
         () = &mut reviews => Ok(()),
-        result = web.serve(args.port) => result,
+        result = web.serve() => result,
         () = interrupted(&chatting) => {
             info!("shutting down");
             Ok(())

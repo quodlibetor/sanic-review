@@ -209,15 +209,42 @@ impl Dashboard {
             .with_state(Arc::clone(&self.app))
     }
 
-    /// Serves on `127.0.0.1:port` until the process ends.
-    pub async fn serve(self, port: u16) -> Result<()> {
+    /// Binds `127.0.0.1:port`, so the address is known before serving;
+    /// port 0 picks a free one.
+    pub async fn bind(self, port: u16) -> Result<Bound> {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .wrap_err_with(|| format!("binding the dashboard to {addr}"))?;
-        let addr = listener.local_addr().unwrap_or(addr);
-        info!(url = %format!("http://{addr}/"), "dashboard listening");
-        axum::serve(listener, self.router())
+        let addr = listener
+            .local_addr()
+            .wrap_err("reading the dashboard's address")?;
+        Ok(Bound {
+            dashboard: self,
+            listener,
+            addr,
+        })
+    }
+}
+
+/// The dashboard, bound and ready to serve.
+pub struct Bound {
+    dashboard: Dashboard,
+    listener: tokio::net::TcpListener,
+    addr: SocketAddr,
+}
+
+impl Bound {
+    /// The index page's URL, with a trailing `/`.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("http://{}/", self.addr)
+    }
+
+    /// Serves until the process ends.
+    pub async fn serve(self) -> Result<()> {
+        info!(url = %self.url(), "dashboard listening");
+        axum::serve(self.listener, self.dashboard.router())
             .await
             .wrap_err("serving the dashboard")
     }
@@ -255,8 +282,9 @@ impl PrPath {
     }
 }
 
-/// The dashboard page for `key`.
-fn pr_href(key: &PrKey) -> String {
+/// The dashboard page for `key`, as a path from the dashboard's root.
+#[must_use]
+pub fn pr_href(key: &PrKey) -> String {
     format!("/pr/{}/{}/{}", key.repo.owner, key.repo.name, key.number)
 }
 

@@ -3,8 +3,8 @@
 //!
 //! It runs on its own thread with its own read-only store connection, and
 //! rereads the store on an interval. Its only actions are asking `serve`
-//! to rerun a review and to archive or unarchive a PR; nothing in it edits
-//! drafts.
+//! to rerun a review and to archive or unarchive a PR, and opening the
+//! dashboard in a browser; nothing in it edits drafts.
 
 use std::{
     collections::HashMap,
@@ -12,6 +12,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -184,6 +185,104 @@ pub struct Shared {
     pub runtime: tokio::runtime::Handle,
     /// Set while a chat has the terminal, so `serve` leaves Ctrl-C to it.
     pub chatting: Arc<AtomicBool>,
+    /// The dashboard index's URL, which `o` opens pages under.
+    pub dashboard: String,
+    /// What `o` opens them with.
+    pub opener: Arc<dyn Opener>,
+}
+
+/// A dashboard page `o` opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Page {
+    Index,
+    Pr(PrKey),
+}
+
+impl Page {
+    /// Its URL, given the index's.
+    fn url(&self, index: &str) -> String {
+        match self {
+            Self::Index => index.to_owned(),
+            Self::Pr(key) => format!("{}{}", index.trim_end_matches('/'), sanic_web::pr_href(key)),
+        }
+    }
+}
+
+/// Opens a URL in a browser.
+pub trait Opener: Send + Sync {
+    fn open(&self, url: &str) -> Result<()>;
+}
+
+/// Your default browser.
+pub struct SystemBrowser;
+
+impl Opener for SystemBrowser {
+    fn open(&self, url: &str) -> Result<()> {
+        // A graphical browser is spawned with stdin, stdout and stderr
+        // null, so it can't write over the UI. A text browser named by
+        // `$BROWSER` still runs in the terminal, as `webbrowser` runs those.
+        let mut options = webbrowser::BrowserOptions::new();
+        options.with_suppress_output(true);
+        webbrowser::open_browser_with_options(webbrowser::Browser::Default, url, &options)
+            .wrap_err_with(|| format!("opening {url} in a browser"))
+    }
+}
+
+/// Opens pages off the UI thread, since a browser can take a while to
+/// start, and hands back what went wrong to show.
+struct Launcher {
+    opener: Arc<dyn Opener>,
+    failures_tx: std_mpsc::Sender<String>,
+    failures: std_mpsc::Receiver<String>,
+}
+
+impl Launcher {
+    fn new(opener: Arc<dyn Opener>) -> Self {
+        let (failures_tx, failures) = std_mpsc::channel();
+        Self {
+            opener,
+            failures_tx,
+            failures,
+        }
+    }
+
+    /// Starts opening `page`, and says so.
+    fn open(&self, page: &Page, index: &str) -> String {
+        let url = page.url(index);
+        let opener = Arc::clone(&self.opener);
+        let failures = self.failures_tx.clone();
+        let spawned = std::thread::Builder::new().name("browser".into()).spawn({
+            let url = url.clone();
+            let page = page.clone();
+            move || {
+                if let Err(err) = opener.open(&url) {
+                    let failure = open_failed(&page, &url, &err);
+                    // Only fails once the UI has stopped.
+                    let _ = failures.send(failure);
+                }
+            }
+        });
+        match spawned {
+            Ok(_) => format!("opening {url}"),
+            Err(err) => open_failed(page, &url, &eyre!(err)),
+        }
+    }
+
+    /// The newest failure since the last call, if any.
+    fn failure(&self) -> Option<String> {
+        self.failures.try_iter().last()
+    }
+}
+
+/// Logs a failure to open `page` at `url`, and says what to show.
+fn open_failed(page: &Page, url: &str, err: &color_eyre::eyre::Report) -> String {
+    match page {
+        Page::Pr(key) => {
+            warn!(url = %key.url(), dashboard = url, "opening the dashboard failed: {err:?}");
+        }
+        Page::Index => warn!(dashboard = url, "opening the dashboard failed: {err:?}"),
+    }
+    format!("couldn't open {url}: {err}")
 }
 
 fn run(
@@ -195,7 +294,11 @@ fn run(
 ) -> Result<()> {
     let mut loaded_at: Option<Instant> = None;
     let mut load_failed = false;
+    let launcher = Launcher::new(Arc::clone(&shared.opener));
     while !stop.load(Ordering::Relaxed) {
+        if let Some(failure) = launcher.failure() {
+            app.set_notice(failure);
+        }
         if loaded_at.is_none_or(|at| at.elapsed() >= REFRESH) {
             loaded_at = Some(Instant::now());
             // A failed read keeps the last data; warn once per failure spell
@@ -231,6 +334,7 @@ fn run(
                     let notice = chat(terminal, shared, &key)?;
                     app.set_notice(notice);
                 }
+                Flow::Open(page) => app.set_notice(launcher.open(&page, &shared.dashboard)),
                 Flow::AddSkipTitle { pattern, profile } => {
                     app.set_notice(add_skip_title(
                         &shared.config_path,
@@ -396,6 +500,8 @@ pub enum Flow {
     Request(Request),
     /// Hand the terminal to a chat with this PR's agent.
     Chat(PrKey),
+    /// Open this dashboard page in a browser.
+    Open(Page),
     /// Add a `skip_titles` glob to the config file, globally for `None`.
     AddSkipTitle {
         pattern: String,
@@ -537,6 +643,7 @@ impl App {
             KeyCode::Char('a') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
             KeyCode::Char('c') => return self.open_chat(),
+            KeyCode::Char('o') => return Flow::Open(self.selected_page()),
             KeyCode::Char('A') => {
                 self.show_archived = !self.show_archived;
                 self.notice = Some(if self.show_archived {
@@ -617,6 +724,24 @@ impl App {
                 Flow::Continue
             }
         }
+    }
+
+    /// The selected row's PR page, in any pane but the log; else the index.
+    fn selected_page(&self) -> Page {
+        let selected = self.lists[self.focus.index()].selected();
+        let key = match self.focus {
+            Pane::Owed => selected
+                .and_then(|i| self.overview.owed.get(i))
+                .map(|pr| &pr.key),
+            Pane::Mine => selected
+                .and_then(|i| self.overview.mine.get(i))
+                .map(|pr| &pr.key),
+            Pane::Activity => selected
+                .and_then(|i| self.overview.activity.get(i))
+                .map(|a| &a.key),
+            Pane::Log => None,
+        };
+        key.map_or(Page::Index, |key| Page::Pr(key.clone()))
     }
 
     /// Opens the ignore editor on the selected review you owe.
@@ -1004,13 +1129,18 @@ fn render_status(
         Constraint::Length(u16::try_from(right.chars().count()).unwrap_or(u16::MAX)),
     ])
     .areas(area);
-    // The key hint makes room while the poller works through a batch.
+    // The key hint makes room while the poller works through a batch, and
+    // leaves `o` out where it would be cut off.
     let left = match overview.refreshing {
         Some(p) => Span::styled(
             format!(" refreshing {}/{}", p.done, p.total),
             Style::new().fg(Color::Cyan),
         ),
-        None => " ? help · q quit".dim(),
+        None => [" ? help · o dashboard · q quit", " ? help · q quit"]
+            .into_iter()
+            .find(|hint| hint.chars().count() < usize::from(left_area.width))
+            .unwrap_or(" ? help · q quit")
+            .dim(),
     };
     frame.render_widget(Paragraph::new(left), left_area);
     frame.render_widget(Paragraph::new(right), right_area);
@@ -1026,6 +1156,7 @@ const HELP: &[(&str, &str)] = &[
     ("A", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
     ("c", "chat with the agent that reviewed it"),
+    ("o", "open it in the dashboard, or the index"),
     ("?, Esc", "close this help"),
 ];
 
@@ -1462,6 +1593,8 @@ mod tests {
             data_dir: PathBuf::new(),
             runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
             chatting: Arc::default(),
+            dashboard: String::new(),
+            opener: Arc::new(Opened::default()),
         };
         let owed = |shared: &Shared| -> Vec<u32> {
             let overview = Overview::load(&store, shared).unwrap();
@@ -1759,6 +1892,90 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('c'));
         assert!(app.notice.as_deref().unwrap().starts_with("no review of"));
+    }
+
+    /// Records what it's asked to open, or fails to.
+    #[derive(Default)]
+    struct Opened {
+        urls: std::sync::Mutex<Vec<String>>,
+        fail: bool,
+    }
+
+    impl Opener for Opened {
+        fn open(&self, url: &str) -> Result<()> {
+            self.urls.lock().unwrap().push(url.to_owned());
+            if self.fail {
+                Err(eyre!("no browser"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    const INDEX: &str = "http://127.0.0.1:4000/";
+
+    /// Presses `o`, and returns what the launcher opened and any failure
+    /// it handed back.
+    fn press_o(app: &mut App, opener: &Arc<Opened>) -> (Vec<String>, Option<String>) {
+        let Flow::Open(page) = app.handle_key(key(KeyCode::Char('o'))) else {
+            panic!("`o` opens a page");
+        };
+        let launcher = Launcher::new(Arc::clone(opener) as Arc<dyn Opener>);
+        let notice = launcher.open(&page, INDEX);
+        assert!(notice.starts_with("opening http://"), "{notice}");
+        // The browser thread's `failures` sender outlives the launcher's
+        // own only while it runs.
+        drop(launcher.failures_tx);
+        let failure = launcher.failures.recv().ok();
+        (std::mem::take(&mut *opener.urls.lock().unwrap()), failure)
+    }
+
+    #[test]
+    fn o_opens_the_selected_pr_in_the_dashboard() {
+        let opener = Arc::new(Opened::default());
+        let mut app = app(false);
+        press(&mut app, KeyCode::End);
+        assert_eq!(
+            press_o(&mut app, &opener),
+            (vec![format!("{INDEX}pr/org/web/79")], None)
+        );
+        // Your PRs, and the PR an activity row is about, too.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            press_o(&mut app, &opener).0,
+            [format!("{INDEX}pr/org/api/470")]
+        );
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            press_o(&mut app, &opener).0,
+            [format!("{INDEX}pr/org/web/79")]
+        );
+    }
+
+    #[test]
+    fn o_opens_the_index_with_no_pr_selected() {
+        let opener = Arc::new(Opened::default());
+        let mut empty = App::new(false);
+        assert_eq!(press_o(&mut empty, &opener), (vec![INDEX.to_owned()], None));
+        // The log's lines aren't PRs.
+        let mut app = app(false);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(press_o(&mut app, &opener).0, [INDEX]);
+    }
+
+    #[test]
+    fn a_browser_that_fails_to_open_says_why() {
+        let opener = Arc::new(Opened {
+            fail: true,
+            ..Opened::default()
+        });
+        let (_, failure) = press_o(&mut App::new(false), &opener);
+        assert_eq!(
+            failure.as_deref(),
+            Some("couldn't open http://127.0.0.1:4000/: no browser")
+        );
     }
 
     #[test]

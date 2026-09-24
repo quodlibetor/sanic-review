@@ -608,8 +608,8 @@ embedded in the binary, so nothing is fetched at runtime.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
-  TUI. Its only actions are rerunning a review, archiving a PR and adding
-  a `skip_titles` pattern to the config.
+  TUI. Its only actions are rerunning a review, archiving a PR, adding
+  a `skip_titles` pattern to the config and opening the dashboard.
   - **Reviews you owe:** open PRs by others that request your review, with
     their PR state (below), then the latest run's status (queued, held by `--manual-reviews`, running, drafted,
     failed, crashed) and the pending draft count. A review still waiting
@@ -674,6 +674,14 @@ embedded in the binary, so nothing is fetched at runtime.
   as `sanic-review chat` does: the TUI gives up the terminal for the chat
   and takes it back when the chat ends, and `serve` keeps running
   meanwhile, leaving Ctrl-C to the chat.
+  `o` opens the dashboard in your default browser: the selected row's PR
+  page in either PR pane or Activity, else (the log, or an empty pane)
+  the index. `serve` binds the dashboard before the TUI starts and hands
+  it the address actually bound on `127.0.0.1`. The browser is launched
+  off the UI thread with its output discarded, so it can't stall or draw
+  over the TUI; a text browser named by `$BROWSER` still runs in the
+  terminal. A failure to launch is logged and shown in the status bar.
+  The status bar's key hint includes `o` where it fits.
   `i` on a review you owe opens an ignore editor: the PR's title and
   description, read-only, over a pattern prefilled with the title (glob
   syntax escaped) to edit down, e.g. to `build(deps)*`. Under it, a live
