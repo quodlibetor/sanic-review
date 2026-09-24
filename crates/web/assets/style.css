@@ -1834,8 +1834,6 @@ main:has(#drafts.files) {
   background: var(--raise);
   border-bottom: 1px solid var(--line);
   font-size: 13px;
-  position: sticky;
-  top: 0;
 }
 
 .file .fp {
@@ -1940,4 +1938,174 @@ table.d tr.inl .thread {
 /* The diff is right there, so an inline draft leaves out its excerpt. */
 .fv-files .dc table.diff {
   display: none;
+}
+
+/* The file list beside the files, which stays in view; on a narrower
+   window it's over them, and folds. */
+.fv-body {
+  display: grid;
+  grid-template-columns: minmax(0, 17rem) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+details.tree {
+  position: sticky;
+  top: 3.2rem;
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  font-size: 13px;
+  margin: 0.75rem 0;
+}
+
+details.tree > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.2rem 0;
+}
+
+details.tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+details.tree a {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+details.tree a:hover {
+  background: var(--raise);
+}
+
+details.tree a.done {
+  color: var(--dim);
+}
+
+details.tree a.done .nm::before {
+  content: "✓ ";
+  color: var(--ok);
+}
+
+details.tree .nm {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+details.tree .marks {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+@media (max-width: 1000px) {
+  .fv-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  details.tree {
+    position: static;
+    max-height: none;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.2rem 0.5rem;
+  }
+}
+
+/* Folding a file, and ticking it viewed, which is the script's. */
+.file .fold,
+.file .viewed {
+  display: none;
+}
+
+.js .file .fold {
+  display: inline;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+}
+
+.js .file .viewed {
+  display: inline-flex;
+  gap: 0.2rem;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.file.folded .fb {
+  display: none;
+}
+
+.file.folded .fh {
+  border-bottom: 0;
+}
+
+.file.folded .fold {
+  transform: rotate(-90deg);
+}
+
+/* Split: the old file beside the new, each half wrapping its long lines
+   rather than scrolling. */
+table.d.split {
+  table-layout: fixed;
+}
+
+table.d.split col.n {
+  width: 3.2rem;
+}
+
+table.d.split td.c {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+table.d td.c.add,
+table.d td.n.add {
+  background: var(--add);
+}
+
+table.d td.c.del,
+table.d td.n.del {
+  background: var(--del);
+}
+
+table.d td.none {
+  background: var(--raise);
+}
+
+table.d td.c.mark {
+  box-shadow: inset 3px 0 var(--held);
+  background: var(--mark);
+}
+
+.fv-head .layouts a {
+  font-size: 13px;
+  padding: 0.12rem 0.6rem;
+  text-decoration: none;
+  color: var(--fg);
+  border-left: 1px solid var(--line);
+}
+
+.fv-head .layouts a:first-child {
+  border-left: 0;
+}
+
+.fv-head .layouts a.cur {
+  background: var(--select);
+  color: var(--accent);
+  font-weight: 600;
 }

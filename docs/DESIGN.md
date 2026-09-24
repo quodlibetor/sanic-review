@@ -617,6 +617,14 @@ embedded in the binary, so nothing is fetched at runtime.
   big file with no draft or thread on it, or any such file once the page
   has shown a lot, is folded to a Load diff button that fetches it on
   its own. Each file's header links to it on GitHub, as its lines link.
+  Beside the files, a list of them with each one's added and removed
+  lines, and how many drafts and threads are on it, jumps to a file on a
+  click; on a narrow window it's over the files, folded. Each file
+  folds, and a Viewed box folds it and keeps it folded for this PR at
+  this head, which the browser remembers. Unified or Split (`s`) lays
+  the lines out in one column or the old beside the new; like the view,
+  it's in the URL and remembered. Long lines scroll inside their file in
+  unified and wrap in split, so the page never scrolls sideways.
 - **Existing threads.** Over the drafts, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, and how
   many are resolved; the threads no draft overlaps are folded under it.
@@ -784,7 +792,8 @@ embedded in the binary, so nothing is fetched at runtime.
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm, `x` archives or unarchives, `X` shows
   archived PRs, `i` opens the ignore editor, `c` the chat commands, `f`
-  switches a PR page between its drafts and the files changed, and
+  switches a PR page between its drafts and the files changed, `s` the
+  files changed between unified and split, and
   on the index `v` and `d` open the selected row's reviewers and lead
   popovers, which `Esc` closes.
   `Enter` opens the selected PR, and `j`/`k` skip a folded group.

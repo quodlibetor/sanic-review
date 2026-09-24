@@ -1,0 +1,23 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, tree)"
+---
+<details class="tree" open>
+<summary>Files <span class="dim">1</span>
+</summary>
+<ul>
+<li>
+<a href="#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759" title="src/lib.rs">
+<span class="nm">
+<span class="dim">src/</span>lib.rs</span>
+<span class="marks">
+<span class="cnt" title="Drafts on this file">1</span>
+<span class="th" title="Existing threads on this file">💬4</span>
+<span class="stats">
+<span class="a">+2</span> <span class="d">−1</span>
+</span>
+</span>
+</a>
+</li>
+</ul>
+</details>
