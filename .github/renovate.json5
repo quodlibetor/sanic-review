@@ -1,0 +1,72 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    'schedule:weekly',
+    'group:allNonMajor',
+    // Actions stay pinned to a commit, with the release in a comment.
+    'helpers:pinGitHubActionDigestsToSemver',
+  ],
+  automerge: false,
+  // Also refreshes the transitive dependencies in Cargo.lock.
+  lockFileMaintenance: {
+    enabled: true,
+  },
+  customManagers: [
+    {
+      // The actions release.yml uses, pinned in dist's config.
+      customType: 'regex',
+      managerFilePatterns: ['/^dist-workspace\\.toml$/'],
+      matchStrings: [
+        '"(?<depName>[\\w.-]+/[\\w.-]+)" = "(?<currentDigest>[0-9a-f]{40})" # (?<currentValue>v\\S+)',
+      ],
+      datasourceTemplate: 'github-tags',
+    },
+    {
+      customType: 'regex',
+      managerFilePatterns: ['/^dist-workspace\\.toml$/'],
+      matchStrings: ['cargo-dist-version = "(?<currentValue>[^"]+)"'],
+      depNameTemplate: 'axodotdev/cargo-dist',
+      datasourceTemplate: 'github-releases',
+      extractVersionTemplate: '^v(?<version>.+)$',
+    },
+  ],
+  packageRules: [
+    {
+      // nextest tags its releases cargo-nextest-X.Y.Z, and the aqua name
+      // isn't a repo.
+      matchManagers: ['mise'],
+      matchDepNames: ['aqua:nextest-rs/nextest/cargo-nextest'],
+      overridePackageName: 'nextest-rs/nextest',
+      extractVersion: '^cargo-nextest-(?<version>.+)$',
+    },
+    {
+      // A new toolchain can bring new clippy lints, so it doesn't hold up
+      // the other updates.
+      matchManagers: ['rust-toolchain'],
+      groupName: 'Rust toolchain',
+    },
+    {
+      // dist generates release.yml; its pins are bumped in
+      // dist-workspace.toml instead.
+      matchManagers: ['github-actions'],
+      matchFileNames: ['.github/workflows/release.yml'],
+      enabled: false,
+    },
+    {
+      // Every input to release.yml. The PR's check fails until release.yml
+      // is regenerated.
+      matchFileNames: ['dist-workspace.toml'],
+      groupName: 'release workflow',
+      prBodyNotes: [
+        'This changes an input to `release.yml`. Check out this branch, run `dist generate`, and push the result; CI fails until then.',
+      ],
+    },
+    {
+      matchManagers: ['mise'],
+      // The dist that checks release.yml moves with the one CI installs.
+      matchDepNames: ['aqua:axodotdev/cargo-dist'],
+      groupName: 'release workflow',
+    },
+  ],
+}

@@ -23,6 +23,15 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 description = "Check advisories, licenses, bans and sources"
 run = "cargo deny --locked check"
 
+[tasks.dist]
+description = "Check release.yml is what dist generates"
+# The ceiling keeps dist in this checkout: from a jj workspace, git would
+# find the main checkout instead.
+run = """
+GIT_CEILING_DIRECTORIES="$(dirname "$PWD")" dist generate --check \
+  || { echo "release.yml is stale: run dist generate (see CLAUDE.md)" >&2; exit 1; }
+"""
+
 [tasks.test]
 description = "Run unit, integration and doc tests"
 run = [
@@ -36,4 +45,4 @@ run = "cargo llvm-cov nextest --workspace --locked"
 
 [tasks.check]
 description = "The gate every change must pass"
-depends = ["fmt", "lint", "deny", "test"]
+depends = ["fmt", "lint", "deny", "dist", "test"]

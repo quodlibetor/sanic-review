@@ -812,15 +812,36 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   | `mise run fmt` | `cargo fmt --check` |
   | `mise run lint` | `cargo clippy --workspace --all-targets -- -D warnings` |
   | `mise run deny` | `cargo deny check` |
+  | `mise run dist` | `dist generate --check`: `release.yml` matches `dist-workspace.toml` |
   | `mise run test` | `cargo nextest run --workspace` plus doctests |
   | `mise run coverage` | `cargo llvm-cov nextest`. Informational, not part of `check` |
-  | `mise run check` | fmt, lint, deny, test |
+  | `mise run check` | fmt, lint, deny, dist, test |
 
 - **Every change passes `mise run check`.** Locally this is a rule in
   `CLAUDE.md`, because jj has no commit hooks. In CI, a GitHub Actions
   workflow in `quodlibetor/sanic-review` runs the same `mise run check` on
   each push and PR. Its actions are pinned to full commit SHAs, with the
   release in a trailing comment: `uses: owner/repo@<sha> # vX.Y.Z`.
+
+### Dependency updates
+
+The hosted Renovate app, configured by `.github/renovate.json5`, opens PRs
+weekly and never automerges. Minor and patch updates share one PR, apart
+from the two groups below; each major gets its own.
+
+- Crates: the requirements in `[workspace.dependencies]`. A requirement is
+  raised only when a release falls outside it; otherwise just `Cargo.lock`
+  moves. Weekly lock file maintenance refreshes the transitive dependencies.
+- Actions in `check.yml`, keeping the `@<sha> # vX.Y.Z` form.
+- Tools in `mise.toml`.
+- The Rust toolchain in `rust-toolchain.toml`, in a PR of its own, since a
+  new clippy can fail the lint step.
+- The inputs to `release.yml`: the action SHAs and `cargo-dist-version` in
+  `dist-workspace.toml`, plus dist in `mise.toml`, grouped into one
+  "release workflow" PR. Renovate can't regenerate `release.yml` (hosted
+  Renovate runs no commands), and leaves it alone. Instead, on that PR
+  `mise run check` fails at the `dist` step until someone checks out the
+  branch, runs `dist generate` and pushes; the PR body says so.
 
 ### Releases
 

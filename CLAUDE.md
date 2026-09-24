@@ -13,8 +13,9 @@ weaken this.
 ## Gate
 
 Every change must pass `mise run check` (fmt, clippy with `-D warnings`,
-cargo-deny, nextest + doctests) before it is described as done. CI runs the
-same task. `mise run coverage` is informational.
+cargo-deny, `release.yml` freshness, nextest + doctests) before it is
+described as done. CI runs the same task. `mise run coverage` is
+informational.
 
 ## Conventions
 
@@ -42,7 +43,7 @@ same task. `mise run coverage` is informational.
 the workflow by hand. dist writes to the git root, which from a jj workspace
 is the main checkout; run it from the workspace root as
 `GIT_CEILING_DIRECTORIES="$(realpath ../..)" dist generate` so it writes
-there instead.
+there instead. `mise run check` fails while `release.yml` is stale.
 
 ## VCS
 
