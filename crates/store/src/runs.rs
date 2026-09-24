@@ -1,11 +1,11 @@
 //! Queries for agent runs and their drafts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
-    pr::{Comment, Placement, PrKey, Thread},
+    pr::{Comment, Placement, PrKey, Reaction, Thread},
     repo::RepoName,
     run::{
         BaselineDraft, Basis, PrContext, QueuedRun, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -797,6 +797,29 @@ impl Store {
             "SELECT id, author, body, created_at, by_bot, reacted_at, url FROM comments
              WHERE repo = ?1 AND number = ?2 AND thread_id = ?3 ORDER BY created_at, rowid",
         )?;
+        // All the PR's reactions at once, rather than a query per comment.
+        let mut reactions: HashMap<String, Vec<Reaction>> = HashMap::new();
+        for row in self
+            .conn
+            .prepare_cached(
+                "SELECT x.comment_id, x.login, x.reacted_at FROM reactions x
+                 JOIN comments c ON c.id = x.comment_id
+                 WHERE c.repo = ?1 AND c.number = ?2
+                 ORDER BY x.reacted_at, x.login",
+            )?
+            .query_map(params![repo, key.number], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    Reaction {
+                        login: row.get(1)?,
+                        at: row.get(2)?,
+                    },
+                ))
+            })?
+        {
+            let (comment, reaction) = row?;
+            reactions.entry(comment).or_default().push(reaction);
+        }
         let mut threads: Vec<Thread> = threads_stmt
             .query_map(params![repo, key.number], |row| {
                 let side: Option<String> = row.get(5)?;
@@ -835,9 +858,13 @@ impl Store {
                         by_bot: row.get(4)?,
                         reacted_at: row.get(5)?,
                         url: row.get(6)?,
+                        reactions: Vec::new(),
                     })
                 })?
-                .collect::<rusqlite::Result<_>>()?;
+                .collect::<rusqlite::Result<Vec<Comment>>>()?;
+            for comment in &mut thread.comments {
+                comment.reactions = reactions.remove(&comment.id).unwrap_or_default();
+            }
         }
         Ok(threads)
     }
@@ -1055,6 +1082,7 @@ mod tests {
                         url: Some("https://github.com/org/repo/pull/7#discussion_r2".into()),
                         by_bot: false,
                         reacted_at: None,
+                        reactions: vec![],
                     },
                     Comment {
                         id: "c1".into(),
@@ -1064,6 +1092,7 @@ mod tests {
                         url: None,
                         by_bot: false,
                         reacted_at: None,
+                        reactions: vec![],
                     },
                 ],
             }],

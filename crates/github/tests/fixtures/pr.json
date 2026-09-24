@@ -109,6 +109,23 @@
                   }
                 ]
               }
+            },
+            {
+              "id": "RT_2",
+              "path": "src/retry.rs",
+              "line": 50,
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasPreviousPage": false },
+                "nodes": [
+                  {
+                    "id": "RC_3",
+                    "author": { "login": "me" },
+                    "body": "and the jitter?",
+                    "createdAt": "2026-09-20T10:00:00Z"
+                  }
+                ]
+              }
             }
           ]
         }

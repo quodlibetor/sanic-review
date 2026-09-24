@@ -225,6 +225,18 @@ pub struct Comment {
     /// The comment's own time stands in if GitHub didn't give the
     /// reaction's.
     pub reacted_at: Option<String>,
+    /// Everyone's latest reaction to it, one per login, among the newest
+    /// GitHub returned. The PR author's reaction to your comment answers
+    /// it, as yours answers theirs.
+    pub reactions: Vec<Reaction>,
+}
+
+/// Someone's emoji reaction to a comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaction {
+    pub login: String,
+    /// The comment's own time stands in if GitHub didn't give one.
+    pub at: String,
 }
 
 impl PrSnapshot {
@@ -291,6 +303,7 @@ mod tests {
                 url: None,
                 by_bot: false,
                 reacted_at: None,
+                reactions: vec![],
             }],
         }
     }

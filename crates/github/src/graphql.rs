@@ -3,11 +3,12 @@
 use color_eyre::eyre::{WrapErr, eyre};
 use sanic_core::{
     pr::{
-        CONVERSATION_THREAD, Comment, Placement, PrKey, PrSnapshot, Review, ReviewState, TeamRef,
-        Thread, is_login,
+        CONVERSATION_THREAD, Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState,
+        TeamRef, Thread, is_login,
     },
     repo::RepoName,
     run::Side,
+    state::reactions_wanted,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -61,6 +62,8 @@ query($owner: String!, $name: String!, $number: Int!) {
 # Your reaction answers a comment. `reactionGroups` says whether for free;
 # the reactions themselves say when, but on every thread comment they'd
 # double the query's rate-limit cost, so only the conversation gets them.
+# The few thread comments whose reactions matter get theirs afterwards,
+# with `REACTIONS_QUERY`.
 fragment comment on Comment {
   id author { __typename login } body createdAt
   ... on UniformResourceLocatable { url }
@@ -73,7 +76,9 @@ const VIEWER_QUERY: &str = "query { viewer { login } }";
 /// query goes here too.
 #[cfg(test)]
 pub(crate) const QUERIES: &[(&str, &str)] = &[
+    ("COUNT_QUERY", COUNT_QUERY),
     ("PR_QUERY", PR_QUERY),
+    ("REACTIONS_QUERY", REACTIONS_QUERY),
     ("SEARCH_QUERY", SEARCH_QUERY),
     ("VIEWER_QUERY", VIEWER_QUERY),
     ("REPLY_MUTATION", review::REPLY_MUTATION),
@@ -90,6 +95,25 @@ query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest { number repository { nameWithOwner } } }
   }
+}";
+
+/// Comments' reactions, by node id: the PR author's reaction to your
+/// comment answers it.
+const REACTIONS_QUERY: &str = r"
+query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on Reactable { reactions(last: 20) { nodes { createdAt user { login } } } }
+  }
+}";
+
+/// The most ids `nodes(ids:)` takes at once.
+const MAX_NODES: usize = 100;
+
+/// Only how many match: the search's first page carries the count.
+const COUNT_QUERY: &str = r"
+query($q: String!) {
+  search(query: $q, type: ISSUE, first: 1) { issueCount }
 }";
 
 #[derive(Serialize)]
@@ -279,6 +303,26 @@ impl Client {
         Ok(keys)
     }
 
+    /// How many open PRs match a GitHub search, fetching none of them. The
+    /// `is:open is:pr` qualifiers are added here, as for
+    /// [`Client::search_prs`].
+    pub async fn count_prs(&self, qualifiers: &str) -> Result<u32, ApiError> {
+        #[derive(Deserialize)]
+        struct Data {
+            search: Count,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Count {
+            issue_count: u32,
+        }
+        let q = format!("is:open is:pr {qualifiers}");
+        let data: Data = self
+            .graphql(COUNT_QUERY, json!({ "q": q }), &format!("count `{q}`"))
+            .await?;
+        Ok(data.search.issue_count)
+    }
+
     /// A full snapshot of the PR from `me`'s point of view, or `None` if it
     /// doesn't exist, isn't visible or isn't open. Closed and merged PRs
     /// keep their pending review requests, and notifications about them stay
@@ -330,7 +374,69 @@ impl Client {
         } else {
             None
         };
-        Ok(Some(raw.into_snapshot(key.clone(), me, files)))
+        let mut snapshot = raw.into_snapshot(key.clone(), me, files);
+        self.add_reactions(&mut snapshot, me).await?;
+        Ok(Some(snapshot))
+    }
+
+    /// Fetches the reactions to your review-thread comments that wait on
+    /// an answer, which only a reaction could give: see
+    /// [`reactions_wanted`]. The PR query leaves them out, since on every
+    /// comment they'd double its cost; the conversation's come with it.
+    async fn add_reactions(&self, snapshot: &mut PrSnapshot, me: &str) -> Result<(), ApiError> {
+        #[derive(Deserialize)]
+        struct Data {
+            nodes: Vec<Option<Node>>,
+        }
+        #[derive(Deserialize)]
+        struct Node {
+            id: String,
+            #[serde(default)]
+            reactions: Option<Connection<RawReaction>>,
+        }
+        let author = (!snapshot.is_authored_by(me)).then(|| snapshot.author.clone());
+        // The conversation's came with the PR.
+        let conversation: Vec<&str> = snapshot
+            .threads
+            .iter()
+            .filter(|t| t.id == CONVERSATION_THREAD)
+            .flat_map(|t| &t.comments)
+            .map(|c| c.id.as_str())
+            .collect();
+        let wanted: Vec<String> = reactions_wanted(&snapshot.threads, me, author.as_deref())
+            .into_iter()
+            .filter(|id| !conversation.contains(id))
+            .map(str::to_owned)
+            .collect();
+        let what = format!("reactions on {}", snapshot.key.url());
+        for ids in wanted.chunks(MAX_NODES) {
+            let resp: Response<Data> = self
+                .graphql_raw(REACTIONS_QUERY, json!({ "ids": ids }), &what)
+                .await?;
+            // A comment deleted since the PR query comes back `null`, with
+            // a `NOT_FOUND` error; the rest still count.
+            if resp
+                .errors
+                .iter()
+                .any(|e| e.kind.as_deref() != Some("NOT_FOUND"))
+            {
+                return Err(eyre!("GraphQL errors for {what}: {}", messages(&resp.errors)).into());
+            }
+            let nodes = resp.data.map(|d| d.nodes).unwrap_or_default();
+            for node in nodes.into_iter().flatten() {
+                let Some(comment) = snapshot
+                    .threads
+                    .iter_mut()
+                    .flat_map(|t| &mut t.comments)
+                    .find(|c| c.id == node.id)
+                else {
+                    continue;
+                };
+                let raw = node.reactions.map(|r| r.nodes).unwrap_or_default();
+                comment.reactions = latest_reactions(raw, &comment.created_at);
+            }
+        }
+        Ok(())
     }
 
     /// Teams the authenticated user belongs to. Needs the `read:org` scope.
@@ -613,14 +719,14 @@ impl RawComment {
     fn into_comment(self, me: &str) -> Comment {
         let by_bot = is_bot(self.author.as_ref());
         let created_at = self.created_at;
-        let reacted_at = self
-            .reactions
-            .map(|r| r.nodes)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.user.as_ref().is_some_and(|u| is_login(&u.login, me)))
-            .map(|r| r.created_at.unwrap_or_else(|| created_at.clone()))
-            .max()
+        let reactions = latest_reactions(
+            self.reactions.map(|r| r.nodes).unwrap_or_default(),
+            &created_at,
+        );
+        let reacted_at = reactions
+            .iter()
+            .find(|r| is_login(&r.login, me))
+            .map(|r| r.at.clone())
             // The token is yours, so the viewer's reaction is yours; when
             // is unknown, so the comment's time stands in.
             .or_else(|| {
@@ -637,8 +743,31 @@ impl RawComment {
             url: self.url,
             by_bot,
             reacted_at,
+            reactions,
         }
     }
+}
+
+/// Each login's latest reaction, once; deleted accounts' are dropped. A
+/// reaction without a time takes the comment's, `created_at`.
+fn latest_reactions(raw: Vec<RawReaction>, created_at: &str) -> Vec<Reaction> {
+    let mut reactions: Vec<Reaction> = Vec::new();
+    for r in raw {
+        let Some(user) = r.user else { continue };
+        let at = r.created_at.unwrap_or_else(|| created_at.to_owned());
+        match reactions
+            .iter_mut()
+            .find(|seen| is_login(&seen.login, &user.login))
+        {
+            Some(seen) if at > seen.at => seen.at = at,
+            Some(_) => {}
+            None => reactions.push(Reaction {
+                login: user.login,
+                at,
+            }),
+        }
+    }
+    reactions
 }
 
 fn review_state(raw: &str) -> ReviewState {

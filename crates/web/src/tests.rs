@@ -198,6 +198,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
         url: None,
         by_bot: false,
         reacted_at: None,
+        reactions: vec![],
     };
     vec![
         // alice answered you in a thread, and you haven't replied.
@@ -1695,6 +1696,7 @@ fn review_thread(id: &str, path: &str, line: Option<u32>, author: &str, body: &s
             )),
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         }],
     }
 }

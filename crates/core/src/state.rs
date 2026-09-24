@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::pr::{Thread, is_login};
+use crate::pr::{Comment, Thread, is_login};
 
 /// What a PR's state is worked out from, as last polled.
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +53,65 @@ pub enum Checks {
     Pending,
     /// Passing, or not what's holding it up.
     Other,
+}
+
+/// Why an approved PR can't merge yet, most pressing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    Conflicts,
+    CiFailing,
+    CiPending,
+    /// Behind its base, where the repo requires it to be up to date.
+    Behind,
+    /// Something else GitHub requires, such as another review.
+    Blocked,
+}
+
+impl Block {
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Conflicts => "conflicts",
+            Self::CiFailing => "ci failing",
+            Self::CiPending => "ci pending",
+            Self::Behind => "behind",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// What the checks and GitHub's merge state say, approved or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Merge {
+    pub ci: Checks,
+    /// What would hold the PR up once approved, if anything.
+    pub block: Option<Block>,
+}
+
+impl Merge {
+    /// From GitHub's `mergeStateStatus` and the head's combined checks.
+    #[must_use]
+    pub fn new(merge_state: Option<&str>, checks: Option<&str>) -> Self {
+        let ci = checks_of(checks);
+        let block = match (merge_state, ci) {
+            (Some("DIRTY"), _) => Some(Block::Conflicts),
+            // `UNSTABLE` is any non-passing status, pending ones included.
+            (_, Checks::Pending) => Some(Block::CiPending),
+            (_, Checks::Failing) | (Some("UNSTABLE"), _) => Some(Block::CiFailing),
+            (Some("BEHIND"), _) => Some(Block::Behind),
+            (Some("BLOCKED"), _) => Some(Block::Blocked),
+            _ => None,
+        };
+        Self { ci, block }
+    }
+}
+
+fn checks_of(checks: Option<&str>) -> Checks {
+    match checks {
+        Some("FAILURE" | "ERROR") => Checks::Failing,
+        Some("PENDING" | "EXPECTED") => Checks::Pending,
+        _ => Checks::Other,
+    }
 }
 
 /// Nothing notable, by default.
@@ -173,11 +232,7 @@ impl fmt::Display for PrState {
 }
 
 fn approval(facts: &StateFacts<'_>) -> Approval {
-    let checks = match facts.checks {
-        Some("FAILURE" | "ERROR") => Checks::Failing,
-        Some("PENDING" | "EXPECTED") => Checks::Pending,
-        _ => Checks::Other,
-    };
+    let checks = checks_of(facts.checks);
     match facts
         .review_decision
         .or_else(|| decision_from(facts.reviews))
@@ -266,10 +321,99 @@ fn unanswered(facts: &StateFacts<'_>) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+/// Threads waiting on someone else's answer to you, for one person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Awaiting {
+    pub login: String,
+    pub threads: u32,
+}
+
+/// Unresolved threads where your latest comment has no answer yet, by who
+/// it waits on, most threads first. On someone else's PR that's its
+/// `author`; on your own (`author` `None`) it's whoever last spoke in the
+/// thread before you, bots aside. They answer with a comment, or with a
+/// reaction to one of yours, from your latest comment on.
+#[must_use]
+pub fn awaiting(threads: &[Thread], me: &str, author: Option<&str>) -> Vec<Awaiting> {
+    let mut out: Vec<Awaiting> = Vec::new();
+    for thread in threads {
+        let Some(whom) = waiting_on(thread, me, author, true) else {
+            continue;
+        };
+        match out.iter_mut().find(|a| is_login(&a.login, whom)) {
+            Some(a) => a.threads += 1,
+            None => out.push(Awaiting {
+                login: whom.to_owned(),
+                threads: 1,
+            }),
+        }
+    }
+    out.sort_by_key(|a| std::cmp::Reverse(a.threads));
+    out
+}
+
+/// Your comments whose reactions could answer them: yours in the threads
+/// [`awaiting`] would count if nobody had reacted. Only their reactions
+/// need fetching to tell.
+#[must_use]
+pub fn reactions_wanted<'a>(threads: &'a [Thread], me: &str, author: Option<&str>) -> Vec<&'a str> {
+    threads
+        .iter()
+        .filter(|thread| waiting_on(thread, me, author, false).is_some())
+        .flat_map(|thread| &thread.comments)
+        .filter(|c| is_login(&c.author, me))
+        .map(|c| c.id.as_str())
+        .collect()
+}
+
+/// Who `thread` waits on for an answer to you, as [`awaiting`] decides;
+/// with `reactions` off, reactions don't count as answers.
+fn waiting_on<'a>(
+    thread: &'a Thread,
+    me: &str,
+    author: Option<&'a str>,
+    reactions: bool,
+) -> Option<&'a str> {
+    if thread.resolved {
+        return None;
+    }
+    let mine = |c: &&Comment| is_login(&c.author, me);
+    let said = thread
+        .comments
+        .iter()
+        .filter(mine)
+        .map(|c| c.created_at.as_str())
+        .max()?;
+    let whom = match author {
+        Some(author) => author,
+        None => thread
+            .comments
+            .iter()
+            .rev()
+            .find(|c| !is_login(&c.author, me) && !c.by_bot)?
+            .author
+            .as_str(),
+    };
+    let replied = thread
+        .comments
+        .iter()
+        .filter(|c| is_login(&c.author, whom))
+        .map(|c| c.created_at.as_str());
+    let reacted = thread
+        .comments
+        .iter()
+        .filter(mine)
+        .flat_map(|c| &c.reactions)
+        .filter(|r| reactions && is_login(&r.login, whom))
+        .map(|r| r.at.as_str());
+    let mut answers = replied.chain(reacted);
+    (!answers.any(|at| at >= said)).then_some(whom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::{CONVERSATION_THREAD, Comment, Placement};
+    use crate::pr::{CONVERSATION_THREAD, Comment, Placement, Reaction};
 
     fn comment(author: &str, at: &str) -> Comment {
         Comment {
@@ -280,6 +424,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         }
     }
 
@@ -491,6 +636,123 @@ mod tests {
             }
             .urgency(),
             Urgency::Good
+        );
+    }
+
+    #[test]
+    fn merge_says_why_an_approval_would_wait() {
+        let block = |merge, checks| Merge::new(merge, checks).block;
+        assert_eq!(block(Some("CLEAN"), Some("SUCCESS")), None);
+        assert_eq!(
+            block(Some("DIRTY"), Some("FAILURE")),
+            Some(Block::Conflicts)
+        );
+        assert_eq!(
+            block(Some("BLOCKED"), Some("FAILURE")),
+            Some(Block::CiFailing)
+        );
+        assert_eq!(
+            block(Some("UNSTABLE"), Some("SUCCESS")),
+            Some(Block::CiFailing)
+        );
+        assert_eq!(
+            block(Some("BLOCKED"), Some("PENDING")),
+            Some(Block::CiPending)
+        );
+        assert_eq!(
+            block(Some("UNSTABLE"), Some("PENDING")),
+            Some(Block::CiPending)
+        );
+        assert_eq!(block(Some("BEHIND"), Some("SUCCESS")), Some(Block::Behind));
+        assert_eq!(
+            block(Some("BLOCKED"), Some("SUCCESS")),
+            Some(Block::Blocked)
+        );
+        // CI is said whether or not anyone approved.
+        assert_eq!(Merge::new(None, Some("ERROR")).ci, Checks::Failing);
+    }
+
+    fn reaction(login: &str, at: &str) -> Reaction {
+        Reaction {
+            login: login.into(),
+            at: format!("2026-01-01T00:00:{at}Z"),
+        }
+    }
+
+    #[test]
+    fn your_comments_wait_on_the_author_until_they_answer() {
+        let waits = |threads: &[Thread]| awaiting(threads, "Me", Some("alice"));
+        // Your comment, then nothing from Alice; Bob's reply isn't hers.
+        let asked = thread(vec![comment("me", "01"), comment("bob", "02")]);
+        assert_eq!(
+            waits(std::slice::from_ref(&asked)),
+            [Awaiting {
+                login: "alice".into(),
+                threads: 1,
+            }]
+        );
+        // She replied, or reacted to your comment.
+        let replied = thread(vec![comment("me", "01"), comment("Alice", "02")]);
+        let mut reacted = asked.clone();
+        reacted.comments[0].reactions = vec![reaction("alice", "03")];
+        assert!(waits(&[replied, reacted.clone()]).is_empty());
+        // A reaction to Bob's comment, or from before your latest, doesn't.
+        let mut elsewhere = asked.clone();
+        elsewhere.comments[1].reactions = vec![reaction("alice", "03")];
+        reacted.comments.push(comment("me", "04"));
+        assert_eq!(waits(&[elsewhere, reacted])[0].threads, 2);
+        // Resolved threads, and threads you're not in, wait on nobody.
+        let mut resolved = asked.clone();
+        resolved.resolved = true;
+        let theirs = thread(vec![comment("bob", "01")]);
+        assert!(waits(&[resolved, theirs]).is_empty());
+    }
+
+    #[test]
+    fn only_your_comments_awaiting_an_answer_want_their_reactions() {
+        let mut asked = thread(vec![comment("me", "01"), comment("me", "02")]);
+        asked.id = "asked".into();
+        let replied = thread(vec![comment("me", "01"), comment("alice", "02")]);
+        let theirs = thread(vec![comment("bob", "01")]);
+        // A reaction already fetched doesn't stop them being wanted again.
+        let mut reacted = asked.clone();
+        reacted.comments[1].reactions = vec![reaction("alice", "03")];
+        let threads = [asked, replied, theirs, reacted];
+        assert_eq!(
+            reactions_wanted(&threads, "Me", Some("alice")),
+            ["me-01", "me-02", "me-01", "me-02"]
+        );
+    }
+
+    #[test]
+    fn on_your_pr_your_replies_wait_on_whoever_you_answered() {
+        let mut bot = comment("ci[bot]", "03");
+        bot.by_bot = true;
+        let threads = [
+            thread(vec![comment("erin", "01"), comment("me", "02"), bot]),
+            thread(vec![
+                comment("frank", "01"),
+                comment("erin", "02"),
+                comment("me", "03"),
+            ]),
+            thread(vec![comment("frank", "01"), comment("me", "02")]),
+            // Erin spoke last: that's yours to answer, not waiting.
+            thread(vec![comment("me", "01"), comment("erin", "02")]),
+            // Nobody to wait on.
+            thread(vec![comment("me", "01")]),
+        ];
+        assert_eq!(
+            awaiting(&threads, "me", None),
+            [
+                Awaiting {
+                    login: "erin".into(),
+                    threads: 2,
+                },
+                Awaiting {
+                    login: "frank".into(),
+                    threads: 1,
+                },
+            ]
         );
     }
 

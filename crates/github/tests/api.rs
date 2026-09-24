@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use sanic_core::run::Side;
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, Placement, PrKey, ReviewState, TeamRef},
+    pr::{CONVERSATION_THREAD, Placement, PrKey, Reaction, ReviewState, TeamRef},
     repo::RepoName,
 };
 use sanic_github::{
@@ -136,6 +136,26 @@ async fn graphql_rate_limit_error_is_recognized() {
 }
 
 #[tokio::test]
+async fn count_reads_only_how_many_match() {
+    let server = MockServer::start().await;
+    Mock::given(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": { "q": "is:open is:pr author:@me updated:<2026-09-09" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": { "search": { "issueCount": 9 } } })),
+        )
+        .mount(&server)
+        .await;
+    let count = client(&server)
+        .count_prs("author:@me updated:<2026-09-09")
+        .await
+        .unwrap();
+    assert_eq!(count, 9);
+}
+
+#[tokio::test]
 async fn search_pages_through_results_and_skips_non_prs() {
     let server = MockServer::start().await;
     Mock::given(path("/graphql"))
@@ -167,8 +187,9 @@ async fn search_pages_through_results_and_skips_non_prs() {
     assert_eq!(keys, [key("org/a", 1), key("org/b", 2)]);
 }
 
-#[tokio::test]
-async fn pull_request_snapshot_includes_threads_reviews_and_files() {
+/// A server answering for `pr.json`'s PR, its reactions follow-up and its
+/// files.
+async fn pr_server() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -176,6 +197,31 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
             "variables": { "owner": "org", "name": "repo", "number": 7 }
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(fixture("pr.json")))
+        .mount(&server)
+        .await;
+    // Only your comment still waiting on Alice wants its reactions: in the
+    // other thread she replied, and the conversation's came with the PR. A
+    // comment deleted since comes back `null`, and doesn't fail the rest.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(
+            json!({ "variables": { "ids": ["RC_3"] } }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "nodes": [{
+                "id": "RC_3",
+                "reactions": { "nodes": [
+                    { "createdAt": "2026-09-20T10:05:00Z", "user": { "login": "alice" } },
+                    { "createdAt": "2026-09-20T10:06:00Z", "user": { "login": "Alice" } },
+                    { "createdAt": "2026-09-20T10:07:00Z", "user": null }
+                ] }
+            }, null] },
+            "errors": [{
+                "type": "NOT_FOUND",
+                "message": "Could not resolve to a node with the global id of 'RC_gone'"
+            }]
+        })))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -186,19 +232,17 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
         ])))
         .mount(&server)
         .await;
+    server
+}
 
+#[tokio::test]
+async fn pull_request_snapshot_says_who_reacted_and_when() {
+    let server = pr_server().await;
     let snap = client(&server)
         .pull_request(&key("org/repo", 7), "me", true)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(snap.author, "alice");
-    assert_eq!(snap.body, "Retries flaky fetches.\n\nCloses #3.");
-    assert_eq!(snap.head_sha, "aaa111");
-    assert_eq!(snap.updated_at.as_deref(), Some("2026-09-20T08:00:00Z"));
-    assert_eq!(snap.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
-    assert_eq!(snap.merge_state.as_deref(), Some("BLOCKED"));
-    assert_eq!(snap.checks.as_deref(), Some("PENDING"));
     let conversation = &snap.threads[0].comments;
     // Your reaction, not someone else's, by its own time.
     assert_eq!(
@@ -212,13 +256,54 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
         Some("2026-09-20T07:30:00Z")
     );
     assert!(conversation[1].by_bot);
-    // In review threads only whether you reacted comes back.
+    // Others' reactions are kept, each login's latest once.
+    assert_eq!(
+        conversation[0].reactions,
+        [
+            Reaction {
+                login: "dave".into(),
+                at: "2026-09-20T07:05:00Z".into(),
+            },
+            Reaction {
+                login: "ME".into(),
+                at: "2026-09-20T07:10:00Z".into(),
+            },
+        ]
+    );
+    // A review-thread comment of yours awaiting the author gets them
+    // afterwards, each login's latest once.
+    assert_eq!(
+        snap.threads[2].comments[0].reactions,
+        [Reaction {
+            login: "alice".into(),
+            at: "2026-09-20T10:06:00Z".into(),
+        }]
+    );
     let thread = &snap.threads[1].comments;
+    assert!(thread[0].reactions.is_empty());
+    assert_eq!(thread[0].reacted_at, None);
+    // Without the reactions themselves, whether you reacted still counts.
     assert_eq!(
         thread[1].reacted_at.as_deref(),
         Some("2026-09-20T09:30:00Z")
     );
-    assert_eq!(thread[0].reacted_at, None);
+}
+
+#[tokio::test]
+async fn pull_request_snapshot_includes_threads_reviews_and_files() {
+    let server = pr_server().await;
+    let snap = client(&server)
+        .pull_request(&key("org/repo", 7), "me", true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snap.author, "alice");
+    assert_eq!(snap.body, "Retries flaky fetches.\n\nCloses #3.");
+    assert_eq!(snap.head_sha, "aaa111");
+    assert_eq!(snap.updated_at.as_deref(), Some("2026-09-20T08:00:00Z"));
+    assert_eq!(snap.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+    assert_eq!(snap.merge_state.as_deref(), Some("BLOCKED"));
+    assert_eq!(snap.checks.as_deref(), Some("PENDING"));
     assert!(
         snap.review_requested,
         "direct request for `Me` matches `me`"
