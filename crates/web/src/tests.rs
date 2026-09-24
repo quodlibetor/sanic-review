@@ -433,9 +433,18 @@ fn hidden_value(html: &str, name: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// `html` with a line per tag and the random token and data dir masked, for
-/// snapshots.
+/// `html` with a line per tag and the random token, data dir and extra
+/// unset token variables masked, for snapshots.
 fn readable(fixture: &Fixture, html: &str) -> String {
+    // The chat commands also unset any other token variable the test's
+    // environment has, such as CI's.
+    let html = sanic_runner::chat::unset_vars()
+        .iter()
+        .skip(sanic_runner::claude::TOKEN_VARS.len())
+        .fold(html.to_owned(), |html, var| {
+            // Trailing space, so `X` doesn't eat the head of `X_FILE`.
+            html.replace(&format!(" -u {} ", sanic_runner::chat::quote(var)), " ")
+        });
     html.replace(&fixture.token(), "<token>")
         .replace(&fixture.pick(), "<pick>")
         // Not `<data>`: the tag split below would put a newline in the
