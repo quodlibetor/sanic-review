@@ -20,6 +20,7 @@ mod regenerate;
 mod submit;
 #[cfg(test)]
 mod tests;
+mod threads;
 
 use std::{
     collections::{HashMap, HashSet},

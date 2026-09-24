@@ -1687,3 +1687,109 @@ fn without_times(html: &str) -> String {
     }
     out + rest
 }
+
+/// A review thread on PR 7 by `author`, placed on `head7` unless `place`
+/// says otherwise.
+fn review_thread(id: &str, path: &str, line: Option<u32>, author: &str, body: &str) -> Thread {
+    Thread {
+        id: id.into(),
+        path: Some(path.into()),
+        line,
+        resolved: false,
+        place: Placement {
+            side: Some(Side::Right),
+            head: Some("head7".into()),
+            ..Placement::default()
+        },
+        comments: vec![Comment {
+            id: format!("{id}-c1"),
+            author: author.into(),
+            body: body.into(),
+            created_at: "2026-09-21T00:00:00Z".into(),
+            url: Some(format!(
+                "https://github.com/org/repo/pull/7#discussion_{id}"
+            )),
+            by_bot: false,
+            reacted_at: None,
+        }],
+    }
+}
+
+/// PR 7 polled again with review threads around the inline draft on
+/// `src/lib.rs:3`: `t-range` on 3-4 and `t-outdated`, left on 3 of the
+/// reviewed head, overlap it; `t-resolved` on 3 is resolved, `t-moved` is
+/// outdated from another commit, `t-other` is on another file, and `t1`,
+/// on 2, is in its diff but not on its lines.
+fn record_threads(f: &Fixture) {
+    // The fixture's own thread, now placed.
+    let mut near = review_thread("t1", "src/lib.rs", Some(2), "me", "hm");
+    near.comments = fixture_prs()[0].threads[0].comments.clone();
+    near.comments[0].url = Some("https://github.com/org/repo/pull/7#discussion_t1".into());
+    let mut range = review_thread(
+        "t-range",
+        "src/lib.rs",
+        Some(4),
+        "bob",
+        "Is `m` used anywhere?\n\nIt looks dead.",
+    );
+    range.place.start_line = Some(3);
+    let mut resolved = review_thread("t-resolved", "src/lib.rs", Some(3), "carol", "Name it?");
+    resolved.resolved = true;
+    let mut outdated = review_thread("t-outdated", "src/lib.rs", None, "dave", "Why 2?");
+    outdated.place.outdated = true;
+    outdated.place.original_line = Some(3);
+    outdated.place.original_commit = Some("head7".into());
+    let mut moved = review_thread("t-moved", "src/lib.rs", None, "erin", "Old point.");
+    moved.place.outdated = true;
+    moved.place.original_line = Some(3);
+    moved.place.original_commit = Some("head6".into());
+    let other = review_thread("t-other", "src/other.rs", Some(3), "frank", "Elsewhere.");
+    let snap = PrSnapshot {
+        threads: vec![near, range, resolved, outdated, moved, other],
+        ..snapshot(7, "alice", "Add the thing")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn existing_threads_are_summed_up_and_shown_beside_the_drafts_they_overlap() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    let page = f.get("/pr/org/repo/7").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let body = &page.body;
+    let summary =
+        &body[body.find(r#"id="existing""#).unwrap()..body.find(r#"id="drafts""#).unwrap()];
+    assert!(
+        summary.contains("<b>6</b> existing review threads · <b class=\"hot\">2</b> overlap your drafts · 1 resolved"),
+        "{summary}"
+    );
+    // The rest, folded: every thread but the two overlapping ones.
+    let rest = &summary[summary.find("<details").unwrap()..];
+    assert!(rest.contains("4 threads don't overlap a draft"), "{rest}");
+    for id in ["t1", "t-resolved", "t-moved", "t-other"] {
+        assert!(
+            rest.contains(&format!("#discussion_{id}\"")),
+            "{id}: {rest}"
+        );
+    }
+    for id in ["t-range", "t-outdated"] {
+        assert!(
+            !rest.contains(&format!("#discussion_{id}\"")),
+            "{id}: {rest}"
+        );
+    }
+    insta::assert_snapshot!(readable(&f, card_of_draft(body, f.drafts[1])));
+}
+
+/// Draft `id`'s card on a PR page.
+fn card_of_draft(html: &str, id: i64) -> &str {
+    let start = html.find(&format!(r#"id="draft-{id}""#)).unwrap();
+    let start = html[..start].rfind("<article").unwrap();
+    let end = start + html[start..].find("</article>").unwrap() + "</article>".len();
+    &html[start..end]
+}

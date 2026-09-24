@@ -9,7 +9,7 @@ use axum::{
 };
 use maud::{Markup, html};
 use sanic_core::{
-    pr::{PrKey, is_login},
+    pr::{PrKey, Thread, is_login},
     skip::Skip,
     start::Why,
     state::PrState,
@@ -24,6 +24,7 @@ use crate::{
     index::{Overview, archive_form, owed_status, why},
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href,
+    threads::{self, Existing},
 };
 
 #[derive(Debug, Deserialize)]
@@ -40,7 +41,7 @@ pub async fn page(
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
     let owed = overview.owed.iter().find(|o| o.key == key);
-    let (pr, state, runs, shown, drafts) = {
+    let (pr, state, runs, shown, drafts, threads) = {
         let store = app.store();
         let load = || -> color_eyre::Result<_> {
             let Some(pr) = store.pr_page(&key)? else {
@@ -70,8 +71,9 @@ pub async fn page(
                 Some(run) => store.draft_rows(run.id)?,
                 None => Vec::new(),
             };
+            let threads = store.threads(&key)?;
             store.record_view(&key)?;
-            Ok(Some((pr, state, runs, shown, drafts)))
+            Ok(Some((pr, state, runs, shown, drafts, threads)))
         };
         load()
             .map_err(Error::pr(&key))?
@@ -104,7 +106,7 @@ pub async fn page(
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
-            (drafts_section(&app, &pr, run, &drafts, diff.as_ref()))
+            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), &threads))
         } @else if runs.is_empty() {
             p.dim { "No reviews yet." }
         } @else {
@@ -300,7 +302,12 @@ fn drafts_section(
     run: &ReviewRun,
     drafts: &[DraftRow],
     diff: Option<&DiffIndex>,
+    threads: &[Thread],
 ) -> Markup {
+    let existing = Existing {
+        threads,
+        head: &run.head_sha,
+    };
     let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
     let preselect = if suggested == "request_changes" {
         "REQUEST_CHANGES"
@@ -354,22 +361,35 @@ fn drafts_section(
         } @else if diff.is_none() {
             div.banner { "This run's diff is gone, so drafts are shown without context." }
         }
+        (threads::summary(existing, drafts))
         section #drafts {
-            @for draft in drafts { (draft_card(app, draft, diff)) }
+            @for draft in drafts { (draft_card(app, draft, diff, existing)) }
         }
     }
 }
 
-/// One draft: its anchor and decision, the diff around it, and its body,
-/// which a click or `e` turns into a box that saves as you leave it.
-pub fn draft_card(app: &App, draft: &DraftRow, diff: Option<&DiffIndex>) -> Markup {
+/// One draft: its anchor and decision, the diff around it, the existing
+/// threads it overlaps, and its body, which a click or `e` turns into a
+/// box that saves as you leave it.
+pub fn draft_card(
+    app: &App,
+    draft: &DraftRow,
+    diff: Option<&DiffIndex>,
+    existing: Existing<'_>,
+) -> Markup {
     let editable = matches!(draft.status.as_str(), "pending" | "accepted" | "rejected");
     let edit = format!("/drafts/{}/edit", draft.id);
     let status = format!("/drafts/{}/status", draft.id);
     // A rejected draft folds to one line.
+    let open = draft.status != "rejected";
     let context = diff
-        .filter(|_| draft.status != "rejected")
-        .and_then(|diff| diff::context(diff, draft));
+        .filter(|_| open)
+        .and_then(|diff| diff::context(diff, draft, existing));
+    let overlapping = if open {
+        existing.overlapping(draft)
+    } else {
+        Vec::new()
+    };
     html! {
         article.draft.dc.(draft.status).summary[draft.kind == "summary"] #{ "draft-" (draft.id) } {
             div.h {
@@ -380,6 +400,12 @@ pub fn draft_card(app: &App, draft: &DraftRow, diff: Option<&DiffIndex>) -> Mark
                     @if let Some(severity) = &draft.severity { span.sev.(severity) { (severity) } }
                     @if let Some(confidence) = &draft.confidence {
                         span.dim.conf { (confidence) " conf." }
+                    }
+                    @if !overlapping.is_empty() {
+                        a.tag-overlap href={ "#draft-" (draft.id) "-threads" }
+                            title="An existing review thread is on these lines." {
+                            "overlaps an existing thread"
+                        }
                     }
                     @if draft.unanchored {
                         span.tag-body title="Not on a line of the diff, so GitHub won't take it inline. If you accept it, it's posted in the review body." {
@@ -416,6 +442,12 @@ pub fn draft_card(app: &App, draft: &DraftRow, diff: Option<&DiffIndex>) -> Mark
                 }
             }
             @if let Some(context) = context { (context) }
+            @if !overlapping.is_empty() {
+                div.overlaps #{ "draft-" (draft.id) "-threads" } {
+                    div.dim { "Already said on these lines:" }
+                    @for thread in &overlapping { (threads::thread_box(thread, existing.head)) }
+                }
+            }
             div.body data-edit[editable] title=[editable.then_some("click or e to edit")] {
                 (draft.body())
             }
@@ -502,25 +534,37 @@ fn decided(
     headers: &HeaderMap,
     change: impl FnOnce(&sanic_store::Store) -> color_eyre::Result<bool>,
 ) -> Result<Response, Error> {
-    let draft = {
+    let (draft, threads, head) = {
         let store = app.store();
         let Some(draft) = store.draft_row(id)? else {
             return Err(Error::NotFound(format!("there's no draft {id}")));
         };
-        if !change(&store).map_err(Error::pr(&draft.key))? {
+        let key = draft.key.clone();
+        if !change(&store).map_err(Error::pr(&key))? {
             return Err(Error::Refused(format!(
                 "draft {id} is {} and can't be changed",
                 draft.status
             )));
         }
-        store
-            .draft_row(id)
-            .map_err(Error::pr(&draft.key))?
-            .unwrap_or(draft)
+        let load = || -> color_eyre::Result<_> {
+            let draft = store.draft_row(id)?.unwrap_or(draft);
+            let head = store
+                .review_runs(&key)?
+                .into_iter()
+                .find(|run| run.id == draft.run_id)
+                .map(|run| run.head_sha)
+                .unwrap_or_default();
+            Ok((draft, store.threads(&key)?, head))
+        };
+        load().map_err(Error::pr(&key))?
     };
     if headers.contains_key("hx-request") {
         let diff = read_diff(app, draft.run_id);
-        return Ok(draft_card(app, &draft, diff.as_ref()).into_response());
+        let existing = Existing {
+            threads: &threads,
+            head: &head,
+        };
+        return Ok(draft_card(app, &draft, diff.as_ref(), existing).into_response());
     }
     let back = format!("{}?run={}#draft-{id}", pr_href(&draft.key), draft.run_id);
     Ok(Redirect::to(&back).into_response())

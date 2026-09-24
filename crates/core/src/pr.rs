@@ -172,6 +172,45 @@ pub struct Placement {
     pub original_commit: Option<String>,
 }
 
+impl Thread {
+    /// Whether this thread already speaks to `lines` of `path` on `side`,
+    /// all lines of `head`: it's on at least one of them, and still open.
+    /// Resolved threads don't count, nor do ones whose lines on `head`
+    /// aren't known; see [`Placement::lines_at`].
+    #[must_use]
+    pub fn overlaps(&self, path: &str, side: Side, (start, end): (u32, u32), head: &str) -> bool {
+        if self.resolved || self.comments.is_empty() || self.path.as_deref() != Some(path) {
+            return false;
+        }
+        self.place
+            .lines_at(self.line, head)
+            .is_some_and(|(s, first, last)| s == side && first <= end && start <= last)
+    }
+}
+
+impl Placement {
+    /// Its side and first and last lines on `head`: GitHub's `line` (the
+    /// thread's) and `start_line` when `head` is the PR head they were
+    /// fetched for and the thread isn't outdated, else its original lines
+    /// when `head` is the commit it was left on. `None` otherwise, since
+    /// lines of another commit may not be the same lines, and for a thread
+    /// on a whole file.
+    #[must_use]
+    pub fn lines_at(&self, line: Option<u32>, head: &str) -> Option<(Side, u32, u32)> {
+        let (start, end) = match (line, self.original_line) {
+            (Some(line), _) if !self.outdated && self.head.as_deref() == Some(head) => {
+                (self.start_line, line)
+            }
+            (_, Some(line)) if self.original_commit.as_deref() == Some(head) => {
+                (self.original_start_line, line)
+            }
+            _ => return None,
+        };
+        let side = self.side.unwrap_or(Side::Right);
+        Some((side, start.unwrap_or(end).min(end), end))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
     pub id: String,
@@ -235,6 +274,113 @@ mod tests {
         ] {
             assert!(PrKey::parse_url(bad).is_err(), "{bad}");
         }
+    }
+
+    fn thread(path: &str, line: Option<u32>, place: Placement) -> Thread {
+        Thread {
+            id: "t".into(),
+            path: Some(path.into()),
+            line,
+            resolved: false,
+            place,
+            comments: vec![Comment {
+                id: "c".into(),
+                author: "bob".into(),
+                body: "hm".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                url: None,
+                by_bot: false,
+                reacted_at: None,
+            }],
+        }
+    }
+
+    /// On the head it was fetched at, `start..=line` on the new side.
+    fn current(start: Option<u32>) -> Placement {
+        Placement {
+            start_line: start,
+            side: Some(Side::Right),
+            head: Some("h2".into()),
+            ..Placement::default()
+        }
+    }
+
+    #[test]
+    fn a_thread_overlaps_lines_it_shares_on_the_same_file_and_side() {
+        let on = |t: &Thread, lines| t.overlaps("src/a.rs", Side::Right, lines, "h2");
+        let single = thread("src/a.rs", Some(5), current(None));
+        assert!(on(&single, (5, 5)));
+        assert!(on(&single, (3, 5)));
+        assert!(on(&single, (5, 9)));
+        assert!(!on(&single, (6, 9)));
+        assert!(!on(&single, (1, 4)));
+
+        let range = thread("src/a.rs", Some(8), current(Some(4)));
+        assert!(on(&range, (1, 4)));
+        assert!(on(&range, (8, 12)));
+        assert!(on(&range, (6, 6)));
+        assert!(!on(&range, (9, 12)));
+        assert!(!on(&range, (1, 3)));
+
+        // Another file, or the other side of the same file.
+        assert!(!range.overlaps("src/b.rs", Side::Right, (4, 8), "h2"));
+        assert!(!range.overlaps("src/a.rs", Side::Left, (4, 8), "h2"));
+        // No side from GitHub is the new file's.
+        let sideless = thread(
+            "src/a.rs",
+            Some(5),
+            Placement {
+                side: None,
+                ..current(None)
+            },
+        );
+        assert!(on(&sideless, (5, 5)));
+    }
+
+    #[test]
+    fn resolved_threads_and_empty_ones_dont_overlap() {
+        let mut resolved = thread("src/a.rs", Some(5), current(None));
+        resolved.resolved = true;
+        assert!(!resolved.overlaps("src/a.rs", Side::Right, (5, 5), "h2"));
+        let mut empty = thread("src/a.rs", Some(5), current(None));
+        empty.comments.clear();
+        assert!(!empty.overlaps("src/a.rs", Side::Right, (5, 5), "h2"));
+    }
+
+    #[test]
+    fn lines_count_only_on_the_commit_they_are_lines_of() {
+        let on = |t: &Thread, head| t.overlaps("src/a.rs", Side::Right, (5, 5), head);
+        // Fetched for another head: its line there may not be line 5 here.
+        let fresh = thread("src/a.rs", Some(5), current(None));
+        assert!(!on(&fresh, "h1"));
+        // Never fetched with a head, as rows from before it was recorded.
+        assert!(!on(
+            &thread("src/a.rs", Some(5), Placement::default()),
+            "h2"
+        ));
+
+        // Outdated: its original lines hold only on the commit it was left
+        // on, and its stale `line` never counts.
+        let outdated = thread(
+            "src/a.rs",
+            None,
+            Placement {
+                side: Some(Side::Right),
+                head: Some("h2".into()),
+                outdated: true,
+                original_start_line: Some(4),
+                original_line: Some(6),
+                original_commit: Some("h1".into()),
+                ..Placement::default()
+            },
+        );
+        assert!(on(&outdated, "h1"));
+        assert!(!on(&outdated, "h2"));
+        let mut stale_line = outdated.clone();
+        stale_line.line = Some(5);
+        assert!(!on(&stale_line, "h2"));
+        // A thread on the whole file has no lines.
+        assert!(!on(&thread("src/a.rs", None, current(None)), "h2"));
     }
 
     #[test]

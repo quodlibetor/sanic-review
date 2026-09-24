@@ -1287,3 +1287,97 @@ main:has(> .prh) {
   border-radius: 4px;
   padding: 0.3rem;
 }
+
+/* The PR's existing review threads: a summary over the drafts, each
+   thread beside the drafts it overlaps and in their diff. */
+.threads-bar {
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  margin: 0.75rem 0;
+  font-size: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  align-items: baseline;
+}
+
+.threads-bar b.hot {
+  color: var(--held);
+}
+
+.threads-rest {
+  flex-basis: 100%;
+}
+
+.threads-rest > summary {
+  cursor: pointer;
+  color: var(--dim);
+}
+
+.thread {
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  margin: 0.4rem 0;
+  background: var(--raise);
+  font-size: 13px;
+}
+
+.thread.resolved {
+  color: var(--dim);
+  background: none;
+}
+
+.thread .th {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  align-items: baseline;
+}
+
+.thread .th .anc {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.thread .gh {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.thread ul.said {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.overlaps {
+  margin: 0.4rem 0;
+  font-size: 13px;
+}
+
+.tag-overlap {
+  font-size: 12px;
+  color: var(--held);
+  border: 1px solid var(--held);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  text-decoration: none;
+}
+
+table.diff tr.thread-row td {
+  font-family: system-ui, sans-serif;
+  white-space: normal;
+  padding: 0.15rem 0.4rem 0.15rem 6.8rem;
+  background: var(--raise);
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+table.diff tr.thread-row.resolved td {
+  color: var(--dim);
+  background: none;
+}
