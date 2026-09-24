@@ -253,6 +253,9 @@ impl World {
             .arg(data_dir)
             .env("GITHUB_TOKEN", "t0ken")
             .env("GH_TOKEN", "t0ken")
+            // Ones named like a token, as CI's mise sets.
+            .env("MISE_GITHUB_TOKEN", "leak1")
+            .env("gh_token", "leak2")
             // The scheduler says at debug level when it skips a reviewed head.
             .env("RUST_LOG", "info,sanic_review::schedule=debug")
             .env("NO_COLOR", "1")
@@ -311,10 +314,9 @@ async fn serve_drafts_a_requested_review() {
     assert!(line.contains("unanchored=1"), "{line}");
 
     let env = std::fs::read_to_string(w.fake.join("env")).unwrap();
-    assert!(
-        !env.contains("t0ken"),
-        "the agent saw a GitHub token:\n{env}"
-    );
+    for token in ["t0ken", "leak1", "leak2"] {
+        assert!(!env.contains(token), "the agent saw a GitHub token:\n{env}");
+    }
 
     let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().pending_drafts, 3);
@@ -474,6 +476,7 @@ async fn chat_resumes_the_session_in_the_reviews_worktree() {
             .arg("--data-dir")
             .arg(&w.data)
             .env("GITHUB_TOKEN", "t0ken")
+            .env("MISE_GITHUB_TOKEN", "leak1")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .output()
@@ -500,7 +503,9 @@ async fn chat_resumes_the_session_in_the_reviews_worktree() {
     );
     assert!(!args.contains(&"-p"), "{args:?}");
     let env = std::fs::read_to_string(w.fake.join("env")).unwrap();
-    assert!(!env.contains("GITHUB_TOKEN"), "{env}");
+    for token in ["t0ken", "leak1"] {
+        assert!(!env.contains(token), "the agent saw a GitHub token:\n{env}");
+    }
     assert!(!worktree.exists(), "the chat's worktree outlived it");
 
     // A worktree already there means a chat may be open: refused.
@@ -522,6 +527,7 @@ async fn chat_resumes_the_session_in_the_reviews_worktree() {
         line.starts_with(&format!("cd {} && env -u GITHUB_TOKEN", worktree.display())),
         "{line}"
     );
+    assert!(line.contains(" -u MISE_GITHUB_TOKEN "), "{line}");
     assert!(worktree.join("lib.rs").exists());
     assert!(chat(&["--cleanup", "1"]).status.success());
     assert!(!worktree.exists());

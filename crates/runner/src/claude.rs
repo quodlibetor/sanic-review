@@ -5,6 +5,7 @@
 //! given, and an environment with no GitHub token.
 
 use std::{
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -20,13 +21,39 @@ use tokio::{io::AsyncWriteExt, process::Command};
 /// Tools a review agent may use.
 pub const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
 
-/// Environment variables that can carry a GitHub token.
+/// The environment variables `gh` and GitHub's tooling read a token from,
+/// which a command to paste unsets whether or not they're set here.
 pub const TOKEN_VARS: &[&str] = &[
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
     "GH_ENTERPRISE_TOKEN",
 ];
+
+/// Whether an environment variable named `name` may carry a GitHub
+/// credential, ignoring case: one naming GitHub, or starting `GH_`, that
+/// also names a token, PAT, secret, password or key. So `GH_TOKEN` and
+/// `MISE_GITHUB_TOKEN` do, and `GITHUB_REPOSITORY` and `GH_HOST` don't.
+#[must_use]
+pub fn is_token_var(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    (name.contains("GITHUB") || name.starts_with("GH_"))
+        && ["TOKEN", "PAT", "SECRET", "PASSWORD", "KEY"]
+            .iter()
+            .any(|part| name.contains(part))
+}
+
+/// The variables set in this process that [`is_token_var`], sorted, which
+/// every agent's environment goes without.
+#[must_use]
+pub fn token_vars() -> Vec<OsString> {
+    let mut vars: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| is_token_var(name))
+        .collect();
+    vars.sort();
+    vars
+}
 
 pub struct Claude {
     program: PathBuf,
@@ -113,7 +140,7 @@ impl Claude {
         for dir in inv.add_dirs {
             cmd.arg("--add-dir").arg(dir);
         }
-        for var in TOKEN_VARS {
+        for var in token_vars() {
             cmd.env_remove(var);
         }
         Ok(cmd)
@@ -279,13 +306,45 @@ mod tests {
         assert_eq!(after("--add-dir"), "/skills");
         assert!(args.contains(&"--restricted"));
         assert!(args.contains(&"--strict-mcp-config"));
-        let removed: Vec<_> = std
+        let mut removed: Vec<_> = std
             .get_envs()
             .filter(|(_, v)| v.is_none())
-            .filter_map(|(k, _)| k.to_str())
+            .map(|(k, _)| k.to_owned())
             .collect();
-        for var in TOKEN_VARS {
-            assert!(removed.contains(var), "{var} not removed");
+        removed.sort();
+        assert_eq!(removed, token_vars());
+    }
+
+    #[test]
+    fn token_vars_are_recognized_by_name() {
+        for name in [
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "MISE_GITHUB_TOKEN",
+            "gh_token",
+            "GITHUB_PAT",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GH_OAUTH_TOKEN",
+            "HOMEBREW_GITHUB_API_TOKEN",
+            "GITHUB_ACCESS_TOKEN",
+            "GITHUB_OAUTH_TOKEN",
+            "GH_PAT",
+            "GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_CLIENT_SECRET",
+            "GH_PASSWORD",
+        ] {
+            assert!(is_token_var(OsStr::new(name)), "{name} kept");
+        }
+        for name in [
+            "GITHUB_REPOSITORY",
+            "GITHUB_SHA",
+            "GH_HOST",
+            "PATH",
+            "TOKEN",
+            "NPM_TOKEN",
+        ] {
+            assert!(!is_token_var(OsStr::new(name)), "{name} stripped");
         }
     }
 

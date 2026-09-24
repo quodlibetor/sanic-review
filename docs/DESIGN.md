@@ -717,6 +717,15 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   worst it can do is write a bad draft that you then read.
 - The GitHub token lives only in the serve process, and only the web task's
   submit path writes with it.
+- Every agent, whether a review, a regeneration or a chat, runs without
+  any environment variable whose name looks like a GitHub credential,
+  ignoring case: any that names GitHub or starts `GH_` and also names a
+  token, PAT, secret, password or key (so `GH_TOKEN`, `MISE_GITHUB_TOKEN`
+  and `GITHUB_APP_PRIVATE_KEY`, not `GITHUB_REPOSITORY` or `GH_HOST`).
+  `sanic_runner::claude::is_token_var`
+  decides, over the names actually set, rather than a fixed list. A chat
+  command to paste unsets `gh`'s own token variables, which the terminal
+  it's pasted in may set, then the others set where it was printed.
 - The dashboard only listens on `127.0.0.1`, but any page open in your
   browser can send it requests. So it answers only when `Host` names the
   loopback interface, which stops DNS rebinding. Every state-changing

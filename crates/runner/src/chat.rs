@@ -10,7 +10,7 @@ use std::{
     process::Command,
 };
 
-use crate::claude::{READ_ONLY_TOOLS, TOKEN_VARS};
+use crate::claude::{READ_ONLY_TOOLS, TOKEN_VARS, token_vars};
 
 /// Tools a chat with `--allow-edits` may use.
 pub const EDIT_TOOLS: &str = "Read,Grep,Glob,Edit,Write";
@@ -66,20 +66,24 @@ impl ChatCommand {
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.current_dir(&self.cwd).args(self.args());
-        for var in TOKEN_VARS {
+        for var in token_vars() {
             cmd.env_remove(var);
         }
         cmd
     }
 
     /// The same, as one shell line to paste: `cd <worktree> && env -u …
-    /// claude …`.
+    /// claude …`, unsetting [`unset_vars`].
     #[must_use]
     pub fn shell_line(&self) -> String {
+        self.shell_line_unsetting(&unset_vars())
+    }
+
+    fn shell_line_unsetting(&self, vars: &[String]) -> String {
         let mut words = vec!["env".to_owned()];
-        for var in TOKEN_VARS {
+        for var in vars {
             words.push("-u".into());
-            words.push((*var).into());
+            words.push(quote(var));
         }
         words.push(quote(&self.program.display().to_string()));
         words.extend(self.args().iter().map(|a| quote(a)));
@@ -89,6 +93,22 @@ impl ChatCommand {
             words.join(" ")
         )
     }
+}
+
+/// What a pasted chat command unsets: [`TOKEN_VARS`], which the terminal
+/// it's pasted in may set, then any other token variable set here.
+#[must_use]
+pub fn unset_vars() -> Vec<String> {
+    let extra: Vec<String> = token_vars()
+        .into_iter()
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| !TOKEN_VARS.contains(&name.as_str()))
+        .collect();
+    TOKEN_VARS
+        .iter()
+        .map(|&v| v.to_owned())
+        .chain(extra)
+        .collect()
 }
 
 /// `word` as a single POSIX shell word.
@@ -150,13 +170,23 @@ mod tests {
             ]
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/data/worktrees/3")));
-        let removed: Vec<_> = cmd
+        let mut removed: Vec<_> = cmd
             .get_envs()
             .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .map(|(name, _)| name.to_owned())
             .collect();
-        assert_eq!(removed.len(), TOKEN_VARS.len());
-        assert!(removed.iter().any(|v| v == "GITHUB_TOKEN"));
+        removed.sort();
+        assert_eq!(removed, token_vars());
+    }
+
+    #[test]
+    fn a_pasted_chat_unsets_the_known_token_vars_first() {
+        let vars = unset_vars();
+        assert_eq!(vars[..TOKEN_VARS.len()], *TOKEN_VARS);
+        assert!(chat(false).shell_line().starts_with(
+            "cd /data/worktrees/3 && env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+             -u GH_ENTERPRISE_TOKEN "
+        ));
     }
 
     #[test]
@@ -173,9 +203,9 @@ mod tests {
     #[test]
     fn the_shell_line_quotes_what_needs_it() {
         assert_eq!(
-            chat(false).shell_line(),
-            "cd /data/worktrees/3 && env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
-             -u GH_ENTERPRISE_TOKEN '/opt/my claude' --resume sess-9 --restricted \
+            chat(false).shell_line_unsetting(&["GH_TOKEN".into(), "odd name".into()]),
+            "cd /data/worktrees/3 && env -u GH_TOKEN -u 'odd name' '/opt/my claude' \
+             --resume sess-9 --restricted \
              --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob \
              --add-dir /data/runs/3 --add-dir '/src/lib'\\''s'"
         );
