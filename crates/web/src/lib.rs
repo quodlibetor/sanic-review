@@ -9,6 +9,7 @@
 //! you've seen the exact requests and pressed Confirm.
 
 mod assets;
+mod cells;
 mod chat;
 mod diff;
 mod guard;
@@ -38,7 +39,12 @@ use axum::{
     routing::{get, post},
 };
 use color_eyre::eyre::{self, Result, WrapErr};
-use sanic_core::{clock::Clock, pr::PrKey, repo::RepoName, skip::SkipRules};
+use sanic_core::{
+    clock::{Clock, RecencyWindow, WindowChoice},
+    pr::PrKey,
+    repo::RepoName,
+    skip::SkipRules,
+};
 use sanic_github::Client;
 use sanic_runner::review::RunSettings;
 use sanic_store::{Refusal, Store};
@@ -70,6 +76,12 @@ pub trait Control: Send + Sync {
     /// It starts now, even under `--manual-reviews`. Returns the new run's
     /// id, or why it can't; [`Refusal`] says why in words.
     fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>>;
+
+    /// Picks the recency window for the lists and the poller in place of
+    /// `poll.updated_within_days`, or with `None` goes back to it. It's
+    /// kept in the store, not the config file, and the next reconcile
+    /// fetches what it now takes in.
+    fn set_window(&self, choice: Option<WindowChoice>) -> Result<()>;
 }
 
 /// Everything the dashboard reads and acts through.
@@ -91,8 +103,8 @@ pub struct Context {
     pub due: watch::Receiver<HashMap<PrKey, Instant>>,
     /// Which PRs aren't reviewed automatically; follows config reloads.
     pub skips: watch::Receiver<SkipRules>,
-    /// `poll.updated_within_days`: PRs quiet for longer are left out.
-    pub window: watch::Receiver<Option<u32>>,
+    /// The recency window: PRs quiet for longer are left out.
+    pub window: watch::Receiver<RecencyWindow>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -106,7 +118,7 @@ struct App {
     control: Arc<dyn Control>,
     due: watch::Receiver<HashMap<PrKey, Instant>>,
     skips: watch::Receiver<SkipRules>,
-    window: watch::Receiver<Option<u32>>,
+    window: watch::Receiver<RecencyWindow>,
     clock: Arc<dyn Clock>,
     csrf: Csrf,
     /// Approvals picked on the PR page's verdict form, by pick id; see
@@ -208,6 +220,7 @@ impl Dashboard {
                 "/pr/{owner}/{name}/{number}/runs/{run}/regenerate",
                 get(regenerate::confirm).post(regenerate::regenerate),
             )
+            .route("/window", post(index::set_window))
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
             .route("/drafts/{id}/thread", post(pr::choose_thread))

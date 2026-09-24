@@ -5,22 +5,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::extract::{Query, State};
+use axum::{
+    Form,
+    extract::{Query, State},
+    response::Redirect,
+};
 use color_eyre::eyre::Result;
 use maud::{Markup, html};
 use sanic_core::{
-    clock::window_start,
+    clock::{WindowChoice, window_start},
     pr::PrKey,
     skip::{PrFacts, Skip},
     start::Why,
-    state::{Approval, Block, Merge, PrState, Urgency},
+    state::{Approval, Block, Checks, Merge, PrState, Urgency},
 };
-use sanic_store::{Decided, MyPr, OwedReview, RowFacts};
+use sanic_store::{Decided, List, MyPr, OwedReview, RowFacts};
 use serde::Deserialize;
+use tracing::info;
 
 use crate::{
     App, Error, Shared,
-    page::{self, Kind, countdown, csrf_field, drafts, first_line, keycap, pr_ref},
+    cells::{LeadPop, ReviewedBy, plural},
+    page::{self, Kind, countdown, csrf_field, drafts, keycap, pr_ref},
     pr_href,
 };
 
@@ -37,6 +43,16 @@ pub struct Overview {
     /// What the index shows of each listed PR beyond its list entry; see
     /// [`Overview::load_facts`].
     pub facts: HashMap<PrKey, RowFacts>,
+    /// How many PRs of each list the recency window hides, as the last
+    /// reconcile under it counted; also loaded by `load_facts`.
+    pub hidden: Hidden,
+}
+
+/// Open PRs the recency window leaves out of each list, if counted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hidden {
+    pub owed: Option<u32>,
+    pub mine: Option<u32>,
 }
 
 impl Overview {
@@ -75,6 +91,7 @@ impl Overview {
             owed,
             waiting,
             facts: HashMap::new(),
+            hidden: Hidden::default(),
         })
     }
 
@@ -86,6 +103,11 @@ impl Overview {
             self.facts
                 .insert(key.clone(), store.row_facts(key, &app.me)?);
         }
+        let days = app.window.borrow().days();
+        self.hidden = Hidden {
+            owed: store.hidden(List::Owed, days)?,
+            mine: store.hidden(List::Mine, days)?,
+        };
         Ok(())
     }
 
@@ -111,7 +133,7 @@ impl Overview {
 
 /// The start of the recency window the lists are cut to.
 fn since(app: &App) -> Option<String> {
-    window_start(app.clock.now(), *app.window.borrow())
+    window_start(app.clock.now(), app.window.borrow().days())
 }
 
 /// Just the reviews you owe, as [`Overview::load`] reads them.
@@ -340,19 +362,6 @@ fn index_status(
     }
 }
 
-/// The state's words the lead didn't already say, for the second line.
-fn other_words(state: PrState, lead: &str) -> Vec<String> {
-    if state.is_blank() {
-        return Vec::new();
-    }
-    state
-        .status()
-        .split(" · ")
-        .filter(|word| *word != lead)
-        .map(str::to_owned)
-        .collect()
-}
-
 /// Both lists, grouped by what they ask of you. The page rereads them, and
 /// the counts, every few seconds, as the TUI rereads the store.
 fn lists(app: &App, overview: &Overview, show_archived: bool) -> Markup {
@@ -366,7 +375,8 @@ fn lists(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                 (keycap("j")) (keycap("k")) " move (a folded group is skipped) · "
                 (keycap("Tab")) " other list · " (keycap("Enter")) " open · "
                 (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c"))
-                " act on the selected row · " (keycap("X")) " archived · "
+                " act on the selected row · " (keycap("v")) " reviewers · "
+                (keycap("d")) " details · " (keycap("X")) " archived · "
                 (keycap("?")) " all keys"
             }
         }
@@ -418,6 +428,7 @@ fn owed_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                 (archived_toggle(show_archived, archived))
             }
             @if shown.is_empty() { p.dim { "No reviews requested." } }
+            @else { (columns()) }
             @if !need.is_empty() {
                 div.group-h.act { "NEEDS YOU · " (need.len()) }
                 @for pr in &need { (owed_row(app, pr, overview)) }
@@ -440,6 +451,7 @@ fn owed_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                     @for pr in &quiet { (owed_row(app, pr, overview)) }
                 }
             }
+            (hidden_foot(app, overview.hidden.owed, show_archived))
         }
     }
 }
@@ -471,6 +483,7 @@ fn my_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                 (archived_toggle(show_archived, archived))
             }
             @if shown.is_empty() { p.dim { "No open PRs of yours." } }
+            @else { (columns()) }
             @for (which, heading, act) in [
                 (Some(MyGroup::NeedsYou), "NEEDS YOU", true),
                 (Some(MyGroup::Ready), "READY", false),
@@ -481,6 +494,76 @@ fn my_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                 @if !prs.is_empty() {
                     div.group-h.act[act] { (heading) " · " (prs.len()) }
                     @for pr in &prs { (my_row(app, pr, overview)) }
+                }
+            }
+            (hidden_foot(app, overview.hidden.mine, show_archived))
+        }
+    }
+}
+
+/// The lists' column heads, over the status and PR cells.
+fn columns() -> Markup {
+    html! {
+        div.colh aria-hidden="true" {
+            span {} span {} span { "REVIEWED BY · WAITING ON" } span { "PR" }
+        }
+    }
+}
+
+/// Windows the hidden-PRs line offers, by their words.
+const WINDOWS: &[(WindowChoice, &str)] = &[
+    (WindowChoice::Days(30), "1 month"),
+    (WindowChoice::Days(180), "6 months"),
+    (WindowChoice::All, "all"),
+];
+
+/// Under a list, dim: how many older PRs the recency window hides, and
+/// wider windows to pick, or the way back to the configured one. Nothing
+/// while the configured window is in force and hides nothing.
+fn hidden_foot(app: &App, hidden: Option<u32>, show_archived: bool) -> Markup {
+    let window = *app.window.borrow();
+    let wider = |choice: WindowChoice| match (choice.days(), window.days()) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(days), Some(now)) => days > now,
+    };
+    let offered: Vec<&(WindowChoice, &str)> = WINDOWS
+        .iter()
+        .filter(|(choice, _)| wider(*choice))
+        .collect();
+    let hidden = hidden.filter(|n| *n > 0);
+    let pick = |choice: &str, words: &str| {
+        html! {
+            form.window method="post" action="/window" {
+                (csrf_field(app))
+                input type="hidden" name="window" value=(choice);
+                // Back to the index as it was.
+                @if show_archived { input type="hidden" name="archived" value="true"; }
+                button.linkbtn type="submit" { (words) }
+            }
+        }
+    };
+    html! {
+        @if hidden.is_some() || window.choice.is_some() {
+            // A div: the forms in it would end a paragraph.
+            div.hidden-foot {
+                @if let Some(n) = hidden {
+                    (plural(n, "older PR", "older PRs")) " hidden"
+                } @else if window.days().is_none() {
+                    "showing PRs of any age"
+                } @else {
+                    "showing the last " (window.days().unwrap_or_default()) " days"
+                }
+                @if !offered.is_empty() {
+                    " · show last "
+                    @for (i, (choice, words)) in offered.iter().enumerate() {
+                        @if i > 0 { " · " }
+                        (pick(&choice.as_str(), words))
+                    }
+                }
+                @if window.choice.is_some() {
+                    " · " (pick("default", "back to default"))
+                    @if let Some(days) = window.configured { " (" (days) " days)" }
                 }
             }
         }
@@ -503,25 +586,35 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     let lead = owed_lead(pr, overview, &label, class);
     let why = why(pr, overview, app.manual_reviews);
     let href = pr_href(&pr.key);
-    // Only the latest run's error: an older failure a later run replaced
-    // doesn't need attention.
-    let error = pr.latest_run.as_ref().and_then(|run| run.error.as_deref());
-    let mut rest: Vec<Markup> = Vec::new();
-    if pr.pending_drafts > 0 && lead.class != "cnt" {
-        rest.push(html! { span.cnt { (drafts(pr.pending_drafts)) } });
-    }
-    if label != lead.text {
-        rest.push(html! { (label) });
-    }
-    for word in other_words(pr.state, &lead.text) {
-        rest.push(html! { span.(state_class(pr.state)) { (word) } });
-    }
-    let meta = html! {
-        (pr_ref(&pr.key)) " · " (pr.author)
-        @for part in &rest { " · " (part) }
-        @if let Some(error) = error {
-            " · " span.error title=(error) { (first_line(error)) }
-        }
+    let facts = overview.facts.get(&pr.key);
+    let waiting = overview
+        .waiting
+        .get(&pr.key)
+        .map(|left| format!("queued in {}", countdown(left.as_secs())));
+    let lead = LeadPop {
+        key: &pr.key,
+        text: &lead.text,
+        class: lead.class,
+        facts,
+        status: pr.latest_status(),
+        // Only the latest run's error: an older failure a later run
+        // replaced doesn't need attention.
+        error: pr.latest_run.as_ref().and_then(|run| run.error.as_deref()),
+        skip: overview.skipped.get(&pr.key),
+        waiting: waiting.as_deref(),
+        manual_reviews: app.manual_reviews,
+        now: app.clock.now(),
+    };
+    let row = Row {
+        key: &pr.key,
+        lead: &lead,
+        head: &pr.head_sha,
+        state: pr.state,
+        pending: pr.pending_drafts,
+        facts,
+        submit_review: overview.submit_review(&pr.key),
+        author: Some(&pr.author),
+        is_draft: pr.is_draft,
     };
     let actions = html! {
         @if why.is_some() {
@@ -540,9 +633,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
             data-ignore={ (href) "/ignore" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             (unseen(overview, &pr.key))
-            span.x { span.(lead.class) { (lead.text) } }
-            span.t { a href=(href) title=(pr.title) { (pr.title) } }
-            span.m { (meta) }
+            (row.cells(app, &pr.title))
             span.a { (actions) }
         }
     }
@@ -551,26 +642,36 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
 fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
     let href = pr_href(&pr.key);
     let lead = my_lead(pr, overview);
-    let mut rest: Vec<Markup> = Vec::new();
-    if pr.pending_drafts > 0 && lead.class != "cnt" {
-        rest.push(html! { span.cnt { (drafts(pr.pending_drafts)) } });
-    }
-    if pr.is_draft && lead.text != "draft PR" {
-        rest.push(html! { "draft PR" });
-    }
-    for word in other_words(pr.state, &lead.text) {
-        rest.push(html! { span.(state_class(pr.state)) { (word) } });
-    }
+    let facts = overview.facts.get(&pr.key);
+    let run = facts.and_then(|f| f.latest_run.as_ref());
+    let lead = LeadPop {
+        key: &pr.key,
+        text: &lead.text,
+        class: lead.class,
+        facts,
+        status: run.map(|run| run.status.as_str()),
+        error: None,
+        skip: None,
+        waiting: None,
+        manual_reviews: app.manual_reviews,
+        now: app.clock.now(),
+    };
+    let row = Row {
+        key: &pr.key,
+        lead: &lead,
+        head: facts.map_or("", |f| f.head_sha.as_str()),
+        state: pr.state,
+        pending: pr.pending_drafts,
+        facts,
+        submit_review: overview.submit_review(&pr.key),
+        author: None,
+        is_draft: pr.is_draft,
+    };
     html! {
         div.ib.archived[pr.archived] data-row data-key=(pr.key) data-href=(href)
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             (unseen(overview, &pr.key))
-            span.x { span.(lead.class) { (lead.text) } }
-            span.t { a href=(href) title=(pr.title) { (pr.title) } }
-            span.m {
-                (pr_ref(&pr.key))
-                @for part in &rest { " · " (part) }
-            }
+            (row.cells(app, &pr.title))
             span.a {
                 @if pr.chat_run.is_some() {
                     a.linkbtn href={ (href) "#chat" } { "chat " (keycap("c")) }
@@ -581,13 +682,201 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
     }
 }
 
-/// The CSS class a state's words take, by its urgency.
-fn state_class(state: PrState) -> &'static str {
-    match state.urgency() {
+/// A row's cells: the lead, the status (reviewed by, and what the PR asks
+/// of you or waits on), and the PR (its title, and under it its ref,
+/// author and state words). Each fact is in one of them.
+struct Row<'a> {
+    key: &'a PrKey,
+    lead: &'a LeadPop<'a>,
+    head: &'a str,
+    state: PrState,
+    pending: u32,
+    facts: Option<&'a RowFacts>,
+    /// [`Overview::submit_review`].
+    submit_review: bool,
+    /// Someone else's PR's author; `None` for yours.
+    author: Option<&'a str>,
+    is_draft: bool,
+}
+
+impl Row<'_> {
+    fn cells(&self, app: &App, title: &str) -> Markup {
+        let href = pr_href(self.key);
+        let reviewed_by = ReviewedBy {
+            key: self.key,
+            me: &app.me,
+            head: self.head,
+            facts: self.facts,
+            now: app.clock.now(),
+        };
+        html! {
+            span.x { (self.lead.render()) }
+            span.y {
+                (reviewed_by.render())
+                span.needs { @for signal in self.needs() { (signal) } }
+            }
+            span.t { a href=(href) title=(title) { (title) } }
+            span.m {
+                (pr_ref(self.key))
+                @if let Some(author) = self.author { " · " (author) }
+                @for word in self.state_words() { " · " (word) }
+            }
+        }
+    }
+
+    fn merge(&self) -> Option<Merge> {
+        self.facts.map(|f| f.merge)
+    }
+
+    /// What the PR asks of you, or waits on, that the lead doesn't say.
+    fn needs(&self) -> Vec<Markup> {
+        let lead = self.lead.text;
+        let decided = self.facts.and_then(|f| f.decided.as_ref());
+        let mut out = Vec::new();
+        if self.pending > 0 && lead != drafts(self.pending) {
+            out.push(html! { span.cnt { (drafts(self.pending)) } });
+        }
+        let unanswered = self.state.unanswered;
+        if unanswered > 0 && lead != pressing(self.state) {
+            out.push(html! {
+                span.sig.you title="comments by others you haven't answered" {
+                    (unanswered) " to answer"
+                }
+            });
+        }
+        let to_post = decided.map_or(0, |d| d.accepted);
+        if to_post > 0 && lead != format!("{to_post} to post") {
+            out.push(html! { span.sig.post { (to_post) " to post" } });
+        }
+        if self.submit_review && lead != "submit review" {
+            out.push(html! { span.sig.post { "submit review" } });
+        }
+        let tip = if self.author.is_some() {
+            "your comments the author hasn't answered"
+        } else {
+            "your replies the reviewer hasn't answered"
+        };
+        for waits in self.facts.map_or(&[][..], |f| &f.awaiting[..]) {
+            out.push(html! {
+                span.sig.them title=(tip) { (waits.threads) " awaiting " b { "@" (waits.login) } }
+            });
+        }
+        // On your own PR, failing CI and what holds up its approval are
+        // yours to see to.
+        if self.author.is_none()
+            && let Some(merge) = self.merge()
+        {
+            let block = approved_block(self.state, Some(merge));
+            let ci = (merge.ci == Checks::Failing && block != Some(Block::CiFailing))
+                .then_some(Block::CiFailing);
+            for block in ci.into_iter().chain(block) {
+                if block.word() != lead {
+                    out.push(html! { span.sig.(block_class(block)) { (block.word()) } });
+                }
+            }
+        }
+        out
+    }
+
+    /// Where the PR stands for the PR cell: its approval, and on someone
+    /// else's PR, CI and what holds up the approval; then whether it's a
+    /// draft.
+    fn state_words(&self) -> Vec<Markup> {
+        let lead = self.lead.text;
+        let mut out = Vec::new();
+        let approval = match self.state.approval {
+            Approval::Mergeable => Some("mergeable"),
+            Approval::Approved(_) => Some("approved"),
+            Approval::ChangesRequested => Some("changes requested"),
+            Approval::None => None,
+        };
+        if let Some(word) = approval.filter(|word| *word != lead) {
+            out.push(html! { span.(approval_class(self.state)) { (word) } });
+        }
+        let merge = self.merge();
+        let block = approved_block(self.state, merge);
+        let ci = merge.map_or(Checks::Other, |m| m.ci);
+        if self.author.is_some() {
+            if let Some(block) = block {
+                out.push(html! { span.sig.(block_class(block)) { (block.word()) } });
+            }
+            for (checks, word) in [
+                (Checks::Failing, "ci failing"),
+                (Checks::Pending, "ci pending"),
+            ] {
+                if ci == checks && block.map(Block::word) != Some(word) {
+                    out.push(html! { span.sig.(block_class_of(word)) { (word) } });
+                }
+            }
+        } else if ci == Checks::Pending && block.is_none() {
+            out.push(html! { span.sig.cipend { "ci pending" } });
+        }
+        if self.is_draft && lead != "draft PR" {
+            out.push(html! { span.tagpr { "draft PR" } });
+        }
+        out
+    }
+}
+
+/// How a block's word is shown: what needs fixing stands out.
+fn block_class(block: Block) -> &'static str {
+    block_class_of(block.word())
+}
+
+fn block_class_of(word: &str) -> &'static str {
+    match word {
+        "ci failing" | "conflicts" => "cifail",
+        _ => "cipend",
+    }
+}
+
+/// The CSS class an approval's word takes, by the state's urgency without
+/// its unanswered comments, which the status cell says.
+fn approval_class(state: PrState) -> &'static str {
+    let approval = PrState {
+        unanswered: 0,
+        ..state
+    };
+    match approval.urgency() {
         Urgency::Act => "u-act",
         Urgency::Good => "u-good",
         Urgency::Quiet => "u-quiet",
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WindowForm {
+    /// A [`WindowChoice`], or `default` for `poll.updated_within_days`.
+    window: String,
+    /// The index showed archived PRs, and goes back to showing them.
+    #[serde(default)]
+    archived: bool,
+}
+
+/// Picks the recency window from the hidden-PRs line, then goes back to
+/// the index. `serve` stores it and reconciles with it.
+pub async fn set_window(
+    State(app): State<Shared>,
+    Form(form): Form<WindowForm>,
+) -> Result<Redirect, Error> {
+    let choice = match form.window.as_str() {
+        "default" => None,
+        text => Some(
+            WindowChoice::parse(text)
+                .ok_or_else(|| Error::Refused(format!("`{text}` isn't a recency window")))?,
+        ),
+    };
+    app.control.set_window(choice)?;
+    if let Some(choice) = choice {
+        info!(window = %choice.as_str(), "recency window picked from the dashboard");
+    } else {
+        info!("recency window back to `poll.updated_within_days`");
+    }
+    Ok(Redirect::to(if form.archived {
+        "/?archived=true"
+    } else {
+        "/"
+    }))
 }
 
 /// A button that archives the PR, or unarchives it, then goes back to

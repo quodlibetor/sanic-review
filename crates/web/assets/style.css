@@ -337,12 +337,14 @@ details.grp[open] > summary .group-h::before {
   content: "▾ ";
 }
 
-/* A row: the new mark, its lead (the one next thing), the title, and
-   under the title a dim line of the rest, then its actions. */
+/* A row: the new mark, the lead (the one next thing), the status cell
+   (who reviewed it, and what it asks of you or waits on), then the PR:
+   its title, and under it its ref, author and state words, then its
+   actions. Each fact is in one cell. */
 .ib {
   display: grid;
-  grid-template-columns: 0.9rem 8.5rem minmax(0, 1fr) auto;
-  grid-template-areas: "n x t t" "n . m a";
+  grid-template-columns: 0.9rem 8.5rem 17rem minmax(0, 1fr) auto;
+  grid-template-areas: "n x y t t" "n x y m a";
   column-gap: 0.6rem;
   padding: 0.3rem 0.5rem;
   border-radius: 4px;
@@ -363,12 +365,35 @@ details.grp[open] > summary .group-h::before {
 
 .ib > .x {
   grid-area: x;
+  align-self: start;
   font-weight: 600;
 }
 
 .ib > .x .cnt,
-.ib > .x .chip {
+.ib > .x .chip,
+.ib > .x .sig {
   font-size: 13px;
+}
+
+.ib > .y {
+  grid-area: y;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  min-width: 0;
+  padding-right: 0.6rem;
+  border-right: 1px solid var(--line-soft);
+}
+
+.ib > .y .needs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.7rem;
+}
+
+.ib > .y .needs:empty {
+  display: none;
 }
 
 .ib > .t {
@@ -416,10 +441,33 @@ details.grp[open] > summary .group-h::before {
   color: var(--dim);
 }
 
-/* Folded rows take one line. */
+/* The lists' column heads. */
+.colh {
+  display: grid;
+  grid-template-columns: 0.9rem 8.5rem 17rem minmax(0, 1fr);
+  column-gap: 0.6rem;
+  padding: 0 0.5rem;
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+
+/* Folded rows take one line, without the PR's second line. */
 .quiet .ib {
-  grid-template-areas: "n x t m";
+  grid-template-columns: 0.9rem 8.5rem 17rem minmax(0, 1fr);
+  grid-template-areas: "n x y t";
   padding: 0.12rem 0.5rem;
+}
+
+.quiet .ib > .y {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0 0.7rem;
+  border-right: 0;
+}
+
+.quiet .ib > .m {
+  display: none;
 }
 
 .quiet .ib > .t a {
@@ -431,32 +479,334 @@ details.grp[open] > summary .group-h::before {
   display: none;
 }
 
+.quiet .ib.selected {
+  grid-template-areas: "n x y t" "n . . a";
+}
+
 .quiet .ib.selected > .a {
   display: flex;
-  grid-area: m;
 }
 
-.quiet .ib.selected > .m {
+/* Reviewed by: always there, with a verdict mark per reviewer. */
+.rb {
+  position: relative;
+  font-size: 12.5px;
+  color: var(--dim);
+  cursor: default;
+  border-radius: 3px;
+  outline-offset: 1px;
+}
+
+.rb .who,
+.rb .since {
+  white-space: nowrap;
+}
+
+.rb .who,
+.rb .others {
+  color: var(--fg);
+}
+
+.rb .who.stale {
+  color: var(--dim);
+}
+
+.rb .none {
+  font-style: italic;
+}
+
+.rb .since {
+  color: var(--held);
+  font-weight: 600;
+}
+
+.vm {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  margin-left: 0.1rem;
+}
+
+.vm.ap {
+  color: var(--ok);
+}
+
+.vm.rc {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.vm.cm {
+  color: var(--dim);
+}
+
+.stale .vm {
+  opacity: 0.6;
+}
+
+/* The lead opens a popover too: a dotted underline says so. */
+.pp {
+  position: relative;
+  border-radius: 3px;
+  outline-offset: 1px;
+  cursor: default;
+}
+
+.pp > span:first-child {
+  text-decoration: underline dotted var(--line);
+  text-underline-offset: 3px;
+}
+
+.rb:focus-visible,
+.pp:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+/* A popover: shown on hover and on focus. The script pins it to the
+   window while it's shown, so the row can't clip it. */
+.pop {
   display: none;
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 4px);
+  min-width: 18rem;
+  width: max-content;
+  max-width: min(40rem, calc(100vw - 2rem));
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 18%);
+  padding: 0.45rem 0.6rem 0.5rem;
+  white-space: normal;
+  font-size: 12.5px;
+  font-weight: normal;
+  cursor: auto;
 }
 
+.rb:hover > .pop,
+.rb:focus > .pop,
+.pp:hover > .pop,
+.pp:focus > .pop {
+  display: block;
+}
+
+.pop.fixed {
+  position: fixed;
+}
+
+.pop .ph {
+  color: var(--dim);
+  margin-bottom: 0.3rem;
+}
+
+.pop .ph b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.pop .nobody {
+  margin: 0;
+}
+
+.pop table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.pop td {
+  padding: 0.12rem 0.6rem 0.12rem 0;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.pop td:last-child {
+  white-space: normal;
+  padding-right: 0;
+}
+
+.pop .when {
+  color: var(--dim);
+}
+
+.pop .head {
+  color: var(--ok);
+}
+
+.pop .before {
+  color: var(--held);
+}
+
+.pop .foot {
+  color: var(--dim);
+  margin-top: 0.3rem;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.25rem;
+}
+
+.pop pre.perr {
+  margin: 0.35rem 0 0;
+  font-size: 12px;
+  max-height: 12rem;
+  overflow: auto;
+}
+
+/* Signals: what the PR asks of you, or waits on. */
+.sig {
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.sig.you {
+  color: var(--held);
+  font-weight: 600;
+}
+
+.sig.them {
+  color: var(--dim);
+}
+
+.sig.them b {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.sig.post {
+  color: var(--drafts);
+  font-weight: 600;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.sig.decided {
+  color: var(--dim);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.sig.cifail {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.sig.cipend {
+  color: var(--dim);
+}
+
+.tagpr {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  white-space: nowrap;
+}
+
+/* Under each list, low-key: the PRs the recency window hides. */
+.hidden-foot {
+  font-size: 12px;
+  color: var(--dim);
+  margin: 0.5rem 0 0 1.4rem;
+}
+
+.hidden-foot .linkbtn {
+  font-size: 12px;
+  color: var(--dim);
+  text-decoration: underline dotted;
+}
+
+.hidden-foot .linkbtn:hover {
+  color: var(--accent);
+}
+
+/* Narrower: the lead and status share the first line, and the PR goes
+   under them. */
 @media (max-width: 1000px) {
-  .ib {
+  .ib,
+  .quiet .ib,
+  .quiet .ib.selected {
     grid-template-columns: 0.9rem 7rem minmax(0, 1fr);
-    grid-template-areas: "n x t" "n . m" "n . a";
+    grid-template-areas: "n x y" "n t t" "n m m" "n a a";
+  }
+
+  .quiet .ib {
+    grid-template-areas: "n x y" "n t t";
+  }
+
+  .quiet .ib.selected {
+    grid-template-areas: "n x y" "n t t" "n a a";
+  }
+
+  .ib > .y {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0 0.7rem;
+    border-right: 0;
+    padding-right: 0;
   }
 
   .ib > .a {
     display: none;
+    flex-wrap: wrap;
+    gap: 0.2rem 0.8rem;
   }
 
   .ib.selected > .a {
     display: flex;
   }
 
-  /* Folded rows too: their one line has no room for the meta. */
+  .colh {
+    display: none;
+  }
+}
+
+/* Phones: lead, status and PR stack, and nothing is wider than the
+   screen. */
+@media (max-width: 640px) {
+  main {
+    padding: 0 0.75rem 3rem;
+  }
+
+  .topbar .counts {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .list > h2 {
+    flex-wrap: wrap;
+  }
+
+  .group-h .dim {
+    display: block;
+  }
+
+  .ib,
+  .quiet .ib,
+  .quiet .ib.selected {
+    grid-template-columns: 0.9rem minmax(0, 1fr);
+    grid-template-areas: "n x" "n y" "n t" "n m" "n a";
+    padding: 0.35rem 0.25rem;
+  }
+
   .quiet .ib {
-    grid-template-areas: "n x t" "n . m";
+    grid-template-areas: "n x" "n y" "n t";
+  }
+
+  .quiet .ib.selected {
+    grid-template-areas: "n x" "n y" "n t" "n a";
+  }
+
+  .ib > .t,
+  .ib > .m {
+    white-space: normal;
+  }
+
+  .hidden-foot {
+    margin-left: 1.1rem;
+  }
+
+  .help-foot {
+    line-height: 1.9;
   }
 }
 

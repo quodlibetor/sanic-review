@@ -14,9 +14,9 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use sanic_core::{
-    clock::Clock,
+    clock::{Clock, RecencyWindow, WindowChoice},
     config::{CheckoutResolver, Config, Vcs},
-    pr::{Comment, Placement, PrKey, PrSnapshot, Review, ReviewState, Thread},
+    pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
         Basis, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
@@ -49,6 +49,8 @@ struct FakeServe {
     revised: Mutex<Vec<(i64, String)>>,
     /// The run a revision starts; without one, it's refused.
     revision: Mutex<Option<i64>>,
+    /// The recency window, as `serve` publishes it.
+    window: Mutex<Option<watch::Sender<RecencyWindow>>>,
 }
 
 impl Control for FakeServe {
@@ -80,6 +82,13 @@ impl Control for FakeServe {
             .lock()
             .unwrap()
             .ok_or(sanic_store::Refusal::NoSession))
+    }
+
+    fn set_window(&self, choice: Option<WindowChoice>) -> color_eyre::Result<()> {
+        if let Some(window) = &*self.window.lock().unwrap() {
+            window.send_modify(|window| window.choice = choice);
+        }
+        Ok(())
     }
 
     fn run_settings(&self, profile: &str) -> color_eyre::Result<RunSettings> {
@@ -289,6 +298,11 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     let github = MockServer::start().await;
     let serve = Arc::new(FakeServe::default());
     let (due, due_rx) = watch::channel(HashMap::new());
+    let (window, window_rx) = watch::channel(RecencyWindow {
+        configured: Some(14),
+        choice: None,
+    });
+    *serve.window.lock().unwrap() = Some(window);
     let clock = Arc::new(FixedClock::default());
     let dashboard = Dashboard::new(Context {
         me: "me".into(),
@@ -300,7 +314,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         control: Arc::clone(&serve) as Arc<dyn Control>,
         due: due_rx,
         skips: watch::channel(skip_rules()).1,
-        window: watch::channel(None).1,
+        window: window_rx,
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
     })
     .unwrap();
@@ -1360,10 +1374,10 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     let index = f.get("/").await.body;
     for cell in [
         // PR 7 leads with its drafts, and says the rest after.
-        r#"<span class="u-act">1 unanswered</span>"#,
+        ">1 to answer</span>",
         r#"<span class="u-quiet">changes requested</span>"#,
         // Yours leads with it.
-        r#"<span class="x"><span class="chip u-good">mergeable</span></span>"#,
+        r#"<span class="chip u-good">mergeable</span><span class="pop""#,
     ] {
         assert!(index.contains(cell), "{cell}: {index}");
     }
@@ -1410,7 +1424,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
     .await;
     let all = f.get("/?archived=true").await.body;
     assert!(
-        all.contains(r#"<span class="x"><span class="chip dim">archived</span></span>"#),
+        all.contains(r#"<span class="chip dim">archived</span><span class="pop""#),
         "{all}"
     );
 }
@@ -1606,6 +1620,229 @@ async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() 
     let index = f.get("/").await.body;
     assert_eq!(group_of(&index, "All rejected"), "IN FLIGHT");
     assert!(!index.contains("submit review"), "{index}");
+}
+
+/// The text of the reviewed-by element of the row titled `title`, tags
+/// and its popover left out.
+fn reviewed_by(index: &str, title: &str) -> String {
+    let at = index.find(&format!(r#"title="{title}""#)).unwrap();
+    let start = index[..at].rfind(r#"<span class="rb""#).unwrap();
+    let end = start + index[start..].find(r#"<span class="pop""#).unwrap();
+    let mut text = String::new();
+    let mut tag = false;
+    for c in index[start..end].chars() {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            c if !tag => text.push(c),
+            _ => {}
+        }
+    }
+    text
+}
+
+#[tokio::test]
+async fn rows_say_who_reviewed_with_their_verdicts() {
+    let f = fixture(false).await;
+    let review = |author: &str, state, commit: &str| Review {
+        id: format!("{author}-{commit}"),
+        author: author.into(),
+        state,
+        body: String::new(),
+        submitted_at: "2026-09-22T00:00:00Z".into(),
+        commit: Some(commit.into()),
+        by_bot: false,
+    };
+    let (ap, rc, cm) = (
+        ReviewState::Approved,
+        ReviewState::ChangesRequested,
+        ReviewState::Commented,
+    );
+    let cases: Vec<(u32, Vec<Review>, &str)> = vec![
+        (41, vec![review("me", cm, "head41")], "reviewed by you○"),
+        (
+            42,
+            vec![review("alice", ap, "head42")],
+            "reviewed by @alice✓",
+        ),
+        (
+            43,
+            vec![review("me", rc, "head43"), review("alice", ap, "head43")],
+            "reviewed by you✗ and @alice✓",
+        ),
+        (
+            44,
+            vec![review("alice", ap, "head44"), review("bob", cm, "head44")],
+            "reviewed by @alice✓ and @bob○",
+        ),
+        (
+            45,
+            vec![
+                review("alice", ap, "head45"),
+                review("bob", cm, "head45"),
+                review("carol", ap, "head45"),
+            ],
+            "reviewed by @alice✓ + 2 others (✓○)",
+        ),
+        (
+            46,
+            vec![
+                review("me", cm, "old46"),
+                review("alice", ap, "head46"),
+                review("bob", rc, "head46"),
+            ],
+            "reviewed by you○ and 2 others (✓✗) · 1 push since your review",
+        ),
+    ];
+    {
+        let mut store = f.dashboard.app.store();
+        for (number, reviews, _) in &cases {
+            let snap = PrSnapshot {
+                reviews: reviews.clone(),
+                ..snapshot(*number, "dave", &format!("PR {number}"))
+            };
+            store.record(&snap, "me", "default", &[]).unwrap();
+        }
+    }
+    let index = f.get("/").await.body;
+    assert_eq!(reviewed_by(&index, "Add the thing"), "no reviews");
+    for (number, _, words) in &cases {
+        assert_eq!(reviewed_by(&index, &format!("PR {number}")), *words);
+    }
+    // A review before the latest push is dimmed, and its popover says so.
+    assert!(index.contains(r#"<span class="who stale" title="before the latest push">you"#));
+    assert!(index.contains("before the latest push · 1 push since"));
+    // Skipped because someone reviewed the head, the lead says only that.
+    let at = index.find(r#"title="PR 42""#).unwrap();
+    let row = &index[index[..at].rfind(r#"<div class="ib"#).unwrap()..at];
+    assert!(
+        row.contains(r#"<span class="chip dim">skipped</span>"#),
+        "{row}"
+    );
+    assert!(row.contains("someone reviewed the current head"), "{row}");
+}
+
+#[tokio::test]
+async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
+    let f = fixture(false).await;
+    let said = |id: &str, author: &str, at: &str| Comment {
+        id: id.into(),
+        author: author.into(),
+        body: "?".into(),
+        created_at: at.into(),
+        url: None,
+        by_bot: false,
+        reacted_at: None,
+        reactions: vec![],
+    };
+    let thread = |id: &str, comments| Thread {
+        id: id.into(),
+        path: None,
+        line: None,
+        resolved: false,
+        place: Placement::default(),
+        comments,
+    };
+    let mut reacted = said("wc3", "me", "2026-09-20T00:00:00Z");
+    reacted.reactions = vec![Reaction {
+        login: "dave".into(),
+        at: "2026-09-21T00:00:00Z".into(),
+    }];
+    let owed = PrSnapshot {
+        threads: vec![
+            thread("t1", vec![said("wc1", "me", "2026-09-20T00:00:00Z")]),
+            thread("t2", vec![said("wc2", "me", "2026-09-20T00:00:00Z")]),
+            // Dave's reaction answers you.
+            thread("t3", vec![reacted]),
+        ],
+        ..snapshot(51, "dave", "Asked Dave")
+    };
+    let mine = PrSnapshot {
+        threads: vec![thread(
+            "t4",
+            vec![
+                said("wc4", "erin", "2026-09-19T00:00:00Z"),
+                said("wc5", "me", "2026-09-20T00:00:00Z"),
+            ],
+        )],
+        ..snapshot(52, "me", "Answered Erin")
+    };
+    {
+        let mut store = f.dashboard.app.store();
+        store.record(&owed, "me", "default", &[]).unwrap();
+        store.record(&mine, "me", "default", &[]).unwrap();
+    }
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(
+            r#"<span class="sig them" title="your comments the author hasn't answered">2 awaiting <b>@dave</b></span>"#
+        ),
+        "{index}"
+    );
+    assert!(index.contains(
+        r#"<span class="sig them" title="your replies the reviewer hasn't answered">1 awaiting <b>@erin</b></span>"#
+    ));
+}
+
+#[tokio::test]
+async fn the_hidden_count_offers_wider_windows_until_reset() {
+    let f = fixture(false).await;
+    // Nothing counted yet: nothing to say.
+    assert!(!f.get("/").await.body.contains("hidden-foot"));
+    f.dashboard
+        .app
+        .store()
+        .set_hidden(sanic_store::List::Owed, 14, 9)
+        .unwrap();
+    let index = f.get("/").await.body;
+    let foot = &index[index.find(r#"<div class="hidden-foot">"#).unwrap()..];
+    let foot = &foot[..foot.find("</div>").unwrap()];
+    assert!(
+        foot.starts_with(r#"<div class="hidden-foot">9 older PRs hidden · show last "#),
+        "{foot}"
+    );
+    for (value, words) in [("30", "1 month"), ("180", "6 months"), ("all", "all")] {
+        assert!(
+            foot.contains(&format!(
+                r#"<input type="hidden" name="window" value="{value}"><button class="linkbtn" type="submit">{words}</button>"#
+            )),
+            "{foot}"
+        );
+    }
+    assert!(!foot.contains("back to default"));
+    // Your PRs had none counted.
+    assert_eq!(index.matches(r#"class="hidden-foot""#).count(), 1);
+
+    // Picking one needs the token, like every write.
+    let refused = f
+        .send(form("/window").body(encode(&[("window", "180")])).unwrap())
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let picked = f.post("/window", &[("window", "180")]).await;
+    assert_eq!(picked.status, StatusCode::SEE_OTHER);
+    assert_eq!(picked.headers[header::LOCATION], "/");
+    let index = f.get("/").await.body;
+    assert!(index.contains("showing the last 180 days"), "{index}");
+    assert!(index.contains(">all</button>"));
+    assert!(!index.contains(">1 month</button>"));
+    assert!(index.contains(">back to default</button></form> (14 days)"));
+    // The window is shared: both lists offer the way back.
+    assert_eq!(index.matches(r#"class="hidden-foot""#).count(), 2);
+
+    assert_eq!(
+        f.post("/window", &[("window", "soon")]).await.status,
+        StatusCode::CONFLICT
+    );
+    // Picked with archived PRs shown, the index still shows them.
+    let archived = f.get("/?archived=true").await.body;
+    assert!(archived.contains(r#"<input type="hidden" name="archived" value="true">"#));
+    let back = f
+        .post("/window", &[("window", "default"), ("archived", "true")])
+        .await;
+    assert_eq!(back.headers[header::LOCATION], "/?archived=true");
+    let index = f.get("/").await.body;
+    assert!(index.contains("9 older PRs hidden"));
+    assert!(!index.contains("back to default"));
 }
 
 /// A confirm or result page's card, as the dashboard's dialog lifts it.
