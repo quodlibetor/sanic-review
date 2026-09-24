@@ -26,7 +26,7 @@ use sanic_core::{
 };
 use sanic_github::{Client, Token};
 use sanic_runner::review::{AgentProfile, RunSettings};
-use sanic_store::Store;
+use sanic_store::{DraftStatus, Store};
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::sync::watch;
@@ -1417,13 +1417,6 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
 
 #[tokio::test]
 async fn the_index_groups_rows_by_what_they_ask_of_you() {
-    // The heading of the group a row is under.
-    fn group_in(index: &str, title: &str) -> String {
-        let at = index.find(&format!(r#"title="{title}""#)).unwrap();
-        let heading = &index[index[..at].rfind(r#"class="group-h"#).unwrap()..at];
-        let text = &heading[heading.find('>').unwrap() + 1..];
-        text.split(" ·").next().unwrap().to_owned()
-    }
     let f = fixture(true).await;
     {
         let mut store = f.dashboard.app.store();
@@ -1444,12 +1437,12 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
             .unwrap();
     }
     let index = f.get("/").await.body;
-    let group_of = |title: &str| group_in(&index, title);
-    assert_eq!(group_of("Add the thing"), "NEEDS YOU", "{index}");
-    assert_eq!(group_of("Fix &lt;script&gt; escaping"), "NEEDS YOU");
-    assert_eq!(group_of("Held one"), "NEEDS YOU");
-    assert_eq!(group_of("Waiting one"), "IN FLIGHT");
-    assert_eq!(group_of("WIP: try things"), "NOTHING TO DO NOW");
+    let group = |title: &str| group_of(&index, title);
+    assert_eq!(group("Add the thing"), "NEEDS YOU", "{index}");
+    assert_eq!(group("Fix &lt;script&gt; escaping"), "NEEDS YOU");
+    assert_eq!(group("Held one"), "NEEDS YOU");
+    assert_eq!(group("Waiting one"), "IN FLIGHT");
+    assert_eq!(group("WIP: try things"), "NOTHING TO DO NOW");
     // The held one leads with it; the waiting one with its wait.
     assert!(index.contains(r#"<span class="chip held">held</span>"#));
     assert!(index.contains(r#"<span class="chip dim">waiting</span>"#));
@@ -1463,10 +1456,156 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
     )]));
     let index = f.get("/").await.body;
     assert_eq!(
-        group_in(&index, "Fix &lt;script&gt; escaping"),
+        group_of(&index, "Fix &lt;script&gt; escaping"),
         "IN FLIGHT",
         "{index}"
     );
+}
+
+/// The heading of the group the row titled `title` is under.
+fn group_of(index: &str, title: &str) -> String {
+    let at = index
+        .find(&format!(r#"title="{title}""#))
+        .unwrap_or_else(|| panic!("no {title}: {index}"));
+    let heading = &index[index[..at].rfind(r#"class="group-h"#).unwrap()..at];
+    let text = &heading[heading.find('>').unwrap() + 1..];
+    text.split(" ·").next().unwrap().to_owned()
+}
+
+/// Records PR `number` by `author` and a finished review of it whose
+/// drafts, summary first, are then set to `statuses`, `posted` included.
+fn reviewed_pr(f: &Fixture, snap: &PrSnapshot, statuses: &[&str]) {
+    let mut store = f.dashboard.app.store();
+    store.record(snap, "me", "default", &[]).unwrap();
+    let run = store
+        .queue_review(&ReviewRequest {
+            key: snap.key.clone(),
+            profile: "default".into(),
+            head_sha: snap.head_sha.clone(),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Requested,
+        })
+        .unwrap()
+        .unwrap()
+        .id;
+    store.claim_run(run).unwrap();
+    let comments = vec![comment("src/lib.rs", 3, Side::Right, "Hm.", false); statuses.len() - 1];
+    store
+        .finish_review(
+            run,
+            &ReviewResult {
+                summary: "Fine.".into(),
+                verdict: Verdict::Comment,
+                comments,
+                session_id: None,
+                transcript_path: "t".into(),
+            },
+        )
+        .unwrap();
+    let drafts = store.draft_rows(run).unwrap();
+    let mut posted = Vec::new();
+    for (draft, status) in drafts.iter().zip(statuses) {
+        let status = match *status {
+            "posted" => {
+                posted.push(draft.id);
+                DraftStatus::Accepted
+            }
+            "accepted" => DraftStatus::Accepted,
+            "rejected" => DraftStatus::Rejected,
+            _ => DraftStatus::Pending,
+        };
+        store.set_draft_status(draft.id, status).unwrap();
+    }
+    store.mark_posted(&posted).unwrap();
+    store.record_view(&snap.key).unwrap();
+}
+
+#[tokio::test]
+async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() {
+    let f = fixture(false).await;
+    let approved = |number, merge: &str, checks: &str, title| PrSnapshot {
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some(merge.into()),
+        checks: Some(checks.into()),
+        ..snapshot(number, "me", title)
+    };
+    {
+        let mut store = f.dashboard.app.store();
+        for snap in [
+            approved(21, "UNSTABLE", "FAILURE", "Mine, ci failing"),
+            approved(22, "DIRTY", "SUCCESS", "Mine, conflicts"),
+            approved(23, "BLOCKED", "SUCCESS", "Mine, blocked"),
+            approved(24, "BEHIND", "SUCCESS", "Mine, behind"),
+            approved(25, "BLOCKED", "PENDING", "Mine, ci pending"),
+        ] {
+            store.record(&snap, "me", "default", &[]).unwrap();
+        }
+    }
+    reviewed_pr(
+        &f,
+        &snapshot(31, "dave", "Two to post"),
+        &["accepted", "rejected", "accepted"],
+    );
+    reviewed_pr(
+        &f,
+        &snapshot(32, "dave", "All rejected"),
+        &["rejected", "rejected"],
+    );
+    let mut yours = Review {
+        id: "r33".into(),
+        author: "me".into(),
+        state: ReviewState::Commented,
+        body: String::new(),
+        submitted_at: "2026-09-22T00:00:00Z".into(),
+        commit: Some("head33".into()),
+        by_bot: false,
+    };
+    let posted = PrSnapshot {
+        reviews: vec![yours.clone()],
+        ..snapshot(33, "dave", "Posted")
+    };
+    reviewed_pr(&f, &posted, &["posted", "rejected"]);
+    // Rejected everything, but you've reviewed it yourself.
+    yours.id = "r34".into();
+    yours.commit = Some("head34".into());
+    let reviewed = PrSnapshot {
+        reviews: vec![yours],
+        ..snapshot(34, "dave", "Rejected and reviewed")
+    };
+    reviewed_pr(&f, &reviewed, &["rejected"]);
+
+    let index = f.get("/").await.body;
+    for (title, group) in [
+        ("Mine, ci failing", "NEEDS YOU"),
+        ("Mine, conflicts", "NEEDS YOU"),
+        ("Mine, blocked", "WAITING ON REVIEWERS"),
+        ("Mine, behind", "READY"),
+        ("Mine, ci pending", "READY"),
+        ("Two to post", "NEEDS YOU"),
+        ("All rejected", "NEEDS YOU"),
+        ("Posted", "NOTHING TO DO NOW"),
+        ("Rejected and reviewed", "NOTHING TO DO NOW"),
+    ] {
+        assert_eq!(group_of(&index, title), group, "{title}");
+    }
+    for lead in [
+        r#"<span class="chip bad">ci failing</span>"#,
+        r#"<span class="chip bad">conflicts</span>"#,
+        r#"<span class="sig post">2 to post</span>"#,
+        r#"<span class="sig post">submit review</span>"#,
+        r#"<span class="chip ok">posted</span>"#,
+    ] {
+        assert!(index.contains(lead), "{lead}: {index}");
+    }
+
+    // A newer review on its way will replace the rejected drafts.
+    f.due.send_replace(HashMap::from([(
+        key(32),
+        Instant::now() + Duration::from_secs(60),
+    )]));
+    let index = f.get("/").await.body;
+    assert_eq!(group_of(&index, "All rejected"), "IN FLIGHT");
+    assert!(!index.contains("submit review"), "{index}");
 }
 
 /// A confirm or result page's card, as the dashboard's dialog lifts it.

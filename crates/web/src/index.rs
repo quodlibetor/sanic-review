@@ -13,9 +13,9 @@ use sanic_core::{
     pr::PrKey,
     skip::{PrFacts, Skip},
     start::Why,
-    state::{PrState, Urgency},
+    state::{Approval, Block, Merge, PrState, Urgency},
 };
-use sanic_store::{MyPr, OwedReview};
+use sanic_store::{Decided, MyPr, OwedReview, RowFacts};
 use serde::Deserialize;
 
 use crate::{
@@ -34,6 +34,9 @@ pub struct Overview {
     pub skipped: HashMap<PrKey, Skip>,
     /// PRs with a review you haven't looked at yet.
     pub unseen: HashSet<PrKey>,
+    /// What the index shows of each listed PR beyond its list entry; see
+    /// [`Overview::load_facts`].
+    pub facts: HashMap<PrKey, RowFacts>,
 }
 
 impl Overview {
@@ -71,7 +74,38 @@ impl Overview {
             unseen: store.unseen()?,
             owed,
             waiting,
+            facts: HashMap::new(),
         })
+    }
+
+    /// Reads [`Overview::facts`], which only the index needs.
+    pub fn load_facts(&mut self, app: &App) -> Result<()> {
+        let store = app.store();
+        let keys = self.owed.iter().map(|pr| &pr.key);
+        for key in keys.chain(self.mine.iter().map(|pr| &pr.key)) {
+            self.facts
+                .insert(key.clone(), store.row_facts(key, &app.me)?);
+        }
+        Ok(())
+    }
+
+    fn decided(&self, key: &PrKey) -> Option<&Decided> {
+        self.facts.get(key)?.decided.as_ref()
+    }
+
+    /// Accepted drafts not yet posted.
+    fn to_post(&self, key: &PrKey) -> u32 {
+        self.decided(key).map_or(0, |d| d.accepted)
+    }
+
+    fn merge(&self, key: &PrKey) -> Option<Merge> {
+        self.facts.get(key).map(|f| f.merge)
+    }
+
+    /// Every draft rejected and no review of yours, with no newer review
+    /// on its way, queued, running or waiting out the quiet period.
+    fn submit_review(&self, key: &PrKey) -> bool {
+        !self.waiting.contains_key(key) && self.decided(key).is_some_and(Decided::submit_review)
     }
 }
 
@@ -129,7 +163,8 @@ pub async fn index(
     State(app): State<Shared>,
     Query(query): Query<IndexQuery>,
 ) -> Result<Markup, Error> {
-    let overview = Overview::load(&app)?;
+    let mut overview = Overview::load(&app)?;
+    overview.load_facts(&app)?;
     let content = lists(&app, &overview, query.archived);
     Ok(page::layout(&app, Kind::Index, "Dashboard", &content))
 }
@@ -137,8 +172,9 @@ pub async fn index(
 /// Where an owed review sits in the index, by what it asks of you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwedGroup {
-    /// Drafts to decide on, a review you haven't looked at, comments to
-    /// answer, or a run that failed or is held.
+    /// Drafts to decide on or post, a review you haven't looked at or
+    /// have yet to write, comments to answer, or a run that failed or is
+    /// held.
     NeedsYou,
     /// A review is on its way: waiting out the quiet period, queued or
     /// running.
@@ -157,6 +193,8 @@ impl OwedGroup {
             || overview.unseen.contains(&pr.key)
             || pr.state.urgency() == Urgency::Act
             || run_needs_you(&label, class)
+            || overview.to_post(&pr.key) > 0
+            || overview.submit_review(&pr.key)
         {
             Self::NeedsYou
         } else if overview.skipped.contains_key(&pr.key) {
@@ -174,21 +212,37 @@ impl OwedGroup {
 /// Where one of your PRs sits in the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MyGroup {
-    /// Comments to answer, changes requested, or drafts.
+    /// Comments to answer, changes requested, drafts to decide on or
+    /// post, or an approval held up by failing CI or conflicts.
     NeedsYou,
-    /// Approved or mergeable.
+    /// Mergeable, or approved and waiting only on CI or its base.
     Ready,
+    /// Not approved, or approved but blocked by something else GitHub
+    /// requires, such as another review.
     WaitingOnReviewers,
 }
 
 impl MyGroup {
-    pub fn of(pr: &MyPr) -> Self {
+    pub fn of(pr: &MyPr, overview: &Overview) -> Self {
         match pr.state.urgency() {
             Urgency::Act => Self::NeedsYou,
-            _ if pr.pending_drafts > 0 => Self::NeedsYou,
-            Urgency::Good => Self::Ready,
+            _ if pr.pending_drafts > 0 || overview.to_post(&pr.key) > 0 => Self::NeedsYou,
+            Urgency::Good => match approved_block(pr.state, overview.merge(&pr.key)) {
+                Some(Block::Conflicts | Block::CiFailing) => Self::NeedsYou,
+                Some(Block::Blocked) => Self::WaitingOnReviewers,
+                Some(Block::CiPending | Block::Behind) | None => Self::Ready,
+            },
             Urgency::Quiet => Self::WaitingOnReviewers,
         }
+    }
+}
+
+/// Why an approved PR can't merge yet; `None` if it isn't approved, or
+/// can merge.
+fn approved_block(state: PrState, merge: Option<Merge>) -> Option<Block> {
+    match state.approval {
+        Approval::Approved(_) => merge?.block,
+        _ => None,
     }
 }
 
@@ -206,68 +260,83 @@ struct Lead {
     class: &'static str,
 }
 
-/// The pressing part of a state, e.g. `2 unanswered` of `approved · 2
-/// unanswered`: the last of its words, as they run least pressing first.
+/// What your own PR's state asks of you, as a lead: comments to answer,
+/// else the changes requested.
 fn pressing(state: PrState) -> String {
-    let status = state.status();
-    status.rsplit(" · ").next().unwrap_or(&status).to_owned()
-}
-
-fn owed_lead(pr: &OwedReview, label: &str, class: &'static str, run_first: bool) -> Lead {
-    if run_first {
-        Lead {
-            text: label.to_owned(),
-            class,
-        }
-    } else if pr.pending_drafts > 0 {
-        Lead {
-            text: drafts(pr.pending_drafts),
-            class: "cnt",
-        }
-    } else if pr.state.urgency() == Urgency::Act {
-        Lead {
-            text: pressing(pr.state),
-            class: "chip u-act",
-        }
+    if state.unanswered > 0 {
+        format!("{} to answer", state.unanswered)
     } else {
-        Lead {
-            text: label.to_owned(),
-            class,
-        }
+        "changes requested".into()
     }
 }
 
-fn my_lead(pr: &MyPr) -> Lead {
-    if pr.archived {
-        return Lead {
-            text: "archived".into(),
-            class: "chip dim",
-        };
+fn owed_lead(pr: &OwedReview, overview: &Overview, label: &str, class: &'static str) -> Lead {
+    let lead = |text: String, class| Lead { text, class };
+    let decided = overview.decided(&pr.key);
+    // A newer review on its way says more than the last one's drafts.
+    let done = pr.latest_status() == Some("succeeded") && !overview.waiting.contains_key(&pr.key);
+    if run_needs_you(label, class) {
+        lead(label.to_owned(), chip(class))
+    } else if pr.pending_drafts > 0 {
+        lead(drafts(pr.pending_drafts), "cnt")
+    } else if pr.state.urgency() == Urgency::Act {
+        lead(pressing(pr.state), "chip u-act")
+    } else if let Some(n) = decided.map(|d| d.accepted).filter(|n| *n > 0) {
+        lead(format!("{n} to post"), "sig post")
+    } else if overview.submit_review(&pr.key) {
+        lead("submit review".into(), "sig post")
+    } else if done && decided.is_some_and(|d| d.posted > 0) {
+        lead("posted".into(), "chip ok")
+    } else {
+        lead(label.to_owned(), chip(class))
     }
+}
+
+/// The chip a status's CSS class is shown as.
+fn chip(class: &str) -> &'static str {
+    match class {
+        "ok" => "chip ok",
+        "bad" => "chip bad",
+        "held" => "chip held",
+        "running" => "chip running",
+        _ => "chip dim",
+    }
+}
+
+fn my_lead(pr: &MyPr, overview: &Overview) -> Lead {
+    let lead = |text: String, class| Lead { text, class };
+    if pr.archived {
+        return lead("archived".into(), "chip dim");
+    }
+    let to_post = overview.to_post(&pr.key);
     match pr.state.urgency() {
-        Urgency::Act => Lead {
-            text: pressing(pr.state),
-            class: "chip u-act",
-        },
-        _ if pr.pending_drafts > 0 => Lead {
-            text: drafts(pr.pending_drafts),
-            class: "cnt",
-        },
+        Urgency::Act => lead(pressing(pr.state), "chip u-act"),
+        _ if pr.pending_drafts > 0 => lead(drafts(pr.pending_drafts), "cnt"),
+        _ if to_post > 0 => lead(format!("{to_post} to post"), "sig post"),
         Urgency::Good => {
-            let status = pr.state.status();
-            Lead {
-                text: status.split(" · ").next().unwrap_or(&status).to_owned(),
-                class: "chip u-good",
+            let block = approved_block(pr.state, overview.merge(&pr.key));
+            if let Some(block @ (Block::Conflicts | Block::CiFailing)) = block {
+                return lead(block.word().into(), "chip bad");
             }
+            let status = pr.state.status();
+            let first = status.split(" · ").next().unwrap_or(&status);
+            lead(first.to_owned(), "chip u-good")
         }
-        Urgency::Quiet if pr.is_draft => Lead {
-            text: "draft PR".into(),
-            class: "chip dim",
-        },
-        Urgency::Quiet => Lead {
-            text: "waiting".into(),
-            class: "chip dim",
-        },
+        Urgency::Quiet if pr.is_draft => lead("draft PR".into(), "chip dim"),
+        Urgency::Quiet => lead("waiting".into(), "chip dim"),
+    }
+}
+
+/// [`owed_status`] as the index words it: a PR skipped because someone
+/// reviewed its head is just `skipped`, since the row says who.
+fn index_status(
+    pr: &OwedReview,
+    overview: &Overview,
+    manual_reviews: bool,
+) -> (String, &'static str) {
+    match overview.skipped.get(&pr.key) {
+        Some(Skip::Reviewed { .. }) if !pr.archived => ("skipped".into(), "dim"),
+        _ => owed_status(pr, overview, manual_reviews),
     }
 }
 
@@ -388,7 +457,7 @@ fn my_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
                 if pr.archived {
                     group.is_none()
                 } else {
-                    group == Some(MyGroup::of(pr))
+                    group == Some(MyGroup::of(pr, overview))
                 }
             })
             .copied()
@@ -430,16 +499,8 @@ fn unseen(overview: &Overview, key: &PrKey) -> Markup {
 }
 
 fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
-    let (label, class) = owed_status(pr, overview, app.manual_reviews);
-    let run_first = run_needs_you(&label, class);
-    let class = match class {
-        "ok" => "chip ok",
-        "bad" => "chip bad",
-        "held" => "chip held",
-        "running" => "chip running",
-        _ => "chip dim",
-    };
-    let lead = owed_lead(pr, &label, class, run_first);
+    let (label, class) = index_status(pr, overview, app.manual_reviews);
+    let lead = owed_lead(pr, overview, &label, class);
     let why = why(pr, overview, app.manual_reviews);
     let href = pr_href(&pr.key);
     // Only the latest run's error: an older failure a later run replaced
@@ -489,7 +550,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
 
 fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
     let href = pr_href(&pr.key);
-    let lead = my_lead(pr);
+    let lead = my_lead(pr, overview);
     let mut rest: Vec<Markup> = Vec::new();
     if pr.pending_drafts > 0 && lead.class != "cnt" {
         rest.push(html! { span.cnt { (drafts(pr.pending_drafts)) } });
