@@ -9,6 +9,7 @@ pub mod schedule;
 mod serve;
 mod setup;
 mod tui;
+mod version;
 mod watch;
 mod work;
 
@@ -18,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::Result;
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version = version::VERSION.as_str(), about)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,

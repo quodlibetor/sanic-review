@@ -1272,6 +1272,19 @@ a formula to the `quodlibetor/homebrew-tap` tap.
   fails the plan job and publishes nothing. A suffix such as `-rc.1` makes a
   prerelease, so the workspace version needs the same suffix. On pull
   requests the workflow runs only the plan job.
+- `--version` adds the commit the binary was built from and that commit's
+  time (not the build's, so builds stay reproducible), e.g.
+  `0.1.0 (580b3cb1, 2026-09-24 18:31 UTC)`. The cli's `build.rs` asks git,
+  and appends `-dirty` when tracked files differ from HEAD. Cargo reruns it
+  only when HEAD, the branch or the index changes, so an edit alone leaves
+  the flag as it was until the next commit, stage or `git status`. It says
+  `unknown commit` when git is missing or doesn't track the crate: a
+  tarball, or a jj workspace under `.workspaces/`, where the git found is
+  the enclosing checkout's. Release builds run in a shallow checkout of the
+  tagged commit, which is enough. A build cache that replays build-script
+  results across checkouts, such as mbx with build-script caching on, can
+  make a local `--version` stale or `unknown commit`; release builds don't
+  use one.
 - Targets are macOS and Linux (glibc), each on arm64 and x86_64. Linux builds
   run on Ubuntu 22.04 so the binaries run on Debian 12, Ubuntu 22.04 and
   newer. The x86_64 macOS binary is cross-compiled on the arm64 macOS runner.
