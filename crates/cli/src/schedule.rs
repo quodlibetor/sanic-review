@@ -462,6 +462,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         }
     }
 

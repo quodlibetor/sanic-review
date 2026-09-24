@@ -3,8 +3,8 @@
 use color_eyre::eyre::{WrapErr, eyre};
 use sanic_core::{
     pr::{
-        CONVERSATION_THREAD, Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState,
-        TeamRef, Thread, is_login,
+        CONVERSATION_THREAD, Comment, InProgressComment, InProgressReview, Placement, PrKey,
+        PrSnapshot, Reaction, Review, ReviewState, TeamRef, Thread, is_login,
     },
     repo::RepoName,
     run::Side,
@@ -40,6 +40,16 @@ query($owner: String!, $name: String!, $number: Int!) {
       reviews(last: 100) {
         pageInfo { hasPreviousPage }
         nodes { id author { __typename login } state body submittedAt commit { oid } }
+      }
+      # Only your own pending review is visible to you.
+      pending: reviews(states: [PENDING], first: 1) {
+        nodes {
+          id author { login }
+          comments(last: 100) {
+            pageInfo { hasPreviousPage }
+            nodes { id path line startLine originalLine originalStartLine outdated body }
+          }
+        }
       }
       comments(last: 100) {
         pageInfo { hasPreviousPage }
@@ -591,8 +601,72 @@ struct RawPr {
     author: Option<Login>,
     review_requests: Connection<RawReviewRequest>,
     reviews: Connection<RawReview>,
+    // Always asked for; hand-written mocks may omit it.
+    #[serde(default)]
+    pending: Option<Connection<RawPending>>,
     comments: Connection<RawComment>,
     review_threads: Connection<RawThread>,
+}
+
+/// A review pending on GitHub, which is only ever your own.
+#[derive(Deserialize)]
+struct RawPending {
+    id: String,
+    author: Option<Login>,
+    comments: Connection<RawPendingComment>,
+}
+
+impl RawPending {
+    /// `me`'s, among `pending`.
+    fn yours(pending: Option<Connection<Self>>, me: &str, key: &PrKey) -> Option<InProgressReview> {
+        pending?
+            .nodes
+            .into_iter()
+            .find(|r| r.author.as_ref().is_some_and(|a| is_login(&a.login, me)))
+            .map(|r| r.into_review(key))
+    }
+
+    fn into_review(self, key: &PrKey) -> InProgressReview {
+        let comments = self
+            .comments
+            .into_nodes("your pending review's comments", key)
+            .into_iter()
+            .map(|c| {
+                // Off the head, it only has lines where it was left.
+                let (line, start_line) = match c.line {
+                    Some(line) => (Some(line), c.start_line),
+                    None => (c.original_line, c.original_start_line),
+                };
+                InProgressComment {
+                    id: c.id,
+                    path: c.path,
+                    line,
+                    start_line,
+                    outdated: c.outdated,
+                    body: c.body,
+                }
+            })
+            .collect();
+        InProgressReview {
+            id: self.id,
+            comments,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPendingComment {
+    id: String,
+    path: String,
+    line: Option<u32>,
+    start_line: Option<u32>,
+    original_line: Option<u32>,
+    original_start_line: Option<u32>,
+    // Always sent by GitHub; hand-written mocks may omit it.
+    #[serde(default)]
+    outdated: bool,
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -876,6 +950,7 @@ impl RawPr {
                 .and_then(|c| c.nodes.into_iter().next())
                 .and_then(|n| n.commit.status_check_rollup)
                 .map(|r| r.state),
+            in_progress: RawPending::yours(self.pending, me, &key),
             key,
         }
     }

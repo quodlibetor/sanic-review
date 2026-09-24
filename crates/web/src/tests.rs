@@ -190,6 +190,7 @@ fn snapshot(number: u32, author: &str, title: &str) -> PrSnapshot {
         review_decision: None,
         merge_state: None,
         checks: None,
+        in_progress: None,
     }
 }
 
@@ -889,6 +890,139 @@ async fn githubs_refusal_is_shown_and_not_retried() {
     }
     // GitHub took nothing, so there's nothing new to fetch.
     assert!(f.serve.refreshed.lock().unwrap().is_empty());
+}
+
+/// Records the fixture's PR 7 as polled with your own review pending on
+/// GitHub, review `id`, with two comments.
+fn with_your_pending_review(f: &Fixture, id: &str) {
+    use sanic_core::pr::{InProgressComment, InProgressReview};
+    let comment = |n: u32| InProgressComment {
+        id: format!("PRRC_{n}"),
+        path: "src/lib.rs".into(),
+        line: Some(n),
+        start_line: None,
+        outdated: false,
+        body: format!("pending {n}"),
+    };
+    let snap = PrSnapshot {
+        in_progress: Some(InProgressReview {
+            id: id.into(),
+            comments: vec![comment(1), comment(2)],
+        }),
+        ..fixture_prs().swap_remove(0)
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+}
+
+const YOURS_PENDING: &str =
+    "You have a pending review on GitHub; submit or discard it there first.";
+
+#[tokio::test]
+async fn the_preview_says_your_pending_review_on_github_must_go_first() {
+    let f = fixture(false).await;
+    accept_all(&f).await;
+    assert!(
+        !f.get(&f.preview_uri("COMMENT"))
+            .await
+            .body
+            .contains(YOURS_PENDING)
+    );
+    with_your_pending_review(&f, "PRR_yours");
+    // From the store, as last polled: the preview asks GitHub nothing.
+    let guard = Mock::given(any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .named("GitHub before confirming")
+        .mount_as_scoped(&f.github)
+        .await;
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    drop(guard);
+    assert!(preview.contains(YOURS_PENDING), "{preview}");
+    assert!(preview.contains("2 comments when last polled"), "{preview}");
+    assert!(
+        preview.contains("https://github.com/org/repo/pull/7/files"),
+        "{preview}"
+    );
+
+    // GitHub refuses it: the failure says why it most likely did.
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Unprocessable Entity",
+            "errors": ["User can only have one pending review per pull request"],
+        })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let payload = hidden_value(&preview, "payload");
+    let reply = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+    assert!(
+        reply
+            .body
+            .contains("You have a pending review on GitHub, which is most likely why"),
+        "{}",
+        reply.body
+    );
+    for i in 0..3 {
+        assert_eq!(f.status(i), "accepted");
+    }
+}
+
+#[tokio::test]
+async fn a_review_an_earlier_submit_left_pending_isnt_yours_to_submit_first() {
+    let f = fixture(false).await;
+    accept_all(&f).await;
+    // The poll saw the pending review a submit here made and recorded.
+    f.dashboard
+        .app
+        .store()
+        .record_pending_review(
+            &key(7),
+            &sanic_store::PendingReview {
+                run: f.run,
+                drafts: vec![],
+                on_github: sanic_store::OnGithub::Pending {
+                    node_id: "PRR_ours".into(),
+                    html_url: "https://github.com/org/repo/pull/7#pullrequestreview-1".into(),
+                },
+            },
+        )
+        .unwrap();
+    with_your_pending_review(&f, "PRR_ours");
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(!preview.contains(YOURS_PENDING), "{preview}");
+    assert!(preview.contains("An earlier submit on this PR left a review pending."));
+}
+
+#[tokio::test]
+async fn the_pr_page_says_how_many_of_your_pending_comments_the_agent_saw() {
+    let f = fixture(false).await;
+    assert!(
+        !f.get("/pr/org/repo/7")
+            .await
+            .body
+            .contains("pending review comment")
+    );
+    f.dashboard
+        .app
+        .store()
+        .record_in_progress_shown(f.run, 2)
+        .unwrap();
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(
+        page.contains("The agent saw 2 of your pending review comments on GitHub"),
+        "{page}"
+    );
 }
 
 #[tokio::test]
@@ -1652,6 +1786,7 @@ async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() 
         review_decision: Some("APPROVED".into()),
         merge_state: Some(merge.into()),
         checks: Some(checks.into()),
+        in_progress: None,
         ..snapshot(number, "me", title)
     };
     {

@@ -129,6 +129,7 @@ fn context() -> PrContext {
         url: "https://github.com/org/repo/pull/7".into(),
         author: "alice".into(),
         threads: vec![],
+        in_progress: None,
     }
 }
 

@@ -92,5 +92,6 @@ fn snapshot(key: &PrKey) -> PrSnapshot {
         review_decision: None,
         merge_state: None,
         checks: None,
+        in_progress: None,
     }
 }

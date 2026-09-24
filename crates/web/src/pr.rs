@@ -481,6 +481,14 @@ fn drafts_section(
         @if run.head_sha != pr.head_sha {
             div.banner { (moved_on(&run.head_sha, &pr.head_sha)) }
         }
+        @if let Some(n) = run.in_progress_comments.filter(|&n| n > 0) {
+            p.seen {
+                "The agent saw " (n) " of your pending review "
+                @if n == 1 { "comment" } @else { "comments" }
+                " on GitHub, and was asked to check them, not repeat them. That review is "
+                "yours to submit there."
+            }
+        }
         // Where Revise lands: the new run, before it has drafts or a diff.
         @if matches!(run.status.as_str(), "queued" | "running") {
             div.banner {

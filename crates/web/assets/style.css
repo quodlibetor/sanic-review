@@ -1440,6 +1440,12 @@ main:has(> .prh) {
   margin-left: 0.25rem;
 }
 
+p.seen {
+  margin: 0.5rem 0;
+  font-size: 13px;
+  color: var(--dim);
+}
+
 .banner {
   border: 1px solid var(--held);
   border-left-width: 4px;

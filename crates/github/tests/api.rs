@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use sanic_core::run::Side;
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, Placement, PrKey, Reaction, ReviewState, TeamRef},
+    pr::{
+        CONVERSATION_THREAD, InProgressComment, InProgressReview, Placement, PrKey, Reaction,
+        ReviewState, TeamRef,
+    },
     repo::RepoName,
 };
 use sanic_github::{
@@ -190,13 +193,18 @@ async fn search_pages_through_results_and_skips_non_prs() {
 /// A server answering for `pr.json`'s PR, its reactions follow-up and its
 /// files.
 async fn pr_server() -> MockServer {
+    pr_server_answering(fixture("pr.json")).await
+}
+
+/// [`pr_server`], answering the PR query with `pr`.
+async fn pr_server_answering(pr: Value) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_partial_json(json!({
             "variables": { "owner": "org", "name": "repo", "number": 7 }
         })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("pr.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
         .mount(&server)
         .await;
     // Only your comment still waiting on Alice wants its reactions: in the
@@ -304,6 +312,7 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
     assert_eq!(snap.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
     assert_eq!(snap.merge_state.as_deref(), Some("BLOCKED"));
     assert_eq!(snap.checks.as_deref(), Some("PENDING"));
+    assert_eq!(snap.in_progress, None);
     assert!(
         snap.review_requested,
         "direct request for `Me` matches `me`"
@@ -349,6 +358,58 @@ async fn pull_request_snapshot_includes_threads_reviews_and_files() {
                 "src/old.rs".into()
             ][..]
         )
+    );
+}
+
+#[tokio::test]
+async fn pull_request_snapshot_has_your_pending_review_with_its_comments() {
+    let mut pr = fixture("pr.json");
+    // Only your own is ever visible; `pr.json` has none.
+    assert_eq!(pr["data"]["repository"]["pullRequest"].get("pending"), None);
+    pr["data"]["repository"]["pullRequest"]["pending"] = json!({ "nodes": [{
+        "id": "PRR_9",
+        "author": { "login": "Me" },
+        "comments": {
+            "pageInfo": { "hasPreviousPage": false },
+            "nodes": [
+                { "id": "PRRC_1", "path": "src/retry.rs", "line": 42, "startLine": 40,
+                  "originalLine": 38, "body": "Can this loop forever?" },
+                { "id": "PRRC_2", "path": "src/old.rs", "line": null, "startLine": null,
+                  "originalLine": 7, "originalStartLine": 5, "outdated": true,
+                  "body": "Outdated now." }
+            ]
+        }
+    }] });
+    let server = pr_server_answering(pr).await;
+    let snap = client(&server)
+        .pull_request(&key("org/repo", 7), "me", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snap.in_progress,
+        Some(InProgressReview {
+            id: "PRR_9".into(),
+            comments: vec![
+                InProgressComment {
+                    id: "PRRC_1".into(),
+                    path: "src/retry.rs".into(),
+                    line: Some(42),
+                    start_line: Some(40),
+                    outdated: false,
+                    body: "Can this loop forever?".into(),
+                },
+                // Off the head now: its line where it was left.
+                InProgressComment {
+                    id: "PRRC_2".into(),
+                    path: "src/old.rs".into(),
+                    line: Some(7),
+                    start_line: Some(5),
+                    outdated: true,
+                    body: "Outdated now.".into(),
+                },
+            ],
+        })
     );
 }
 

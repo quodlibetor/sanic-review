@@ -78,6 +78,10 @@ pub struct Built {
     /// A review an earlier submit on the PR left pending on GitHub, or
     /// sent without an answer, which is settled first; see [`settle`].
     pub left: Option<PendingReview>,
+    /// How many comments your own review pending on GitHub had when last
+    /// polled, if you have one that isn't `left`. GitHub takes one pending
+    /// review of yours per PR, so it's likely to refuse this one.
+    pub in_progress: Option<usize>,
 }
 
 /// A draft posted as a reply in an existing thread.
@@ -250,6 +254,7 @@ pub fn build(
         bodies,
         head: run.head_sha.clone(),
         left: None,
+        in_progress: None,
     })
 }
 
@@ -404,7 +409,16 @@ fn load(app: &App, path: &RunPath, event: ReviewEvent) -> Result<Loaded, Error> 
     let threads = store.threads(&key).map_err(Error::pr(&key))?;
     // Any run's: a regeneration copies drafts GitHub may have in it.
     let left = store.pending_review(&key).map_err(Error::pr(&key))?;
-    let built = build(&run, &drafts, &threads, event).map(|built| Built { left, ..built });
+    // Yours, begun on GitHub; one an earlier submit left is `left`.
+    let in_progress = store
+        .in_progress_review(&key)
+        .map_err(Error::pr(&key))?
+        .map(|yours| yours.comments.len());
+    let built = build(&run, &drafts, &threads, event).map(|built| Built {
+        left,
+        in_progress,
+        ..built
+    });
     Ok((pr, built))
 }
 
@@ -645,6 +659,15 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
         .chain(built.replies.iter().map(|r| &r.new.body));
     let missable = easy_to_miss(texts);
     let mut checks = Vec::new();
+    if let Some(comments) = built.in_progress {
+        checks.push(html! {
+            b.bad { "You have a pending review on GitHub; submit or discard it there first." }
+            " GitHub takes one pending review of yours per PR, so it's likely to refuse this "
+            "one while " a href={ (pr.key.url()) "/files" } { "that one" } " is pending ("
+            (comments) @if comments == 1 { " comment" } @else { " comments" }
+            " when last polled). Nothing here touches it."
+        });
+    }
     match built.left.as_ref().map(|left| &left.on_github) {
         Some(OnGithub::Pending { .. }) => checks.push(html! {
             b { "An earlier submit on this PR left a review pending." }
@@ -1443,6 +1466,7 @@ fn review_failed(pr: &PrPage, built: &Built, failure: &Failure, back: &str) -> M
         "Posting failed",
         html! {
             pre.error { (err) }
+            (yours_in_the_way(key, built, failure))
             p.note { (note) " Nothing was marked posted, and nothing is retried." }
             @if !built.reactions.is_empty() {
                 p.note { "No 👍 were sent: they go after the review." }
@@ -1452,6 +1476,22 @@ fn review_failed(pr: &PrPage, built: &Built, failure: &Failure, back: &str) -> M
         (back, "Back to the drafts"),
         Tone::Failed,
     )
+}
+
+/// For a review GitHub refused, or wouldn't create pending, while you had
+/// one of your own pending there: that it's the likely reason.
+fn yours_in_the_way(key: &PrKey, built: &Built, failure: &Failure) -> Markup {
+    let likely = built.in_progress.is_some()
+        && matches!(failure, Failure::Refused(_) | Failure::NotCreated(_));
+    html! {
+        @if likely {
+            p.warn {
+                "You have a pending review on GitHub, which is most likely why: submit or "
+                "discard " a href={ (key.url()) "/files" } { "it" } " there first, then "
+                "submit this again."
+            }
+        }
+    }
 }
 
 /// How a submit went, once GitHub took something.

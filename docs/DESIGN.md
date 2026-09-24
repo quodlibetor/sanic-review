@@ -238,6 +238,14 @@ against stored state, never from notification payloads.
   query's cost; the reactions to your review-thread comments still
   waiting on an answer are fetched afterwards by node id, in follow-up
   requests of as many ids as GitHub takes at once.
+- **Your pending review.** A review you've begun on GitHub and not
+  submitted is visible only to you, and GitHub takes one per person per
+  PR. The PR snapshot fetches yours, if any, with its newest comments
+  (path, lines, whether they're outdated, body), in the same query, and
+  the store keeps it as last polled, in place of the one before. One that
+  a submit here left pending isn't yours: it's the submit's to settle, and
+  settling it forgets the poll's copy too. It's never changed or submitted
+  from here.
 - **Hidden counts.** Each reconcile under a recency window also counts,
   without fetching them, the open PRs each list would have outside it:
   review requests for reviews you owe, and your own PRs, kept to watched
@@ -389,6 +397,16 @@ Rules:
    must not be followed. The agent is told not to comment on a point a
    thread already makes, and, when it agrees with an existing comment, to
    say so in its summary, naming whose and where, instead.
+   Your pending review's comments, as last polled, get a section of their
+   own, labelled as your in-progress review and fenced as untrusted text
+   like the rest, an outdated one on the lines of the commit it was left
+   on, as an outdated thread is, and are left out of the threads, in the
+   brief and in a regeneration's prompt alike. The agent is told to
+   audit them as its own findings (verify the claims, check the anchors,
+   check each has an ask), not to repeat them, and, where one is wrong or
+   unclear, to draft a replacement on its lines with a note saying which
+   it replaces and why. The run records how many it was shown; a
+   regeneration's session saw what its source's did.
 3. **Invoke.** Headless `claude -p` with JSON output against a schema,
    `--append-system-prompt` for instructions, and skill dirs from the profile.
    Only read-only tools are allowed (Read, Grep, Glob, and read-only Bash if
@@ -529,9 +547,10 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
+| `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
@@ -645,7 +664,9 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   only that commit's changes. Once the PR has moved on, it's the lines in
   the file at the reviewed head, for new lines only; old ones get no
   link. A draft that isn't on a line of the diff links to its lines in
-  the file at that head. A draft with a private note from the agent shows
+  the file at that head. When the run's agent was shown your pending
+  review on GitHub, a line under the bar says how many of its comments,
+  and that it's yours to submit there. A draft with a private note from the agent shows
   it under the draft, muted, dashed and labelled "Reviewer note (not
   posted)"; nothing in it goes in any request or the preview's review.
 - **Files changed.** Tabs over the drafts switch to a view of the whole
@@ -769,8 +790,16 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   then each inline comment, then the replies in existing threads and the
   👍s) beside every request that will be sent, in order, each with its
   exact JSON body or mutation variables, with the confirm in a footer
-  that stays in view; on a narrow window they stack. Above them, "Check before posting" lists what
-  to look at: that the reviewed commit is behind
+  that stays in view; on a narrow window they stack. Above them, "Check
+  before posting" lists what to look at. First, when the PR had a review
+  of yours pending on GitHub at the last poll (other than one an earlier
+  submit here left, which is settled as below), "You have a pending
+  review on GitHub; submit or discard it there first": GitHub takes one
+  pending review of yours per PR, so it's likely to refuse this one. The
+  preview reads that from the store and sends nothing. It doesn't stop the
+  post, since the poll may be behind; if GitHub refuses the review, or its
+  pending create, the failure names that review as the likely reason.
+  Then: that the reviewed commit is behind
   the PR's head, comments moved into the body, what GitHub's Markdown would
   make easy to miss (mentions, hidden comments, images, HTML tags and
   invisible characters), replies and 👍s in existing threads, and drafts
