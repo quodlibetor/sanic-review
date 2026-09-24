@@ -96,30 +96,60 @@ impl Client {
     /// Sends `req`, turning rate limits and auth failures into [`ApiError`]
     /// variants. `304 Not Modified` is returned as a response, not an error.
     pub(crate) async fn send(&self, req: RequestBuilder, what: &str) -> Result<Response, ApiError> {
+        self.send_answered(req, what)
+            .await
+            .map_err(|failed| failed.err)
+    }
+
+    /// [`Client::send`], saying also whether GitHub answered with a client
+    /// error, so a write it refused is known not to have happened.
+    pub(crate) async fn send_answered(
+        &self,
+        req: RequestBuilder,
+        what: &str,
+    ) -> Result<Response, Failed> {
+        let unanswered = |err: ApiError| Failed {
+            err,
+            refused: false,
+        };
         let resp = req
             .send()
             .await
-            .wrap_err_with(|| format!("requesting {what}"))?;
+            .wrap_err_with(|| format!("requesting {what}"))
+            .map_err(|err| unanswered(err.into()))?;
         let status = resp.status();
         if status.is_success() || status == StatusCode::NOT_MODIFIED {
             return Ok(resp);
         }
+        let refused = |err: ApiError| Failed {
+            err,
+            refused: status.is_client_error(),
+        };
         if status == StatusCode::UNAUTHORIZED {
-            return Err(ApiError::Unauthorized);
+            return Err(refused(ApiError::Unauthorized));
         }
         if let Some(retry_after) = rate_limit(status, resp.headers()) {
-            return Err(ApiError::RateLimited { retry_after });
+            return Err(refused(ApiError::RateLimited { retry_after }));
         }
         let body = resp.text().await.unwrap_or_default();
         // Secondary rate limits can arrive as a bare 403 whose only signal
         // is the message.
         if status == StatusCode::FORBIDDEN && body.to_ascii_lowercase().contains("rate limit") {
-            return Err(ApiError::RateLimited {
+            return Err(refused(ApiError::RateLimited {
                 retry_after: DEFAULT_RETRY,
-            });
+            }));
         }
-        Err(eyre!("GitHub returned {status} for {what}: {body}").into())
+        Err(refused(
+            eyre!("GitHub returned {status} for {what}: {body}").into(),
+        ))
     }
+}
+
+/// A request [`Client::send_answered`] got no success for.
+pub(crate) struct Failed {
+    pub(crate) err: ApiError,
+    /// GitHub answered with a client error: it didn't do what was asked.
+    pub(crate) refused: bool,
 }
 
 /// Recognizes GitHub's primary (`x-ratelimit-remaining: 0`) and secondary

@@ -489,7 +489,7 @@ invited to draft replies or fixes on someone else's PR.
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
-| `pending_reviews` | per PR, a review a submit created pending on GitHub and hasn't seen submitted or deleted: its run, and its drafts with their bodies as posted |
+| `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
@@ -688,9 +688,11 @@ embedded in the binary, so nothing is fetched at runtime.
   body. Each one there is headed by a link to its lines in the file at
   that head, shown as source even for Markdown, or by its plain
   `path:line` for lines of the old file. Drafts accepted as replies go
-  in that review too. The review is always created pending (the REST
-  create-review call without a verdict), which nobody else can see; each
-  reply is added to it with `addPullRequestReviewThreadReply`, and
+  in that review too. A review without replies is one REST create-review
+  call with your verdict, body and comments, and the preview shows that
+  one request. A review with replies is created pending (the same call
+  without a verdict), which nobody else can see; each reply is added to
+  it with `addPullRequestReviewThreadReply`, and
   `submitPullRequestReview` submits it with your verdict, so the review
   and its replies appear together. Then each 👍, for the drafts that
   chose it (several choosing one comment share one), is sent with
@@ -703,23 +705,36 @@ embedded in the binary, so nothing is fetched at runtime.
   retried. A retry never sends again what GitHub has, whatever GitHub
   does with a repeat, because what it takes is recorded here as it takes
   it:
-  - The pending review is recorded for the PR (`pending_reviews`), with
-    its run and its drafts as posted, before anything is added to it. If recording fails, it's deleted
-    and nothing is posted. If a reply fails, it's deleted and forgotten.
+  - A review is recorded for the PR (`pending_reviews`), with its run
+    and its drafts as posted. One sent in a single call is recorded
+    before it's sent, with what it sends, and if recording fails it isn't
+    sent. If GitHub refuses it with a client error, such as approving
+    your own PR, it's known not to be posted: the record is dropped and
+    the result says so. With no answer, a server error or an answer that
+    can't be read, the record is kept, since GitHub may have it. A
+    pending one is recorded before anything is added to it; if recording
+    fails, it's deleted and nothing is posted, and if a reply fails, it's
+    deleted and forgotten.
   - While the PR has one recorded, the next submit of any of its runs
     checks it first, and the preview says so: a regeneration copies the
-    drafts it may have posted. Submitted after all (a submit that failed
-    after GitHub took it), its drafts are marked `posted` and nothing
-    else is sent; it's forgotten only once they're marked. So are its
+    drafts it may have posted. A single call whose answer didn't come
+    back is looked for among your newest reviews of the PR: one on its
+    commit with its verdict, body and inline comments, submitted no
+    earlier than a little before it was sent, so an older review just like
+    it doesn't count, nor does a recent one that differs only in its
+    comments. A
+    pending review's state is checked. Posted after all (a submit that
+    failed after GitHub took it), its drafts are marked `posted` and
+    nothing else is sent; it's forgotten only once they're marked. So are its
     drafts' copies: drafts of any of the PR's runs that share a line of
     revisions with one it posted (revised from it, it from them, or both
     from one draft) and are word for word what it posted, kind and anchor
     too. The submitting run's that share one but differ are left as they
     are, and the result names them to check against the posted review.
-    Still pending, it's deleted, then the review is posted afresh. Gone,
-    it's forgotten.
-  - Once the submit succeeds, the review's drafts and their copies are
-    marked `posted`, and only then is the pending review forgotten, so
+    Still pending, it's deleted, then the review is posted afresh. Not
+    found, or gone, it's forgotten and the review is posted afresh.
+  - Once the post succeeds, the review's drafts and their copies are
+    marked `posted`, and only then is the record forgotten, so
     if marking fails, the next submit, after a restart too, finds it
     submitted. Either result lists the copies it marked, each linked
     through its own run, so every draft that changed state is shown. Posted
@@ -736,8 +751,9 @@ embedded in the binary, so nothing is fetched at runtime.
     Comment preview of what's left, which has no review: Approve would
     post a second one.
 
-  What a local record can't cover: a create whose answer is lost
-  leaves a pending review GitHub made but that isn't recorded. Nobody
+  What a local record can't cover: a pending review's create whose
+  answer is lost leaves a pending review GitHub made but that isn't
+  recorded. Nobody
   else sees it, and it's never submitted from here; the result says to
   discard it on GitHub. Drafts of kind `reply` aren't posted yet: they
   don't record their thread.

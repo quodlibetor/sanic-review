@@ -122,15 +122,39 @@ impl DraftRow {
     }
 }
 
-/// A review created pending on GitHub for a PR, until it's known to be
-/// submitted or gone: the run it's from, and the drafts in it.
+/// A review a submit sent to GitHub for a PR, until it's known to be
+/// submitted or gone: the run it's from, the drafts in it, and where it
+/// is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingReview {
     pub run: i64,
-    pub node_id: String,
-    pub html_url: String,
     /// Each draft in it, with its body as posted.
     pub drafts: Vec<(i64, String)>,
+    pub on_github: OnGithub,
+}
+
+/// Where a [`PendingReview`] is on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnGithub {
+    /// Created pending, which nobody else sees until it's submitted.
+    Pending { node_id: String, html_url: String },
+    /// Sent in the one call that creates and submits it, whose answer
+    /// hasn't come back: GitHub may have it or not.
+    Sent(SentReview),
+}
+
+/// What a review sent in one call sent, to find it again on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentReview {
+    pub commit_id: String,
+    /// GitHub's name for its verdict, e.g. `APPROVE`.
+    pub event: String,
+    pub body: String,
+    /// Its inline comments' bodies.
+    pub comments: Vec<String>,
+    /// An RFC 3339 time before it was sent: a review of yours submitted
+    /// earlier isn't this one.
+    pub after: String,
 }
 
 /// What you can decide about a draft. `stale` and `posted` are set by
@@ -341,19 +365,33 @@ impl Store {
     /// Records that `key` has `review` pending on GitHub, replacing any
     /// earlier record.
     pub fn record_pending_review(&self, key: &PrKey, review: &PendingReview) -> Result<()> {
+        let (node_id, html_url, sent) = match &review.on_github {
+            OnGithub::Pending { node_id, html_url } => (node_id.as_str(), html_url.as_str(), None),
+            OnGithub::Sent(sent) => {
+                let json = serde_json::json!({
+                    "commit_id": sent.commit_id,
+                    "event": sent.event,
+                    "body": sent.body,
+                    "comments": sent.comments,
+                    "after": sent.after,
+                });
+                ("", "", Some(json.to_string()))
+            }
+        };
         self.conn.execute(
-            "INSERT INTO pending_reviews (repo, number, run_id, node_id, html_url, drafts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO pending_reviews (repo, number, run_id, node_id, html_url, drafts, sent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (repo, number) DO UPDATE SET run_id = excluded.run_id,
                  node_id = excluded.node_id, html_url = excluded.html_url,
-                 drafts = excluded.drafts",
+                 drafts = excluded.drafts, sent = excluded.sent",
             params![
                 key.repo.to_string(),
                 key.number,
                 review.run,
-                review.node_id,
-                review.html_url,
-                serde_json::to_string(&review.drafts)?
+                node_id,
+                html_url,
+                serde_json::to_string(&review.drafts)?,
+                sent,
             ],
         )?;
         Ok(())
@@ -364,7 +402,7 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT run_id, node_id, html_url, drafts FROM pending_reviews
+                "SELECT run_id, node_id, html_url, drafts, sent FROM pending_reviews
                  WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
@@ -373,23 +411,28 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(run, node_id, html_url, drafts)| {
+        row.map(|(run, node_id, html_url, drafts, sent)| {
+            let on_github = match sent {
+                None => OnGithub::Pending { node_id, html_url },
+                Some(sent) => OnGithub::Sent(sent_review(&sent)?),
+            };
             Ok(PendingReview {
                 run,
-                node_id,
-                html_url,
                 drafts: serde_json::from_str(&drafts)
                     .wrap_err("reading a pending review's drafts")?,
+                on_github,
             })
         })
         .transpose()
     }
 
-    /// Forgets `key`'s pending review: it was submitted or deleted.
+    /// Forgets `key`'s pending review: it was submitted or deleted, or
+    /// GitHub answered the call that sent it.
     pub fn clear_pending_review(&self, key: &PrKey) -> Result<()> {
         self.conn.execute(
             "DELETE FROM pending_reviews WHERE repo = ?1 AND number = ?2",
@@ -427,6 +470,26 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
         Ok(unseen)
     }
+}
+
+/// Reads what a review sent in one call sent, as `record_pending_review`
+/// wrote it.
+fn sent_review(json: &str) -> Result<SentReview> {
+    let value: serde_json::Value = serde_json::from_str(json).wrap_err("reading a sent review")?;
+    let field = |name: &str| {
+        value[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| color_eyre::eyre::eyre!("a sent review has no `{name}`"))
+    };
+    Ok(SentReview {
+        commit_id: field("commit_id")?,
+        event: field("event")?,
+        body: field("body")?,
+        comments: serde_json::from_value(value["comments"].clone())
+            .wrap_err("reading a sent review's comments")?,
+        after: field("after")?,
+    })
 }
 
 #[cfg(test)]
@@ -674,9 +737,11 @@ mod tests {
         assert_eq!(store.pending_review(&key()).unwrap(), None);
         let pending = PendingReview {
             run,
-            node_id: "PRR_1".into(),
-            html_url: "https://github.com/org/repo/pull/7#pullrequestreview-1".into(),
             drafts: vec![(3, "Looks fine.".into()), (4, "off by one?".into())],
+            on_github: OnGithub::Pending {
+                node_id: "PRR_1".into(),
+                html_url: "https://github.com/org/repo/pull/7#pullrequestreview-1".into(),
+            },
         };
         store.record_pending_review(&key(), &pending).unwrap();
         assert_eq!(store.pending_review(&key()).unwrap(), Some(pending));
@@ -685,6 +750,22 @@ mod tests {
         assert_eq!(store.pending_review(&other).unwrap(), None);
         store.clear_pending_review(&key()).unwrap();
         assert_eq!(store.pending_review(&key()).unwrap(), None);
+
+        // One sent in a single call is recorded by what it sent, in place
+        // of an earlier record.
+        let sent = PendingReview {
+            run,
+            drafts: vec![(3, "Looks fine.".into())],
+            on_github: OnGithub::Sent(SentReview {
+                commit_id: "head7".into(),
+                event: "APPROVE".into(),
+                body: "Looks fine.".into(),
+                comments: vec!["off by one?".into()],
+                after: "2026-09-24T16:00:00Z".into(),
+            }),
+        };
+        store.record_pending_review(&key(), &sent).unwrap();
+        assert_eq!(store.pending_review(&key()).unwrap(), Some(sent));
     }
 
     #[test]

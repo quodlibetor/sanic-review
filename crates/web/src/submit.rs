@@ -15,14 +15,15 @@ use axum::{
 };
 use maud::{Markup, html};
 use sanic_core::{
+    clock::rfc3339,
     pr::{PrKey, Thread},
     run::Side,
 };
 use sanic_github::{
-    ApiError, NewComment, NewReaction, NewReply, NewReview, ReviewEvent, ReviewStatus, Step,
-    review_state_step,
+    ApiError, NewComment, NewReaction, NewReply, NewReview, PostError, ReviewEvent, ReviewStatus,
+    Step, find_review_step, review_state_step,
 };
-use sanic_store::{DraftRow, PendingReview, PrPage, ReviewRun, ThreadChoice};
+use sanic_store::{DraftRow, OnGithub, PendingReview, PrPage, ReviewRun, SentReview, ThreadChoice};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -74,8 +75,8 @@ pub struct Built {
     pub pending: Vec<i64>,
     /// The reviewed head, which the drafts' lines are lines of.
     pub head: String,
-    /// A review an earlier submit of this run left pending on GitHub,
-    /// which is settled first; see [`settle`].
+    /// A review an earlier submit on the PR left pending on GitHub, or
+    /// sent without an answer, which is settled first; see [`settle`].
     pub left: Option<PendingReview>,
 }
 
@@ -110,7 +111,10 @@ struct Wire<'a> {
 impl Built {
     fn wire(&self) -> Wire<'_> {
         Wire {
-            left: self.left.as_ref().map(|l| l.node_id.as_str()),
+            left: self.left.as_ref().map(|l| match &l.on_github {
+                OnGithub::Pending { node_id, .. } => node_id.as_str(),
+                OnGithub::Sent(sent) => sent.after.as_str(),
+            }),
             review: self.review.as_ref(),
             replies: self.replies.iter().map(|r| &r.new).collect(),
             reactions: self.reactions.iter().map(|r| &r.new).collect(),
@@ -121,14 +125,17 @@ impl Built {
         self.replies.iter().map(|r| r.new.clone()).collect()
     }
 
-    /// Every request a confirm sends, in order.
-    fn steps(&self, key: &PrKey) -> Vec<Step> {
-        let left = self.left.iter().flat_map(|left| {
-            let mut discard = review_state_step(&left.node_id);
-            discard.endpoint = "GraphQL deletePullRequestReview, only if it's still pending, \
-                                with"
-                .into();
-            [review_state_step(&left.node_id), discard]
+    /// Every request a confirm sends, in order, as `me`.
+    fn steps(&self, key: &PrKey, me: &str) -> Vec<Step> {
+        let left = self.left.iter().flat_map(|left| match &left.on_github {
+            OnGithub::Pending { node_id, .. } => {
+                let mut discard = review_state_step(node_id);
+                discard.endpoint = "GraphQL deletePullRequestReview, only if it's still \
+                                    pending, with"
+                    .into();
+                vec![review_state_step(node_id), discard]
+            }
+            OnGithub::Sent(_) => vec![find_review_step(key, me)],
         });
         let review = self
             .review
@@ -547,7 +554,7 @@ pub async fn preview(
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
     };
-    let steps = built.steps(&pr.key);
+    let steps = built.steps(&pr.key, &app.me);
     let action = format!("{}/runs/{}/submit", pr_href(&pr.key), path.run);
     let approve = built.event() == Some(ReviewEvent::Approve);
     let payload = wire(&built)?;
@@ -658,13 +665,19 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
         .chain(built.replies.iter().map(|r| &r.new.body));
     let missable = easy_to_miss(texts);
     let mut checks = Vec::new();
-    if built.left.is_some() {
-        checks.push(html! {
+    match built.left.as_ref().map(|left| &left.on_github) {
+        Some(OnGithub::Pending { .. }) => checks.push(html! {
             b { "An earlier submit on this PR left a review pending." }
             " It's checked first: if GitHub submitted it after all, its drafts are marked "
             "posted and nothing else is sent; if it's still pending, it's deleted, then "
             "this is posted."
-        });
+        }),
+        Some(OnGithub::Sent(_)) => checks.push(html! {
+            b { "An earlier submit on this PR sent a review GitHub never answered." }
+            " It's looked for first: if GitHub has it, its drafts are marked posted and "
+            "nothing else is sent; if not, this is posted."
+        }),
+        None => {}
     }
     if let Some(review) = review
         && review.commit_id != pr.head_sha
@@ -827,7 +840,7 @@ pub async fn submit(
             Ok(Settled::Submitted(done)) => {
                 posted_before.insert(sent);
                 app.control.refresh(key.clone());
-                let content = submitted_after_all(&pr, left, &done, &back, path.run);
+                let content = submitted_after_all(&pr, left.run, &done, &back, path.run);
                 let page = result_page(&app, key, "Posted earlier", &content);
                 return Ok((StatusCode::CONFLICT, page).into_response());
             }
@@ -843,7 +856,7 @@ pub async fn submit(
     if let Some(review) = &built.review {
         match post_review(&app, key, path.run, review, &built).await {
             Ok(review) => {
-                info!(url = %key.url(), review = %review.html_url, "review posted");
+                info!(url = %key.url(), review = %review, "review posted");
                 posted_before.insert(sent.clone());
                 let failed;
                 (copies, failed) = mark_review(&app, key, path.run, &built);
@@ -871,7 +884,7 @@ pub async fn submit(
         info!(url = %key.url(), reacted, "thumbs-ups added before one failed");
     }
     let outcome = Outcome {
-        posted: posted.as_ref().map(|p: &PendingReview| p.html_url.as_str()),
+        posted: posted.as_deref(),
         reacted,
         failed: failed.as_ref().map(|(r, err)| (*r, plain(err))),
         copies,
@@ -919,12 +932,20 @@ fn changed_since_preview(pr: &PrPage, run: i64, event: ReviewEvent, back: &str) 
 /// How far a review got, when GitHub didn't take all of it.
 #[derive(Debug)]
 enum Failure {
-    /// Checking the review an earlier submit left pending failed.
+    /// Checking on the review an earlier submit left pending, or sent
+    /// without an answer, failed.
     Check(ApiError),
     /// Deleting the review an earlier submit left pending failed.
     Discard(ApiError),
     /// GitHub didn't create the pending review.
     NotCreated(ApiError),
+    /// A review sent in one call couldn't be recorded here first, so it
+    /// wasn't sent.
+    NotRecorded(color_eyre::Report),
+    /// GitHub refused a review sent in one call, so it isn't posted.
+    Refused(ApiError),
+    /// A review sent in one call failed, and GitHub may have it anyway.
+    Unanswered(ApiError),
     /// The pending review couldn't be recorded here, so it was deleted
     /// rather than risk not knowing about it; `discarded` says how that went.
     Unrecorded {
@@ -942,16 +963,18 @@ enum Failure {
     NotSubmitted(ApiError),
 }
 
-/// How [`settle`] left the review an earlier submit left pending.
+/// How [`settle`] left the review an earlier submit left.
 enum Settled {
-    /// Deleted, or already gone, and forgotten: post afresh.
+    /// Deleted, gone or not found, and forgotten: post afresh.
     Cleared,
-    /// GitHub had submitted it after all, and nothing else is sent.
+    /// GitHub had it submitted after all, and nothing else is sent.
     Submitted(Submitted),
 }
 
 /// What settling a review GitHub had submitted after all did.
 struct Submitted {
+    /// Its page on GitHub.
+    html_url: String,
     /// Its drafts' copies in the PR's runs.
     copies: Copies,
     /// Why they couldn't be found or marked, if they couldn't. The record
@@ -959,36 +982,62 @@ struct Submitted {
     marking: Option<color_eyre::Report>,
 }
 
-/// Settles `left`, the review an earlier submit on the PR left pending,
-/// before run `run` posts anything.
+/// Settles `left`, the review an earlier submit on the PR left pending or
+/// sent without an answer, before run `run` posts anything.
 async fn settle(
     app: &App,
     key: &PrKey,
     run: i64,
     left: &PendingReview,
 ) -> Result<Settled, Failure> {
-    let state = app
-        .github
-        .review_state(key, &left.node_id)
-        .await
-        .map_err(Failure::Check)?;
-    match state {
-        ReviewStatus::Submitted => {
-            info!(url = %key.url(), review = %left.html_url, "the review left pending was submitted");
-            let ids: Vec<i64> = left.drafts.iter().map(|(id, _)| *id).collect();
-            let (copies, marking) = mark_with_copies(app, key, run, &left.drafts, &ids);
-            if marking.is_none() {
-                forget(app, key);
-            }
-            return Ok(Settled::Submitted(Submitted { copies, marking }));
-        }
-        ReviewStatus::Pending => {
-            app.github
-                .delete_review(key, &left.node_id)
+    let submitted = match &left.on_github {
+        OnGithub::Pending { node_id, html_url } => {
+            let state = app
+                .github
+                .review_state(key, node_id)
                 .await
-                .map_err(Failure::Discard)?;
+                .map_err(Failure::Check)?;
+            match state {
+                ReviewStatus::Submitted => Some(html_url.clone()),
+                ReviewStatus::Pending => {
+                    app.github
+                        .delete_review(key, node_id)
+                        .await
+                        .map_err(Failure::Discard)?;
+                    None
+                }
+                ReviewStatus::Gone => None,
+            }
         }
-        ReviewStatus::Gone => {}
+        OnGithub::Sent(sent) => {
+            let event = ReviewEvent::parse(&sent.event).ok_or_else(|| {
+                Failure::Check(color_eyre::eyre::eyre!("`{}` isn't a verdict", sent.event).into())
+            })?;
+            let sent = sanic_github::SentReview {
+                commit_id: &sent.commit_id,
+                event,
+                body: &sent.body,
+                comments: &sent.comments,
+                after: &sent.after,
+            };
+            app.github
+                .find_review(key, &app.me, &sent)
+                .await
+                .map_err(Failure::Check)?
+        }
+    };
+    if let Some(html_url) = submitted {
+        info!(url = %key.url(), review = %html_url, "the review an earlier submit left was posted");
+        let ids: Vec<i64> = left.drafts.iter().map(|(id, _)| *id).collect();
+        let (copies, marking) = mark_with_copies(app, key, run, &left.drafts, &ids);
+        if marking.is_none() {
+            forget(app, key);
+        }
+        return Ok(Settled::Submitted(Submitted {
+            html_url,
+            copies,
+            marking,
+        }));
     }
     forget(app, key);
     Ok(Settled::Cleared)
@@ -1007,7 +1056,7 @@ struct Copies {
 }
 
 /// Marks the drafts of `run`'s review, which GitHub just took, posted with
-/// their copies, and forgets its pending review. If marking fails, it's
+/// their copies, and forgets its record. If marking fails, it's
 /// kept, for the next submit, after a restart too, to find submitted and
 /// mark. The copies marked, as `(run, draft)`, and why marking failed.
 fn mark_review(
@@ -1118,37 +1167,78 @@ fn copies_of(
     Ok(Copies { copies, revised })
 }
 
-/// Posts `review` with `built`'s replies: it's created pending, recorded
-/// here, given its replies and submitted. Until the submit, nothing in it
-/// is visible to anyone else, and the record makes the next submit check it
-/// first, so a submit that failed after GitHub took it isn't posted twice.
-/// The record stays until the caller has marked its drafts posted.
+/// How far before sending a review sent in one call a review of yours
+/// may be dated and still be it, for GitHub's clock being behind ours.
+const CLOCK_SKEW: Duration = Duration::from_mins(10);
+
+/// Posts `review` with `built`'s replies, returning its page. The record
+/// made here makes the next submit look for it first, so a submit that
+/// failed after GitHub took it isn't posted twice; it stays until the
+/// caller has marked its drafts posted.
+///
+/// Without replies it's one call that creates and submits it, recorded
+/// before it's sent. With them it's created pending, recorded, given its
+/// replies and submitted; until the submit, nothing in it is visible to
+/// anyone else.
 async fn post_review(
     app: &App,
     key: &PrKey,
     run: i64,
     review: &NewReview,
     built: &Built,
-) -> Result<PendingReview, Failure> {
+) -> Result<String, Failure> {
     let github = &app.github;
+    if built.replies.is_empty() {
+        let after = app
+            .clock
+            .now()
+            .checked_sub(CLOCK_SKEW)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let sent = PendingReview {
+            run,
+            drafts: built.bodies.clone(),
+            on_github: OnGithub::Sent(SentReview {
+                commit_id: review.commit_id.clone(),
+                event: review.event.as_str().to_owned(),
+                body: review.body.clone(),
+                comments: review.comments.iter().map(|c| c.body.clone()).collect(),
+                after: rfc3339(after),
+            }),
+        };
+        app.store()
+            .record_pending_review(key, &sent)
+            .map_err(Failure::NotRecorded)?;
+        return match github.create_review(key, review).await {
+            Ok(created) => Ok(created.html_url),
+            // Known not to be posted, so there's nothing to look for.
+            Err(PostError::Refused(err)) => {
+                forget(app, key);
+                Err(Failure::Refused(err))
+            }
+            Err(PostError::Unknown(err)) => Err(Failure::Unanswered(err)),
+        };
+    }
     let created = github
         .create_pending_review(key, review)
         .await
         .map_err(Failure::NotCreated)?;
     let pending = PendingReview {
-        node_id: created.node_id,
-        html_url: created.html_url,
         run,
         drafts: built.bodies.clone(),
+        on_github: OnGithub::Pending {
+            node_id: created.node_id.clone(),
+            html_url: created.html_url.clone(),
+        },
     };
+    let node_id = &created.node_id;
     let recorded = app.store().record_pending_review(key, &pending);
     if let Err(err) = recorded {
-        let discarded = github.delete_review(key, &pending.node_id).await;
+        let discarded = github.delete_review(key, node_id).await;
         return Err(Failure::Unrecorded { err, discarded });
     }
     for (index, reply) in built.replies.iter().enumerate() {
-        if let Err(err) = github.add_reply(key, &pending.node_id, &reply.new).await {
-            let discarded = github.delete_review(key, &pending.node_id).await;
+        if let Err(err) = github.add_reply(key, node_id, &reply.new).await {
+            let discarded = github.delete_review(key, node_id).await;
             if discarded.is_ok() {
                 forget(app, key);
             }
@@ -1160,14 +1250,14 @@ async fn post_review(
         }
     }
     github
-        .submit_review(key, &pending.node_id, review)
+        .submit_review(key, node_id, review)
         .await
         .map_err(Failure::NotSubmitted)?;
-    Ok(pending)
+    Ok(created.html_url)
 }
 
-/// Forgets `run`'s pending review. If that fails, the next submit checks
-/// it again, which finds it submitted or gone; nothing is sent twice.
+/// Forgets the PR's recorded review. If that fails, the next submit
+/// checks it again, which finds it posted or not; nothing is sent twice.
 fn forget(app: &App, key: &PrKey) {
     if let Err(err) = app.store().clear_pending_review(key) {
         warn!(url = %key.url(), "forgetting the pending review failed: {err:?}");
@@ -1215,7 +1305,7 @@ fn mark(app: &App, key: &PrKey, ids: &[i64]) -> Option<color_eyre::Report> {
 /// all says: nothing else was sent, and the rest needs a new preview.
 fn submitted_after_all(
     pr: &PrPage,
-    left: &PendingReview,
+    left_run: i64,
     done: &Submitted,
     back: &str,
     run: i64,
@@ -1241,14 +1331,14 @@ fn submitted_after_all(
             p.note {
                 "The review an earlier submit left was submitted after all, so its drafts "
                 "are now marked posted and nothing else was sent."
-                @if left.run != run { " It was from " a href={ (pr_href(&pr.key)) "?run=" (left.run) } { "another run" } "." }
+                @if left_run != run { " It was from " a href={ (pr_href(&pr.key)) "?run=" (left_run) } { "another run" } "." }
             }
             (copies_note(&pr.key, &done.copies.copies, marking.is_none()))
             @if !done.copies.revised.is_empty() {
                 p.warn {
                     "This run's " (list(&done.copies.revised)) " are revised from drafts it posted, "
                     "and may repeat them: check them against "
-                    a href=(left.html_url) { "the posted review" } " before you submit again."
+                    a href=(done.html_url) { "the posted review" } " before you submit again."
                 }
             }
             p.note { "Preview again for anything left." }
@@ -1261,8 +1351,8 @@ fn submitted_after_all(
         },
         html! {
             a.btn.primary href=(preview) { "Preview the rest with Comment" }
-            @if left.html_url.starts_with("https://") {
-                a.btn href=(left.html_url) { "Open it on GitHub ↗" }
+            @if done.html_url.starts_with("https://") {
+                a.btn href=(done.html_url) { "Open it on GitHub ↗" }
             }
         },
         (back, "Back to the drafts"),
@@ -1320,6 +1410,24 @@ fn review_failed(pr: &PrPage, built: &Built, failure: &Failure, back: &str) -> M
             html! {
                 "Nothing was posted. If GitHub created it anyway, it's pending on "
                 a href=(key.url()) { "the PR" } ", visible only to you: discard it there."
+            },
+        ),
+        Failure::NotRecorded(err) => (
+            "recording the review before sending it",
+            format!("{err:#}"),
+            html! { "It couldn't be recorded here first, so it wasn't sent." },
+        ),
+        Failure::Refused(err) => (
+            "posting the review",
+            plain(err),
+            html! { "GitHub refused it, so it wasn't posted." },
+        ),
+        Failure::Unanswered(err) => (
+            "posting the review",
+            plain(err),
+            html! {
+                "GitHub may have taken it anyway. The next submit looks for it first: if "
+                "GitHub has it, its drafts are marked posted and it isn't sent again."
             },
         ),
         Failure::Unrecorded { err, discarded } => (

@@ -9,7 +9,7 @@ use sanic_core::{pr::PrKey, run::Side};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ApiError, Client};
+use crate::{ApiError, Client, client::Failed};
 
 /// How long a write may take before it's given up on, so a hung connection
 /// doesn't hold the dashboard's submit lock for good.
@@ -42,6 +42,14 @@ impl ReviewEvent {
             Self::RequestChanges => "REQUEST_CHANGES",
             Self::Approve => "APPROVE",
         }
+    }
+
+    /// The event [`ReviewEvent::as_str`] names.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Comment, Self::RequestChanges, Self::Approve]
+            .into_iter()
+            .find(|event| event.as_str() == name)
     }
 }
 
@@ -114,6 +122,22 @@ mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) {
   }) { pullRequestReview { id } }
 }";
 
+/// Your newest reviews of a PR, to learn whether one sent in a call whose
+/// answer was lost was posted after all.
+pub(crate) const MY_REVIEWS_QUERY: &str = r"
+query($owner: String!, $name: String!, $number: Int!, $author: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(last: 20, author: $author) {
+        nodes {
+          url state body submittedAt commit { oid }
+          comments(first: 100) { totalCount nodes { body } }
+        }
+      }
+    }
+  }
+}";
+
 /// A review's state, to learn whether one left pending by an earlier
 /// attempt was submitted after all.
 pub(crate) const REVIEW_STATE_QUERY: &str = r"
@@ -149,13 +173,25 @@ struct PendingBody<'a> {
     comments: &'a [NewComment],
 }
 
-/// A review GitHub created pending, which only you can see until it's
-/// submitted.
+/// A review GitHub created: pending, which only you can see until it's
+/// submitted, or submitted with its verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PendingReview {
+pub struct CreatedReview {
     pub id: u64,
     pub node_id: String,
     pub html_url: String,
+}
+
+/// Why [`Client::create_review`] failed: whether GitHub may have the
+/// review anyway.
+#[derive(Debug)]
+pub enum PostError {
+    /// GitHub answered with a client error, such as approving your own PR:
+    /// it didn't post it.
+    Refused(ApiError),
+    /// No answer, a server error, or an answer that couldn't be read:
+    /// GitHub may have posted it.
+    Unknown(ApiError),
 }
 
 /// Where a review is, as [`Client::review_state`] finds it.
@@ -169,17 +205,34 @@ pub enum ReviewStatus {
     Gone,
 }
 
+/// What a review sent in one call sent, to find it with
+/// [`Client::find_review`].
+#[derive(Debug, Clone, Copy)]
+pub struct SentReview<'a> {
+    pub commit_id: &'a str,
+    pub event: ReviewEvent,
+    pub body: &'a str,
+    /// Its inline comments' bodies, in any order.
+    pub comments: &'a [String],
+    /// An RFC 3339 time before it was sent.
+    pub after: &'a str,
+}
+
 impl NewReview {
-    /// The requests posting this review with `replies` sends, in order:
-    /// [`Client::create_pending_review`], [`Client::add_reply`] for each
-    /// reply, then [`Client::submit_review`]. Only the submit makes any of
-    /// it visible to anyone else.
+    /// The requests posting this review with `replies` sends, in order.
+    /// Without replies that's [`Client::create_review`] alone. With them,
+    /// it's [`Client::create_pending_review`], [`Client::add_reply`] for
+    /// each reply, then [`Client::submit_review`]; only the submit makes
+    /// any of it visible to anyone else.
     #[must_use]
     pub fn steps(&self, key: &PrKey, replies: &[NewReply]) -> Vec<Step> {
         let endpoint = format!(
             "POST /repos/{}/{}/pulls/{}/reviews",
             key.repo.owner, key.repo.name, key.number
         );
+        if replies.is_empty() {
+            return vec![Step::new(endpoint, self)];
+        }
         std::iter::once(Step::new(endpoint, &self.pending_body()))
             .chain(replies.iter().map(|reply| {
                 Step::new(
@@ -209,6 +262,24 @@ impl NewReview {
 
 fn reply_variables(review: &str, reply: &NewReply) -> Value {
     json!({ "review": review, "thread": reply.thread_id, "body": reply.body })
+}
+
+/// The request [`Client::find_review`] sends for `me`'s reviews of `key`.
+#[must_use]
+pub fn find_review_step(key: &PrKey, me: &str) -> Step {
+    Step::new(
+        "GraphQL repository (your newest reviews of the PR), with".into(),
+        &find_variables(key, me),
+    )
+}
+
+fn find_variables(key: &PrKey, me: &str) -> Value {
+    json!({
+        "owner": key.repo.owner,
+        "name": key.repo.name,
+        "number": key.number,
+        "author": me,
+    })
 }
 
 /// The request [`Client::review_state`] sends for review `node_id`.
@@ -243,27 +314,150 @@ impl NewReaction {
 }
 
 impl Client {
+    /// Creates and submits `review` on `key`, verdict and all, in one
+    /// call, as the token's user. Sent once; a failure is returned, never
+    /// retried.
+    pub async fn create_review(
+        &self,
+        key: &PrKey,
+        review: &NewReview,
+    ) -> Result<CreatedReview, PostError> {
+        let what = format!("posting the review on {}", key.url());
+        let url = self.url(&format!(
+            "/repos/{}/{}/pulls/{}/reviews",
+            key.repo.owner, key.repo.name, key.number
+        ));
+        let req = self.post(&url).json(review).timeout(POST_TIMEOUT);
+        let resp = self
+            .send_answered(req, &what)
+            .await
+            .map_err(|failed| match failed {
+                Failed { err, refused: true } => PostError::Refused(err),
+                Failed { err, .. } => PostError::Unknown(err),
+            })?;
+        // GitHub took it, but without its page it's as good as unanswered.
+        resp.json()
+            .await
+            .wrap_err_with(|| format!("decoding the reply to {what}"))
+            .map_err(|err| PostError::Unknown(err.into()))
+    }
+
     /// Creates `review` on `key` pending, without its verdict, as the
     /// token's user. Sent once; a failure is returned, never retried.
     pub async fn create_pending_review(
         &self,
         key: &PrKey,
         review: &NewReview,
-    ) -> Result<PendingReview, ApiError> {
+    ) -> Result<CreatedReview, ApiError> {
+        let what = format!("creating a pending review on {}", key.url());
+        self.create(key, &review.pending_body(), &what).await
+    }
+
+    async fn create(
+        &self,
+        key: &PrKey,
+        body: &impl Serialize,
+        what: &str,
+    ) -> Result<CreatedReview, ApiError> {
         let url = self.url(&format!(
             "/repos/{}/{}/pulls/{}/reviews",
             key.repo.owner, key.repo.name, key.number
         ));
-        let what = format!("creating a pending review on {}", key.url());
-        let req = self
-            .post(&url)
-            .json(&review.pending_body())
-            .timeout(POST_TIMEOUT);
-        let resp = self.send(req, &what).await?;
+        let req = self.post(&url).json(body).timeout(POST_TIMEOUT);
+        let resp = self.send(req, what).await?;
         Ok(resp
             .json()
             .await
             .wrap_err_with(|| format!("decoding the reply to {what}"))?)
+    }
+
+    /// The page of `me`'s review of `key` that is `review`, submitted with
+    /// its verdict, body and comments on its commit at `after` or later, if GitHub
+    /// has one among `me`'s newest reviews of the PR.
+    pub async fn find_review(
+        &self,
+        key: &PrKey,
+        me: &str,
+        review: &SentReview<'_>,
+    ) -> Result<Option<String>, ApiError> {
+        #[derive(Deserialize)]
+        struct Data {
+            repository: Option<Repository>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Repository {
+            pull_request: Option<PullRequest>,
+        }
+        #[derive(Deserialize)]
+        struct PullRequest {
+            reviews: Reviews,
+        }
+        #[derive(Deserialize)]
+        struct Reviews {
+            nodes: Vec<Option<Node>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Node {
+            url: String,
+            state: String,
+            body: String,
+            submitted_at: Option<String>,
+            commit: Option<Commit>,
+            comments: Comments,
+        }
+        #[derive(Deserialize)]
+        struct Commit {
+            oid: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Comments {
+            total_count: usize,
+            nodes: Vec<Option<CommentNode>>,
+        }
+        #[derive(Deserialize)]
+        struct CommentNode {
+            body: String,
+        }
+        let what = format!("looking for your review on {}", key.url());
+        let data: Data = self
+            .graphql(MY_REVIEWS_QUERY, find_variables(key, me), &what)
+            .await?;
+        let state = match review.event {
+            ReviewEvent::Comment => "COMMENTED",
+            ReviewEvent::RequestChanges => "CHANGES_REQUESTED",
+            ReviewEvent::Approve => "APPROVED",
+        };
+        let nodes = data
+            .repository
+            .and_then(|r| r.pull_request)
+            .map(|pr| pr.reviews.nodes)
+            .unwrap_or_default();
+        Ok(nodes.into_iter().flatten().find_map(|node| {
+            let same = node.state == state
+                && node.body == review.body
+                && node.commit.is_some_and(|c| c.oid == review.commit_id)
+                && node
+                    .submitted_at
+                    .is_some_and(|at| at.as_str() >= review.after)
+                && node.comments.total_count == review.comments.len()
+                && {
+                    // Each body it has, taken once from what was sent: a
+                    // like review with other comments isn't this one.
+                    let mut unmatched: Vec<&str> =
+                        review.comments.iter().map(String::as_str).collect();
+                    node.comments.nodes.iter().flatten().all(|c| {
+                        unmatched
+                            .iter()
+                            .position(|body| *body == c.body)
+                            .map(|at| unmatched.swap_remove(at))
+                            .is_some()
+                    })
+                };
+            same.then_some(node.url)
+        }))
     }
 
     /// Adds `reply` to its thread in pending review `review`. Sent once.
