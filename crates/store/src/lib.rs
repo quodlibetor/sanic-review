@@ -12,6 +12,7 @@ use color_eyre::{
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
+    clock::WindowChoice,
     pr::{PrKey, PrSnapshot},
     run::Side,
     state::{PrState, ReviewFact, StateFacts},
@@ -37,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0014_pr_reviewer.sql"),
     include_str!("migrations/0015_thread_placement.sql"),
     include_str!("migrations/0016_draft_thread_choice.sql"),
+    include_str!("migrations/0017_reactions.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -45,7 +47,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 pub use dashboard::{DraftRow, DraftStatus, PendingReview, PrPage, ReviewRun, ThreadChoice};
-pub use overview::{Activity, ActivityKind, LatestRun, MyPr, OwedReview};
+pub use overview::{
+    Activity, ActivityKind, Decided, LatestRun, MyPr, OwedReview, RowFacts, RunTimes,
+};
 pub use runs::{Draft, Refusal, Regeneration, RunCounts, RunRecord, SessionRun};
 
 /// A connection to the database. The poller and the runner each open their
@@ -415,6 +419,64 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// The recency window picked on the dashboard, if one is.
+    pub fn window_choice(&self) -> Result<Option<WindowChoice>> {
+        Ok(self
+            .poll_state(WINDOW_CHOICE_KEY)?
+            .as_deref()
+            .and_then(WindowChoice::parse))
+    }
+
+    /// Picks a recency window, or with `None` goes back to
+    /// `poll.updated_within_days`.
+    pub fn set_window_choice(&self, choice: Option<WindowChoice>) -> Result<()> {
+        if let Some(choice) = choice {
+            return self.set_poll_state(WINDOW_CHOICE_KEY, &choice.as_str());
+        }
+        self.conn
+            .execute("DELETE FROM poll_state WHERE key = ?1", [WINDOW_CHOICE_KEY])?;
+        Ok(())
+    }
+
+    /// Records how many open PRs of `list` a reconcile found quiet for
+    /// longer than `window` days.
+    pub fn set_hidden(&self, list: List, window: u32, count: u32) -> Result<()> {
+        self.set_poll_state(list.hidden_key(), &format!("{window}:{count}"))
+    }
+
+    /// How many PRs of `list` the recency window of `window` days hides, as
+    /// the last reconcile under that window counted them. `None` if none
+    /// has, or for no window.
+    pub fn hidden(&self, list: List, window: Option<u32>) -> Result<Option<u32>> {
+        let (Some(window), Some(value)) = (window, self.poll_state(list.hidden_key())?) else {
+            return Ok(None);
+        };
+        Ok(value
+            .split_once(':')
+            .filter(|(days, _)| days.parse() == Ok(window))
+            .and_then(|(_, count)| count.parse().ok()))
+    }
+}
+
+const WINDOW_CHOICE_KEY: &str = "window.choice";
+
+/// One of the index's lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum List {
+    /// Reviews you owe.
+    Owed,
+    /// Your PRs.
+    Mine,
+}
+
+impl List {
+    fn hidden_key(self) -> &'static str {
+        match self {
+            Self::Owed => "hidden.owed",
+            Self::Mine => "hidden.mine",
+        }
+    }
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -544,6 +606,16 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
                     c.url
                 ],
             )?;
+            // As last polled: a reaction taken back is gone.
+            tx.execute("DELETE FROM reactions WHERE comment_id = ?1", [&c.id])?;
+            for r in &c.reactions {
+                tx.execute(
+                    "INSERT INTO reactions (comment_id, login, reacted_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (comment_id, login) DO UPDATE SET
+                         reacted_at = max(reacted_at, excluded.reacted_at)",
+                    params![c.id, r.login, r.at],
+                )?;
+            }
         }
     }
     for r in &snap.reviews {
@@ -616,6 +688,7 @@ mod tests {
                     url: None,
                     by_bot: false,
                     reacted_at: None,
+                    reactions: vec![],
                 }],
             }],
             files: None,
@@ -795,6 +868,36 @@ mod tests {
             ["carol", "Bob"]
         );
         assert!(store.head_reviewers(&snap.key, "h2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_window_choice_sticks_until_reset() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.window_choice().unwrap(), None);
+        store
+            .set_window_choice(Some(WindowChoice::Days(180)))
+            .unwrap();
+        assert_eq!(
+            store.window_choice().unwrap(),
+            Some(WindowChoice::Days(180))
+        );
+        store.set_window_choice(Some(WindowChoice::All)).unwrap();
+        assert_eq!(store.window_choice().unwrap(), Some(WindowChoice::All));
+        store.set_window_choice(None).unwrap();
+        assert_eq!(store.window_choice().unwrap(), None);
+    }
+
+    #[test]
+    fn hidden_counts_are_for_the_window_they_were_counted_in() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.hidden(List::Owed, Some(14)).unwrap(), None);
+        store.set_hidden(List::Owed, 14, 9).unwrap();
+        store.set_hidden(List::Mine, 14, 3).unwrap();
+        assert_eq!(store.hidden(List::Owed, Some(14)).unwrap(), Some(9));
+        assert_eq!(store.hidden(List::Mine, Some(14)).unwrap(), Some(3));
+        // Widened since, and not counted again yet.
+        assert_eq!(store.hidden(List::Owed, Some(30)).unwrap(), None);
+        assert_eq!(store.hidden(List::Owed, None).unwrap(), None);
     }
 
     #[test]

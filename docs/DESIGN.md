@@ -197,7 +197,8 @@ Both loops write normalized rows. Triggers are computed by diffing GitHub state
 against stored state, never from notification payloads.
 
 - **Recent PRs only.** Only PRs GitHub saw activity on within
-  `poll.updated_within_days` (default 14, 0 for no limit) are looked at.
+  `poll.updated_within_days` (default 14, 0 for no limit), or the window
+  picked on the dashboard in its place, are looked at.
   The reconcile searches add `updated:>=<date>`, which also keeps the
   first reconcile short, and a refresh skips a PR whose `updatedAt` is
   older, so a notification about it changes nothing. The TUI leaves such
@@ -227,6 +228,19 @@ against stored state, never from notification payloads.
   wins and `!` excludes. A glob with a `/` matches `org/slug`, otherwise it
   matches the slug. The default is `["*"]`. If the team lookup fails, the
   last known teams are kept and discovery carries on.
+- **Reactions.** A reaction answers a comment: yours answer others', and
+  the PR author's answer yours. The conversation's comments come with
+  their newest reactions and who left them. Review-thread comments only
+  say whether you reacted, since their reactions would double the PR
+  query's cost; the reactions to your review-thread comments still
+  waiting on an answer are fetched afterwards by node id, in follow-up
+  requests of as many ids as GitHub takes at once.
+- **Hidden counts.** Each reconcile under a recency window also counts,
+  without fetching them, the open PRs each list would have outside it:
+  review requests for reviews you owe, and your own PRs, kept to watched
+  orgs and repos. A count can't apply the team filter or path globs, and
+  it leaves out PRs you've reviewed whose request has cleared. It's kept
+  with the window it was counted under.
 - **Newest items only.** PR snapshots fetch the newest reviews, threads and
   comments per connection, and log a warning when older ones were cut off.
   A new reply in an old thread that falls outside the newest threads is
@@ -469,6 +483,8 @@ invited to draft replies or fixes on someone else's PR.
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
+| `reactions` | everyone's latest reaction to each comment, as last polled |
+| `poll_state` | the poller's values carried between runs, the recency window picked on the dashboard, and each list's hidden count |
 
 A run's summary is stored as a `summary` draft, so it can be edited like any
 other draft. When `serve` exits (Ctrl-C, or quitting the TUI), running

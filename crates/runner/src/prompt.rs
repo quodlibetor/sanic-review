@@ -260,6 +260,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         };
         PrContext {
             title: "Add retries".into(),

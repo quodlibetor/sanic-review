@@ -246,6 +246,32 @@ impl Config {
         self.targets().any(|(_, t)| t.covers(repo))
     }
 
+    /// Search qualifiers that keep a GitHub search to watched repos:
+    /// `user:` for each org entry, `repo:` for each repo outside them, in
+    /// file order and each once. GitHub ORs repeated ones.
+    #[must_use]
+    pub fn search_scope(&self) -> Vec<String> {
+        let orgs: Vec<&str> = self
+            .targets()
+            .filter_map(|(_, t)| match &t.scope {
+                Scope::Org(org) => Some(org.as_str()),
+                Scope::Repo(_) => None,
+            })
+            .collect();
+        let mut scope: Vec<String> = Vec::new();
+        for (_, target) in self.targets() {
+            let qualifier = match &target.scope {
+                Scope::Org(org) => format!("user:{org}"),
+                Scope::Repo(repo) if orgs.contains(&repo.owner.as_str()) => continue,
+                Scope::Repo(repo) => format!("repo:{repo}"),
+            };
+            if !scope.contains(&qualifier) {
+                scope.push(qualifier);
+            }
+        }
+        scope
+    }
+
     /// Whether matching a PR in `repo` needs its changed files.
     #[must_use]
     pub fn needs_files(&self, repo: &RepoName) -> bool {
@@ -1036,6 +1062,20 @@ mod tests {
         assert!(!config.needs_files(&RepoName::new("lacework", "other")));
         assert!(config.watches(&RepoName::new("lacework", "other")));
         assert!(!config.watches(&RepoName::new("someone", "else")));
+    }
+
+    #[test]
+    fn searches_are_scoped_to_watched_orgs_and_repos() {
+        let config = parse(
+            r#"
+            [profile.a]
+            repos = [{ github = "org/one" }, { github = "Org" }, { github = "else/two" }]
+            [profile.b]
+            repos = [{ github = "else/two", paths = ["x/**"] }, { github = "org" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.search_scope(), ["user:org", "repo:else/two"]);
     }
 
     #[test]

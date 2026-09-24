@@ -2,8 +2,14 @@
 //! UI.
 
 use color_eyre::eyre::Result;
-use rusqlite::{Row, params, types::Type};
-use sanic_core::{pr::PrKey, repo::RepoName, state::PrState};
+use rusqlite::{OptionalExtension, Row, params, types::Type};
+use sanic_core::{
+    pr::{PrKey, is_login},
+    repo::RepoName,
+    reviewers::{ReviewRecord, Reviewer, SeenHead, reviewers},
+    run::RunKind,
+    state::{Awaiting, Merge, PrState, awaiting},
+};
 
 use crate::Store;
 
@@ -59,6 +65,67 @@ pub struct MyPr {
     pub chat_run: Option<i64>,
     /// Where it stands; see [`Store::pr_state`].
     pub state: PrState,
+}
+
+/// What the dashboard's index shows of a listed PR beyond its list entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowFacts {
+    pub head_sha: String,
+    /// See [`reviewers`].
+    pub reviewers: Vec<Reviewer>,
+    /// When the poller first saw the current head: the push, give or take
+    /// a poll.
+    pub head_seen_at: Option<String>,
+    /// Your comments waiting on an answer; see [`awaiting`].
+    pub awaiting: Vec<Awaiting>,
+    pub merge: Merge,
+    /// The latest run of any kind, as [`OwedReview::latest_run`] picks it.
+    pub latest_run: Option<RunTimes>,
+    /// The drafts of the latest review that succeeded, whose drafts the PR
+    /// page shows.
+    pub decided: Option<Decided>,
+}
+
+/// A run's status, and when it was queued, started and finished, as the
+/// store writes times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTimes {
+    pub status: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+/// One run's drafts, by status.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Decided {
+    pub run_id: i64,
+    pub pending: u32,
+    /// Accepted and not yet posted.
+    pub accepted: u32,
+    pub rejected: u32,
+    pub posted: u32,
+    /// When the last of them was marked posted.
+    pub posted_at: Option<String>,
+    /// You left a submitted review on the commit the run reviewed.
+    pub you_reviewed: bool,
+    /// A newer review of the PR is queued or running, and will replace
+    /// these drafts.
+    pub newer: bool,
+}
+
+impl Decided {
+    /// Every draft rejected, nothing of yours on the commit, and no newer
+    /// review on its way: the review is yours to write.
+    #[must_use]
+    pub fn submit_review(&self) -> bool {
+        self.rejected > 0
+            && self.pending == 0
+            && self.accepted == 0
+            && self.posted == 0
+            && !self.you_reviewed
+            && !self.newer
+    }
 }
 
 /// Something that happened to a tracked PR.
@@ -178,6 +245,140 @@ impl Store {
                 },
             )
             .collect()
+    }
+
+    /// What the index shows of `key` beyond its list entry, for `me`.
+    pub fn row_facts(&self, key: &PrKey, me: &str) -> Result<RowFacts> {
+        let repo = key.repo.to_string();
+        let (author, head, merge_state, checks): (String, String, Option<String>, Option<String>) =
+            self.conn.query_row(
+                "SELECT author, head_sha, merge_state, checks FROM prs
+                 WHERE repo = ?1 AND number = ?2",
+                params![repo, key.number],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let heads = self
+            .conn
+            .prepare_cached(
+                "SELECT head_sha, seen_at FROM revisions WHERE repo = ?1 AND number = ?2
+                 ORDER BY seen_at",
+            )?
+            .query_map(params![repo, key.number], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let reviews = self
+            .conn
+            .prepare_cached(
+                "SELECT author, state, submitted_at, commit_sha FROM reviews
+                 WHERE repo = ?1 AND number = ?2 AND NOT by_bot
+                 ORDER BY submitted_at, rowid",
+            )?
+            .query_map(params![repo, key.number], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let seen: Vec<SeenHead<'_>> = heads
+            .iter()
+            .map(|(sha, seen_at)| SeenHead { sha, seen_at })
+            .collect();
+        let records: Vec<ReviewRecord<'_>> = reviews
+            .iter()
+            .map(|(author, state, submitted_at, commit)| ReviewRecord {
+                author,
+                state,
+                submitted_at,
+                commit: commit.as_deref(),
+            })
+            .collect();
+        let mine = is_login(&author, me);
+        let latest_run = self
+            .conn
+            .prepare_cached(
+                "SELECT queued_at, started_at, finished_at, status FROM runs
+                 WHERE repo = ?1 AND number = ?2
+                 ORDER BY queued_at DESC, id DESC LIMIT 1",
+            )?
+            .query_row(params![repo, key.number], |row| {
+                Ok(RunTimes {
+                    queued_at: row.get(0)?,
+                    started_at: row.get(1)?,
+                    finished_at: row.get(2)?,
+                    status: row.get(3)?,
+                })
+            })
+            .optional()?;
+        Ok(RowFacts {
+            reviewers: reviewers(&records, &seen, &head),
+            head_seen_at: heads
+                .iter()
+                .find(|(sha, _)| *sha == head)
+                .map(|(_, at)| at.clone()),
+            awaiting: awaiting(&self.threads(key)?, me, (!mine).then_some(author.as_str())),
+            merge: Merge::new(merge_state.as_deref(), checks.as_deref()),
+            latest_run,
+            decided: self.decided(key, me)?,
+            head_sha: head,
+        })
+    }
+
+    /// The drafts of `key`'s latest review that succeeded, by status.
+    fn decided(&self, key: &PrKey, me: &str) -> Result<Option<Decided>> {
+        let repo = key.repo.to_string();
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT r.id,
+                        count(*) FILTER (WHERE d.status = 'pending'),
+                        count(*) FILTER (WHERE d.status = 'accepted'),
+                        count(*) FILTER (WHERE d.status = 'rejected'),
+                        count(*) FILTER (WHERE d.status = 'posted'),
+                        max(d.updated_at) FILTER (WHERE d.status = 'posted'),
+                        EXISTS (SELECT 1 FROM reviews v
+                                WHERE v.repo = r.repo AND v.number = r.number
+                                      AND v.commit_sha = r.head_sha AND NOT v.by_bot
+                                      AND lower(v.author) = lower(?3)
+                                      AND v.state IN ('APPROVED', 'CHANGES_REQUESTED',
+                                                      'COMMENTED')),
+                        EXISTS (SELECT 1 FROM runs n
+                                WHERE n.repo = r.repo AND n.number = r.number
+                                      AND n.kind IN (?4, ?5)
+                                      AND n.status IN ('queued', 'running')
+                                      AND (n.queued_at, n.id) > (r.queued_at, r.id))
+                 FROM runs r LEFT JOIN drafts d ON d.run_id = r.id
+                 WHERE r.id = (SELECT id FROM runs
+                               WHERE repo = ?1 AND number = ?2 AND status = 'succeeded'
+                                     AND kind IN (?4, ?5)
+                               ORDER BY queued_at DESC, id DESC LIMIT 1)
+                 GROUP BY r.id",
+            )?
+            .query_row(
+                params![
+                    repo,
+                    key.number,
+                    me,
+                    RunKind::Review.as_str(),
+                    RunKind::Regenerate.as_str()
+                ],
+                |row| {
+                    Ok(Decided {
+                        run_id: row.get(0)?,
+                        pending: row.get(1)?,
+                        accepted: row.get(2)?,
+                        rejected: row.get(3)?,
+                        posted: row.get(4)?,
+                        posted_at: row.get(5)?,
+                        you_reviewed: row.get(6)?,
+                        newer: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// The `limit` most recent triggers and run transitions, newest first.
@@ -500,6 +701,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         };
         let mut store = Store::open_in_memory().unwrap();
         let mut mine = snapshot(1, "me");
@@ -593,6 +795,137 @@ mod tests {
         assert_eq!(owed[0].head_reviewers, Vec::<String>::new());
         assert_eq!(owed[0].latest_run.as_ref().unwrap().status, "succeeded");
         assert_eq!(owed[0].pending_drafts, 1);
+    }
+
+    #[test]
+    fn row_facts_say_who_reviewed_and_what_waits() {
+        use sanic_core::{
+            pr::{Comment, Placement, Reaction, Thread},
+            reviewers::Stance,
+            state::Block,
+        };
+        let comment = |id: &str, author: &str, at: &str| Comment {
+            id: id.into(),
+            author: author.into(),
+            body: String::new(),
+            created_at: at.into(),
+            url: None,
+            by_bot: false,
+            reacted_at: None,
+            reactions: vec![],
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snap = snapshot(2, "alice");
+        snap.review_requested = true;
+        snap.merge_state = Some("BLOCKED".into());
+        snap.checks = Some("FAILURE".into());
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let facts = store.row_facts(&snap.key, "me").unwrap();
+        assert!(facts.reviewers.is_empty());
+        assert_eq!(facts.merge.block, Some(Block::CiFailing));
+        assert_eq!(facts.latest_run, None);
+        assert_eq!(facts.decided, None);
+        assert!(facts.head_seen_at.is_some());
+
+        // You review h1 and ask Alice something; she reacts to it, then a
+        // push, then Bob approves h2 and you ask again.
+        let mut yours = review("r1", "me", GithubState::Commented, "2026-01-01T00:00:00Z");
+        yours.commit = Some("h1".into());
+        snap.reviews = vec![yours];
+        let mut asked = comment("c1", "me", "2026-01-01T00:00:00Z");
+        asked.reactions = vec![Reaction {
+            login: "alice".into(),
+            at: "2026-01-01T01:00:00Z".into(),
+        }];
+        snap.threads = vec![Thread {
+            id: "t1".into(),
+            path: None,
+            line: None,
+            resolved: false,
+            place: Placement::default(),
+            comments: vec![asked],
+        }];
+        store.record(&snap, "me", "default", &[]).unwrap();
+        assert!(
+            store
+                .row_facts(&snap.key, "me")
+                .unwrap()
+                .awaiting
+                .is_empty()
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE revisions SET seen_at = '2000-01-01T00:00:00.000Z'",
+                [],
+            )
+            .unwrap();
+        snap.head_sha = "h2".into();
+        let mut bobs = review("r2", "bob", GithubState::Approved, "2026-01-02T00:00:00Z");
+        bobs.commit = Some("h2".into());
+        snap.reviews.push(bobs);
+        snap.threads[0]
+            .comments
+            .push(comment("c2", "me", "2026-01-03T00:00:00Z"));
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let facts = store.row_facts(&snap.key, "me").unwrap();
+        let who: Vec<_> = facts
+            .reviewers
+            .iter()
+            .map(|r| (r.login.as_str(), r.stance, r.pushes_since))
+            .collect();
+        assert_eq!(
+            who,
+            [("me", Stance::Commented, 1), ("bob", Stance::Approved, 0)]
+        );
+        assert_eq!(facts.awaiting.len(), 1);
+        assert_eq!(facts.awaiting[0].login, "alice");
+        // Reactions are stored as last polled.
+        let threads = store.threads(&snap.key).unwrap();
+        assert_eq!(threads[0].comments[0].reactions.len(), 1);
+    }
+
+    #[test]
+    fn row_facts_count_the_latest_reviews_drafts() {
+        use crate::DraftStatus;
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snap = snapshot(2, "alice");
+        snap.review_requested = true;
+        store.record(&snap, "me", "default", &[]).unwrap();
+        // A review whose drafts you all rejected, with nothing of yours on
+        // its commit, is yours to write.
+        let run = store.queue_review(&request(&snap)).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.finish_review(run.id, &result()).unwrap();
+        let facts = store.row_facts(&snap.key, "me").unwrap();
+        assert!(facts.latest_run.unwrap().finished_at.is_some());
+        let decided = facts.decided.unwrap();
+        assert_eq!((decided.run_id, decided.pending), (run.id, 1));
+        assert!(!decided.submit_review());
+        let summary = store.draft_rows(run.id).unwrap()[0].id;
+        store
+            .set_draft_status(summary, DraftStatus::Rejected)
+            .unwrap();
+        let decided = store.row_facts(&snap.key, "me").unwrap().decided.unwrap();
+        assert_eq!((decided.pending, decided.rejected), (0, 1));
+        assert!(decided.submit_review());
+        // Not while a newer review is on its way.
+        let mut pushed = request(&snap);
+        pushed.head_sha = "h2".into();
+        let newer = store.queue_review(&pushed).unwrap().unwrap();
+        let decided = store.row_facts(&snap.key, "me").unwrap().decided.unwrap();
+        assert!(decided.newer);
+        assert!(!decided.submit_review());
+        store.supersede_run(newer.id).unwrap();
+        let decided = store.row_facts(&snap.key, "me").unwrap().decided.unwrap();
+        assert!(decided.submit_review());
+        store
+            .set_draft_status(summary, DraftStatus::Accepted)
+            .unwrap();
+        store.mark_posted(&[summary]).unwrap();
+        let decided = store.row_facts(&snap.key, "me").unwrap().decided.unwrap();
+        assert_eq!(decided.posted, 1);
+        assert!(decided.posted_at.is_some());
     }
 
     #[test]

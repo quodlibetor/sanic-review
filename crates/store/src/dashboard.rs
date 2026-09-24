@@ -608,6 +608,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         };
         let thread = |id: &str, comments| Thread {
             id: id.into(),

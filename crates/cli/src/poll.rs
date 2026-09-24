@@ -16,7 +16,7 @@ use sanic_core::{
     trigger::{Trigger, detect},
 };
 use sanic_github::{ApiError, Client, NotificationPoll};
-use sanic_store::Store;
+use sanic_store::{List, Store};
 
 const LAST_MODIFIED_KEY: &str = "notifications.last_modified";
 const REVIEW_REQUESTED: &str = "review-requested:@me";
@@ -33,6 +33,32 @@ pub fn recent(qualifiers: &str, since: Option<&str>) -> String {
     }
 }
 
+/// The longest search GitHub takes.
+const MAX_SEARCH: usize = 256;
+
+/// Search `qualifiers` for PRs quiet since before `day` (`YYYY-MM-DD`),
+/// kept to watched repos by `scope`: as many of its qualifiers as fit in
+/// GitHub's longest search.
+#[must_use]
+pub fn older(qualifiers: &str, day: &str, scope: &[String]) -> String {
+    let mut q = format!("{qualifiers} updated:<{day}");
+    // With the `is:open is:pr ` the search adds.
+    let room = MAX_SEARCH - "is:open is:pr ".len();
+    for (i, qualifier) in scope.iter().enumerate() {
+        if q.len() + 1 + qualifier.len() > room {
+            tracing::debug!(
+                "hidden count: {} watched orgs and repos don't fit in a search, so PRs in \
+                 them aren't counted",
+                scope.len() - i
+            );
+            break;
+        }
+        q.push(' ');
+        q.push_str(qualifier);
+    }
+    q
+}
+
 /// The GitHub reads the poller needs; a trait so tests can fake GitHub.
 pub trait GithubApi {
     fn notifications(
@@ -40,6 +66,7 @@ pub trait GithubApi {
         if_modified_since: Option<&str>,
     ) -> impl Future<Output = Result<NotificationPoll, ApiError>>;
     fn search_prs(&self, qualifiers: &str) -> impl Future<Output = Result<Vec<PrKey>, ApiError>>;
+    fn count_prs(&self, qualifiers: &str) -> impl Future<Output = Result<u32, ApiError>>;
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>>;
     fn pull_request(
         &self,
@@ -59,6 +86,10 @@ impl GithubApi for Client {
 
     fn search_prs(&self, qualifiers: &str) -> impl Future<Output = Result<Vec<PrKey>, ApiError>> {
         Client::search_prs(self, qualifiers)
+    }
+
+    fn count_prs(&self, qualifiers: &str) -> impl Future<Output = Result<u32, ApiError>> {
+        Client::count_prs(self, qualifiers)
     }
 
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>> {
@@ -184,10 +215,18 @@ impl<G: GithubApi> Poller<G> {
         self
     }
 
-    /// Where `poll.updated_within_days` starts, as GitHub writes times.
-    #[must_use]
-    pub fn window_start(&self) -> Option<String> {
-        window_start(self.clock.now(), self.config.poll.updated_within_days)
+    /// The recency window in days: the one picked on the dashboard, else
+    /// `poll.updated_within_days`. `None` for no limit.
+    pub fn window(&self) -> color_eyre::eyre::Result<Option<u32>> {
+        Ok(match self.store.window_choice()? {
+            Some(choice) => choice.days(),
+            None => self.config.poll.updated_within_days,
+        })
+    }
+
+    /// Where the recency window starts, as GitHub writes times.
+    pub fn window_start(&self) -> color_eyre::eyre::Result<Option<String>> {
+        Ok(window_start(self.clock.now(), self.window()?))
     }
 
     pub fn store(&self) -> &Store {
@@ -221,7 +260,8 @@ impl<G: GithubApi> Poller<G> {
             ),
             Err(err) => return Err(err),
         }
-        let since = self.window_start();
+        let window = self.window()?;
+        let since = window_start(self.clock.now(), window);
         let requested = self
             .github
             .search_prs(&recent(REVIEW_REQUESTED, since.as_deref()))
@@ -239,10 +279,40 @@ impl<G: GithubApi> Poller<G> {
         let involved: BTreeSet<PrKey> = &watched(involved) - &requested;
         let found: Vec<PrKey> = requested.union(&involved).cloned().collect();
         self.store.keep_open(&found)?;
+        if let (Some(days), Some(day)) = (window, since.as_deref().and_then(|s| s.get(..10))) {
+            self.count_hidden(days, day).await?;
+        }
         Ok(Reconciled {
             requested: requested.into_iter().collect(),
             involved: involved.into_iter().collect(),
         })
+    }
+
+    /// Counts each list's open PRs quiet since before `day`, which the
+    /// window of `days` leaves out, for the dashboard to say so. Only
+    /// review requests count as owed here, and the count can't apply the
+    /// team filter or path globs; a count that fails is logged and left
+    /// as it was. Only a rejected token fails the reconcile: the PRs it
+    /// found still get refreshed when a count is rate limited.
+    async fn count_hidden(&mut self, days: u32, day: &str) -> Result<(), ApiError> {
+        let scope = self.config.search_scope();
+        for (list, qualifiers) in [
+            (List::Owed, "review-requested:@me -author:@me"),
+            (List::Mine, "author:@me"),
+        ] {
+            match self.github.count_prs(&older(qualifiers, day, &scope)).await {
+                Ok(count) => self.store.set_hidden(list, days, count)?,
+                Err(ApiError::Other(report)) => {
+                    tracing::warn!("counting PRs older than the window failed: {report:?}");
+                }
+                Err(ApiError::RateLimited { .. }) => {
+                    tracing::warn!("counting PRs older than the window was rate limited");
+                    break;
+                }
+                Err(err @ ApiError::Unauthorized) => return Err(err),
+            }
+        }
+        Ok(())
     }
 
     /// PRs in watched repos with notifications since the last poll, and
@@ -263,7 +333,7 @@ impl<G: GithubApi> Poller<G> {
                     self.store
                         .set_poll_state(LAST_MODIFIED_KEY, &last_modified)?;
                 }
-                let since = self.window_start();
+                let since = self.window_start()?;
                 let mut keys = Vec::new();
                 for n in notifications {
                     let Some(key) = n.pr else { continue };
@@ -303,7 +373,7 @@ impl<G: GithubApi> Poller<G> {
         };
         // Open, whether or not the checks below skip it.
         self.store.forget_closed(key)?;
-        if let (Some(start), Some(updated)) = (self.window_start(), &snapshot.updated_at)
+        if let (Some(start), Some(updated)) = (self.window_start()?, &snapshot.updated_at)
             && updated.as_str() < start.as_str()
         {
             tracing::debug!(updated = %updated, "no activity within `poll.updated_within_days`; skipping");
@@ -338,6 +408,7 @@ mod tests {
 
     use color_eyre::eyre::{Result, eyre};
     use sanic_core::{
+        clock::WindowChoice,
         config::{CheckoutResolver, Vcs},
         pr::{CONVERSATION_THREAD, Comment, Placement, Thread},
         repo::RepoName,
@@ -350,6 +421,10 @@ mod tests {
     struct FakeGithub {
         /// By the exact qualifiers searched for.
         searches: HashMap<String, Vec<PrKey>>,
+        /// Counts, by the exact qualifiers counted.
+        counts: HashMap<String, u32>,
+        /// Every search and count, in order.
+        searched: RefCell<Vec<String>>,
         prs: RefCell<HashMap<PrKey, PrSnapshot>>,
         notifications: Vec<Notification>,
         seen_since: RefCell<Vec<Option<String>>>,
@@ -376,7 +451,13 @@ mod tests {
         }
 
         async fn search_prs(&self, qualifiers: &str) -> Result<Vec<PrKey>, ApiError> {
+            self.searched.borrow_mut().push(qualifiers.to_owned());
             Ok(self.searches.get(qualifiers).cloned().unwrap_or_default())
+        }
+
+        async fn count_prs(&self, qualifiers: &str) -> Result<u32, ApiError> {
+            self.searched.borrow_mut().push(qualifiers.to_owned());
+            Ok(self.counts.get(qualifiers).copied().unwrap_or_default())
         }
 
         async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
@@ -595,7 +676,81 @@ mod tests {
         // Without a window, any age counts.
         let mut config = config_with("[poll]\nupdated_within_days = 0");
         std::mem::swap(&mut config, &mut poller.config);
-        assert_eq!(poller.window_start(), None);
+        assert_eq!(poller.window_start().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_window_picked_on_the_dashboard_wins_until_reset() {
+        let mut poller = poller(FakeGithub::default());
+        poller
+            .store()
+            .set_window_choice(Some(WindowChoice::Days(30)))
+            .unwrap();
+        assert_eq!(poller.window().unwrap(), Some(30));
+        poller.reconcile().await.unwrap();
+        poller
+            .store()
+            .set_window_choice(Some(WindowChoice::All))
+            .unwrap();
+        assert_eq!(poller.window_start().unwrap(), None);
+        poller.reconcile().await.unwrap();
+        poller.store().set_window_choice(None).unwrap();
+        assert_eq!(poller.window().unwrap(), Some(14));
+        assert_eq!(
+            poller.github.searched.borrow()[..],
+            [
+                "review-requested:@me updated:>=2026-08-24",
+                "involves:@me updated:>=2026-08-24",
+                "review-requested:@me -author:@me updated:<2026-08-24 user:org",
+                "author:@me updated:<2026-08-24 user:org",
+                "review-requested:@me",
+                "involves:@me",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconcile_counts_what_the_window_hides() {
+        let github = FakeGithub {
+            counts: HashMap::from([
+                (
+                    "review-requested:@me -author:@me updated:<2026-09-09 user:org".to_owned(),
+                    9,
+                ),
+                ("author:@me updated:<2026-09-09 user:org".to_owned(), 3),
+            ]),
+            ..FakeGithub::default()
+        };
+        let mut poller = poller(github);
+        poller.reconcile().await.unwrap();
+        assert_eq!(
+            poller.store().hidden(List::Owed, Some(14)).unwrap(),
+            Some(9)
+        );
+        assert_eq!(
+            poller.store().hidden(List::Mine, Some(14)).unwrap(),
+            Some(3)
+        );
+        // No window hides nothing, so nothing is counted.
+        poller
+            .store()
+            .set_window_choice(Some(WindowChoice::All))
+            .unwrap();
+        let searches = poller.github.searched.borrow().len();
+        poller.reconcile().await.unwrap();
+        assert_eq!(poller.github.searched.borrow().len(), searches + 2);
+    }
+
+    #[test]
+    fn hidden_counts_keep_to_what_fits_in_a_search() {
+        let scope: Vec<String> = (0..40).map(|i| format!("repo:org/repo-{i}")).collect();
+        let q = older("author:@me", "2026-09-09", &scope);
+        assert!(q.starts_with("author:@me updated:<2026-09-09 repo:org/repo-0 "));
+        assert!(q.len() + "is:open is:pr ".len() <= MAX_SEARCH, "{q}");
+        assert_eq!(
+            older("author:@me", "2026-09-09", &[]),
+            "author:@me updated:<2026-09-09"
+        );
     }
 
     /// Refreshes a PR that requests review from `requested`, as a member of
@@ -659,6 +814,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         });
         let github = FakeGithub::default();
         github.prs.borrow_mut().insert(pr.clone(), snap.clone());
@@ -673,6 +829,7 @@ mod tests {
             url: None,
             by_bot: false,
             reacted_at: None,
+            reactions: vec![],
         });
         poller.github.prs.borrow_mut().insert(pr.clone(), snap);
         let triggers = poller.refresh(&pr).await.unwrap().unwrap().triggers;
