@@ -2356,7 +2356,9 @@ async fn a_draft_being_revised_says_so_and_a_dropped_one_can_be_restored() {
                 run.id,
                 run.revision.as_ref().unwrap(),
                 &sanic_core::run::DraftRevision::Dropped {
-                    reason: "DROPPED: the caller checks it.".into(),
+                    reason: "DROPPED: `caller` checks it. <img src=x onerror=alert(1)> \
+                             [x](javascript:alert(1)) <script>alert(1)</script>"
+                        .into(),
                 },
                 Some("sess-8"),
                 "t",
@@ -2368,7 +2370,17 @@ async fn a_draft_being_revised_says_so_and_a_dropped_one_can_be_restored() {
     let dropped = f.dashboard.app.store().draft_rows(run.id).unwrap()[1].id;
     let card = card_of_draft(&page, dropped);
     assert!(card.contains("dropped by the agent"), "{card}");
-    assert!(card.contains("DROPPED: the caller checks it."), "{card}");
+    // Why, rendered as Markdown and sanitised.
+    let why = &card[card.find(r#"<div class="why">"#).unwrap()..];
+    let why = &why[..why.find("</div>").unwrap()];
+    assert!(
+        why.contains("DROPPED: <code>caller</code> checks it."),
+        "{why}"
+    );
+    for bad in ["<img", "onerror", "javascript:", "<script"] {
+        assert!(!why.contains(bad), "{bad}: {why}");
+    }
+    assert!(why.contains("&lt;script&gt;"), "{why}");
     assert!(card.contains("Restore"), "{card}");
     // The run it was revised from links the result.
     let before = f.get(&format!("/pr/org/repo/7?run={}", f.run)).await.body;
@@ -2565,6 +2577,45 @@ async fn existing_threads_are_summed_up_and_shown_beside_the_drafts_they_overlap
         );
     }
     insta::assert_snapshot!(readable(&f, card_of_draft(body, f.drafts[1])));
+}
+
+#[tokio::test]
+async fn drafts_and_threads_show_their_markdown_rendered_and_sanitised() {
+    let f = fixture(false).await;
+    // A thread on the inline draft's line, by someone else.
+    let thread = review_thread(
+        "t-md",
+        "src/lib.rs",
+        Some(3),
+        "mallory",
+        "**Careful** <img src=x onerror=alert(1)> [x](javascript:alert(1))\n\n\
+         ```suggestion\n    let m = n;\n```",
+    );
+    let snap = PrSnapshot {
+        threads: vec![thread],
+        ..snapshot(7, "alice", "Add the thing")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let edit = format!("/drafts/{}/edit", f.drafts[1]);
+    let body = "Rename it:\n\n```suggestion\n    let total = n + 1;\n```\n\n\
+                - [x] checked\n\n![graph](https://img.example.com/g.png)</div>";
+    assert_eq!(
+        f.post(&edit, &[("body", body)]).await.status,
+        StatusCode::SEE_OTHER
+    );
+    let page = f.get("/pr/org/repo/7").await.body;
+    let card = card_of_draft(&page, f.drafts[1]);
+    // The diff's excerpt of the thread is its text, in a title.
+    for bad in ["<img", "href=\"javascript", " src=\""] {
+        assert!(!card.contains(bad), "{bad}: {card}");
+    }
+    // The box to edit it in has the text as it is.
+    assert!(card.contains("let total = n + 1;\n```"), "{card}");
+    insta::assert_snapshot!(readable(&f, card));
 }
 
 /// Draft `id`'s card on a PR page.
@@ -3301,7 +3352,12 @@ fn noted_regeneration(f: &Fixture) -> (i64, Vec<i64>) {
     };
     store.claim_run(run.id).unwrap();
     let mut noted = comment("src/lib.rs", 3, Side::Right, "Why `m`?", false);
-    noted.comment.note = Some("NOTE-C: checked every caller; couldn't run the tests.".into());
+    // Markdown, and what the agent may have copied from a hostile PR.
+    noted.comment.note = Some(
+        "NOTE-C: checked **every** caller; couldn't run the tests.\n\n\
+         <img src=x onerror=alert(1)> [x](javascript:alert(1)) <script>alert(1)</script>"
+            .into(),
+    );
     let result = ReviewResult {
         summary: "Mostly fine.".into(),
         summary_note: Some("NOTE-S: low confidence overall.".into()),
@@ -3343,11 +3399,17 @@ async fn a_drafts_private_note_is_shown_on_its_card_in_both_views() {
             "{uri}: {summary}"
         );
         let comment = card_of_draft(&page, ids[1]);
+        let note = &comment[comment.find(r#"<aside class="pnote">"#).unwrap()..];
+        let note = &note[..note.find("</aside>").unwrap()];
+        // Rendered as the draft is, and sanitised the same.
         assert!(
-            comment.contains("NOTE-C: checked every caller; couldn&#39;t run the tests.")
-                || comment.contains("NOTE-C: checked every caller; couldn't run the tests."),
-            "{uri}: {comment}"
+            note.contains("NOTE-C: checked <strong>every</strong> caller; couldn't run the tests."),
+            "{uri}: {note}"
         );
+        for bad in ["<img", "onerror", "javascript:", "<script"] {
+            assert!(!note.contains(bad), "{uri}: {bad}: {note}");
+        }
+        assert!(note.contains("&lt;script&gt;"), "{uri}: {note}");
         // Set apart from the text that's posted.
         let body = &comment[comment.find(r#"class="body""#).unwrap()..];
         let body = &body[..body.find("</div>").unwrap()];

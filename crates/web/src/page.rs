@@ -94,8 +94,8 @@ pub fn layout_in(
                     content=r#"{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}"#;
                 title { (title) " · sanic-review" }
                 (icon_and_style())
-                // The files view's highlighting.
-                @if matches!(kind, Kind::Pr) { link rel="stylesheet" href="/assets/syntax.css"; }
+                // The files view's highlighting, and Markdown's code blocks.
+                link rel="stylesheet" href="/assets/syntax.css";
                 script src="/assets/htmx.min.js" defer {}
                 script src="/assets/app.js" defer {}
             }

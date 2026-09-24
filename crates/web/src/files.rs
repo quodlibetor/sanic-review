@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use crate::{
     App, Error, Shared,
-    highlight::Highlighter,
+    highlight::{self, Highlighter},
     links,
     page::keycap,
     pr::{self, short},
@@ -35,9 +35,6 @@ const LAZY_LINES: usize = 400;
 /// Diff lines the page shows before files with nothing of yours on them
 /// are only loaded on request.
 const PAGE_LINES: usize = 3000;
-
-/// Diff lines past which a file isn't highlighted.
-const HIGHLIGHT_LINES: usize = 2000;
 
 /// Which of the PR page's two views of a run's drafts it shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -359,7 +356,7 @@ fn file_box(f: &Files<'_>, file: &DiffFile, placed: &HashSet<i64>, eager: bool) 
 fn table(f: &Files<'_>, file: &DiffFile, placed: &HashSet<i64>) -> Markup {
     let path = file.path.as_str();
     let rows = Rows::new(f, path, placed);
-    let highlight = size(file) <= HIGHLIGHT_LINES;
+    let highlight = size(file) <= highlight::MAX_LINES;
     let split = f.layout == Layout::Split;
     let gaps = gaps(file);
     html! {
@@ -623,7 +620,7 @@ impl<'a> Rows<'a> {
                 tr.inl {
                     td colspan=(columns) {
                         @for thread in threads {
-                            (threads::thread_box(f.existing.at(), thread))
+                            (threads::thread_box(f.existing.at(), Some(f.diff), thread))
                         }
                         @for draft in drafts {
                             (pr::draft_card(f.app, draft, Some(f.diff), f.existing, f.revise))
@@ -738,6 +735,7 @@ pub async fn file(
         threads: &loaded.threads,
         head: &loaded.run.head_sha,
         pr_head: &loaded.pr_head,
+        diff: Some(&loaded.diff),
     };
     let Some(file) = loaded.diff.file(&query.path) else {
         return Err(Error::NotFound(format!(
@@ -870,6 +868,7 @@ pub async fn context(
         threads: &loaded.threads,
         head: &loaded.run.head_sha,
         pr_head: &loaded.pr_head,
+        diff: Some(&loaded.diff),
     };
     let no_links = |_: Layout| String::new();
     let f = Files {

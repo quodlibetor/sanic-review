@@ -4,8 +4,14 @@ expression: "readable(&f, runs)"
 ---
 <ol reversed>
 <li class="">
-<a href="/pr/org/repo/7?run=3">run 2</a> at <code>head7</code> · <time> · <span class="held">queued</span> · revises <a href="/pr/org/repo/7?run=1">run 1</a> · <span class="instruction" title="Drop the nits.
-And more.">“Drop the nits.…”</span>
+<a href="/pr/org/repo/7?run=3">run 2</a> at <code>head7</code> · <time> · <span class="held">queued</span> · revises <a href="/pr/org/repo/7?run=1">run 1</a>
+<details class="instruction">
+<summary>“Drop the nits.…”</summary>
+<div class="md">
+<p>Drop the nits.<br>
+And more.</p>
+</div>
+</details>
 </li>
 <li class="current">
 <a href="/pr/org/repo/7?run=1">run 1</a> at <code>head7</code> · <time> · <span class="ok">succeeded</span>

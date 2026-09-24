@@ -11,6 +11,7 @@ expression: "readable(&f, &page.body)"
 <title>Dashboard · sanic-review</title>
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/syntax.css">
 <script src="/assets/htmx.min.js" defer>
 </script>
 <script src="/assets/app.js" defer>

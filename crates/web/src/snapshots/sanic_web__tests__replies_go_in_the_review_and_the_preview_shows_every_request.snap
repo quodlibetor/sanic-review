@@ -15,7 +15,9 @@ expression: "readable(&f, cols)"
 </div>
 <h2 class="sec">Review body</h2>
 <div class="rv">
-<pre class="body">Mostly fine.</pre>
+<div class="md">
+<p>Mostly fine.</p>
+</div>
 </div>
 <h2 class="sec">Inline comments <span class="dim">0</span>
 </h2>
@@ -30,14 +32,18 @@ expression: "readable(&f, cols)"
 </div>
 <ul class="said">
 <li>
-<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
-
-It looks dead.">Is `m` used anywhere? It looks dead.</span>
+<b>bob</b>
+<div class="md">
+<p>Is <code>m</code> used anywhere?</p>
+<p>It looks dead.</p>
+</div>
 </li>
 </ul>
 </div>
 <div class="dim">draft 2, in reply:</div>
-<pre>Why `m`?</pre>
+<div class="md">
+<p>Why <code>m</code>?</p>
+</div>
 </div>
 <h2 class="sec">👍 on existing comments <span class="dim">1</span>
 </h2>

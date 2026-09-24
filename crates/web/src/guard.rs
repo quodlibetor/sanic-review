@@ -38,8 +38,10 @@ pub const TOKEN_FIELD: &str = "csrf";
 /// Forms are small; a draft body is the largest thing sent.
 const MAX_FORM: usize = 1 << 20;
 
+/// Images may come from the web, for the ones in comments; the sanitised
+/// Markdown has none until you click one (see `markdown`).
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-                   img-src 'self'; connect-src 'self'; form-action 'self'; \
+                   img-src 'self' https: http:; connect-src 'self'; form-action 'self'; \
                    frame-ancestors 'none'; base-uri 'none'";
 
 /// A random token, fixed for the life of the process.
@@ -206,7 +208,7 @@ fn header_token(headers: &HeaderMap) -> Option<&str> {
 
 /// Whether `host`, a `Host` header value, names this machine's loopback
 /// interface, on any port: SSH port forwarding may change the port.
-fn is_loopback(host: &str) -> bool {
+pub(crate) fn is_loopback(host: &str) -> bool {
     let name = match host.strip_prefix('[') {
         Some(v6) => v6.split_once(']').map_or(v6, |(addr, _)| addr),
         None => host.split_once(':').map_or(host, |(name, _)| name),

@@ -18,6 +18,7 @@ mod highlight;
 mod ignore;
 mod index;
 mod links;
+mod markdown;
 mod page;
 mod pr;
 mod regenerate;

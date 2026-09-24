@@ -591,7 +591,8 @@ available when tuning instruction files.
 
 `serve` serves it on `http://127.0.0.1:<port>/`. Pages are rendered on the
 server with maud, and htmx handles in-place edits. Every script, style and
-icon is embedded in the binary, so nothing is fetched at runtime.
+icon is embedded in the binary, so nothing is fetched at runtime but an
+image in a comment you click to load.
 
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by
@@ -672,8 +673,8 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   summary saying which one's drafts are shown ("Run 2 of 3", when it
   finished and the commit it reviewed). The list numbers the runs the same
   way, and a regeneration says which run it revises, linked, or for one
-  draft, which draft of which run, and your instruction's first line (all
-  of it on hover). Then a bar that stays in
+  draft, which draft of which run, and your instruction's first line,
+  which opens to all of it. Then a bar that stays in
   view: the tally of accepted, pending and rejected drafts, the verdict
   and Preview. Then the drafts of the latest run that succeeded (or of any
   run you pick). Each comment draft shows the lines around its anchor from
@@ -736,7 +737,7 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   dimmed. A draft that overlaps a thread says so, and the thread is
   shown under the draft's diff lines. Each thread shows where it is,
   whether it's resolved or outdated, its link on GitHub, and each
-  comment's author with an excerpt of its body; the diff shows each
+  comment's author and body, as Markdown; the diff shows each
   thread on the reviewed head under the line it ends on, with its first
   comment. The conversation isn't on lines, so it isn't listed.
   An overlapping draft offers, in each thread it overlaps, a 👍 on one
@@ -809,9 +810,9 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   approval has to be picked on the PR page's verdict form (see Security),
   so Approve in a URL alone is refused; the preview's button then reads
   "Approve this PR", or "Approve this PR with the above comments" when
-  there are any. The preview shows the review as it'll read (body,
-  then each inline comment, then the replies in existing threads and the
-  👍s) beside every request that will be sent, in order, each with its
+  there are any. The preview shows the review as it'll read, rendered as
+  Markdown (body, then each inline comment, then the replies in existing
+  threads and the 👍s), beside every request that will be sent, in order, each with its
   exact JSON body or mutation variables, with the confirm in a footer
   that stays in view; on a narrow window they stack. Above them, "Check
   before posting" lists what to look at. First, when the PR had a review
@@ -902,6 +903,33 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   else sees it, and it's never submitted from here; the result says to
   discard it on GitHub. Drafts of kind `reply` aren't posted yet: they
   don't record their thread.
+- **Markdown.** Every comment and description shown read-only is
+  rendered on the server as GitHub renders it (comrak, with GFM's
+  tables, task lists, strikethrough, autolinks and disallowed raw HTML
+  shown as text, and a line break wherever the text has one): drafts and
+  the summary, their private notes and why the agent dropped one,
+  existing threads' comments, the PR description, a regeneration's
+  instruction and the preview's review. A box you type
+  in, and the preview's "what's sent", stay raw. Anyone who can comment
+  on the PR writes some of it, so the HTML is sanitised to an allowlist
+  (ammonia): GitHub's safe tags, only the attributes they need, no
+  scripts, styles, event handlers, forms, frames, `data-` or htmx
+  attributes, and links only to `http(s)` and `mailto`, never relative
+  ones or ones to a host the dashboard answers to, which could be its
+  own pages. Links open in a new tab with `rel="noopener noreferrer
+  nofollow"`. Task list boxes can't be ticked. A code block naming a
+  language is highlighted as the files view is, except very long ones.
+  A ```suggestion on lines shows as the change it suggests: the lines it
+  replaces, from the run's diff, removed, and its own added; when the
+  diff doesn't have all of them, or it's on the old side or another
+  commit's lines, it's a labelled code block. In text that isn't on
+  lines, such as a description, the summary or a comment on a whole
+  file, it's a plain code block, as on GitHub. An image is a
+  placeholder with its alt text and
+  its URL's host, and no `src`: the script swaps in the image only when
+  you click it (or press Enter on it), so opening a page fetches
+  nothing. Only `http(s)` images off this machine get one. Each text's
+  rendering is kept, since pages redraw the same ones often.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
@@ -1143,7 +1171,9 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   unknown, used or expired pick is refused, before anything is loaded,
   with a note to pick Approve again on the PR page.
 - Responses forbid framing, so another page can't trick you into clicking
-  Confirm, and the CSP allows only the dashboard's own scripts. The
+  Confirm, and the CSP allows only the dashboard's own scripts. It lets
+  images come from the web, for the ones in comments, which are only in a
+  page once you click one (see Markdown under Dashboard). The
   referrer policy is `same-origin`: links out to GitHub carry no
   referrer, and the dashboard's own requests keep theirs.
 - Worktrees come from untrusted code. The agent never builds or runs that code

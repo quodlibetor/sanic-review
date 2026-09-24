@@ -11,6 +11,7 @@ expression: "readable(&f, &preview.body)"
 <title>Submit review · sanic-review</title>
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/syntax.css">
 <script src="/assets/htmx.min.js" defer>
 </script>
 <script src="/assets/app.js" defer>
@@ -46,11 +47,15 @@ expression: "readable(&f, &preview.body)"
 </div>
 <h2 class="sec">Review body</h2>
 <div class="rv">
-<pre class="body">Mostly fine; see inline.
-
-**[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**
-
-This file isn't in the diff.</pre>
+<div class="md">
+<p>Mostly fine; see inline.</p>
+<p>
+<strong>
+<a href="https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40" target="_blank" rel="noopener noreferrer nofollow">src/gone.rs:40</a>
+</strong>
+</p>
+<p>This file isn't in the diff.</p>
+</div>
 </div>
 <h2 class="sec">Inline comments <span class="dim">1</span>
 </h2>
@@ -59,7 +64,9 @@ This file isn't in the diff.</pre>
 <span class="mono">src/lib.rs:3</span>
 <span class="sp">RIGHT</span>
 </div>
-<pre>Why `m`?</pre>
+<div class="md">
+<p>Why <code>m</code>?</p>
+</div>
 </div>
 </div>
 <div class="wirecol">

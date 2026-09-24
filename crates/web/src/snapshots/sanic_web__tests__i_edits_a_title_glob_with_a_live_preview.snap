@@ -11,6 +11,7 @@ expression: "readable(&f, &page.body)"
 <title>Ignore by title · sanic-review</title>
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/syntax.css">
 <script src="/assets/htmx.min.js" defer>
 </script>
 <script src="/assets/app.js" defer>
@@ -30,7 +31,9 @@ expression: "readable(&f, &page.body)"
 <pre class="title">Fix &lt;script&gt; escaping</pre>
 <details class="description" open>
 <summary>Description</summary>
-<pre>Fix &lt;script&gt; escaping, in detail.</pre>
+<div class="md">
+<p>Fix &lt;script&gt; escaping, in detail.</p>
+</div>
 </details>
 <form id="confirm" method="post" action="/pr/org/repo/8/ignore" data-resend>
 <input type="hidden" name="csrf" value="<token>">

@@ -49,7 +49,9 @@ expression: "readable(&f, &page.body)"
 <div class="subnav">
 <details class="description">
 <summary>Description</summary>
-<pre>Add the thing, in detail.</pre>
+<div class="md">
+<p>Add the thing, in detail.</p>
+</div>
 </details>
 <details class="runs">
 <summary>Run 1 of 1 · <time> · reviewed <code>head7</code>
@@ -94,10 +96,16 @@ expression: "readable(&f, &page.body)"
 </div>
 <ul class="said">
 <li>
-<b>me</b>: <span class="excerpt" title="hm">hm</span>
+<b>me</b>
+<div class="md">
+<p>hm</p>
+</div>
 </li>
 <li>
-<b>alice</b>: <span class="excerpt" title="hm">hm</span>
+<b>alice</b>
+<div class="md">
+<p>hm</p>
+</div>
 </li>
 </ul>
 </div>
@@ -124,7 +132,11 @@ expression: "readable(&f, &page.body)"
 </form>
 </span>
 </div>
-<div class="body" data-edit title="click or e to edit">Mostly fine.</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>Mostly fine.</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/1/edit" hx-post="/drafts/1/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Mostly fine.</textarea>
@@ -200,7 +212,11 @@ expression: "readable(&f, &page.body)"
 <span class="sign"> </span>}</td>
 </tr>
 </table>
-<div class="body" data-edit title="click or e to edit">Why `m`?</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>Why <code>m</code>?</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">Why `m`?</textarea>
@@ -236,7 +252,11 @@ expression: "readable(&f, &page.body)"
 </form>
 </span>
 </div>
-<div class="body" data-edit title="click or e to edit">This file isn't in the diff.</div>
+<div class="body" data-edit title="click or e to edit">
+<div class="md">
+<p>This file isn't in the diff.</p>
+</div>
+</div>
 <form class="edit" method="post" action="/drafts/3/edit" hx-post="/drafts/3/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="body" rows="4">This file isn't in the diff.</textarea>

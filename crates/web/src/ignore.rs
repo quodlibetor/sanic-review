@@ -17,6 +17,7 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared,
     index::owed_reviews,
+    markdown,
     page::{self, Kind, csrf_field, github_link},
     pr_href,
 };
@@ -89,7 +90,7 @@ pub async fn editor(State(app): State<Shared>, Path(path): Path<PrPath>) -> Resu
         details.description open {
             summary { "Description" }
             @if pr.body.trim().is_empty() { p.dim { "No description." } }
-            @else { pre { (pr.body) } }
+            @else { (markdown::render(&pr.body, &markdown::Context::default())) }
         }
         // Sent again when you come back to fix a refused pattern: adding
         // one twice leaves it there once.

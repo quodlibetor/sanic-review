@@ -22,6 +22,7 @@ use sanic_github::{
     ApiError, NewComment, NewReaction, NewReply, NewReview, PostError, ReviewEvent, ReviewStatus,
     Step, find_review_step, review_state_step,
 };
+use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, OnGithub, PendingReview, PrPage, ReviewRun, SentReview, ThreadChoice};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -30,6 +31,7 @@ use crate::{
     App, Error, Shared,
     guard::Csrf,
     links,
+    markdown::{self, Context},
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
     pr, pr_href, threads,
 };
@@ -568,6 +570,7 @@ pub async fn preview(
                         reviewed: &built.head,
                         current: &pr.head_sha,
                     },
+                    pr::read_diff(&app, path.run).as_ref(),
                     &built,
                 ))
             }
@@ -744,14 +747,19 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
 }
 
 /// The review as GitHub will show it: its body, then each inline comment;
-/// then the replies in existing threads, and the thumbs-ups.
-fn readable_review(at: links::At<'_>, built: &Built) -> Markup {
+/// then the replies in existing threads, and the thumbs-ups. Their
+/// suggestions are against the lines of the run's `diff`.
+fn readable_review(at: links::At<'_>, diff: Option<&DiffIndex>, built: &Built) -> Markup {
     html! {
     @if let Some(review) = &built.review {
         @let comments = review.comments.len();
         h2.sec { "Review body" }
         div.rv {
-            @if review.body.is_empty() { pre.dim { "(empty)" } } @else { pre.body { (review.body) } }
+            @if review.body.is_empty() {
+                pre.dim { "(empty)" }
+            } @else {
+                (markdown::render(&review.body, &Context::default()))
+            }
         }
         h2.sec { "Inline comments " span.dim { (comments) } }
         @for c in &review.comments {
@@ -764,7 +772,8 @@ fn readable_review(at: links::At<'_>, built: &Built) -> Markup {
                     }
                     span.sp { (c.side.as_str()) }
                 }
-                pre { (c.body) }
+                @let lines = (c.start_line.unwrap_or(c.line).min(c.line), c.line);
+                (markdown::render(&c.body, &Context::lines(diff, &c.path, c.side, lines)))
             }
         }
     } @else {
@@ -775,9 +784,9 @@ fn readable_review(at: links::At<'_>, built: &Built) -> Markup {
         h2.sec { "Replies in existing threads " span.dim { (built.replies.len()) } }
         @for reply in &built.replies {
             div.rv {
-                (threads::thread_box(at, &reply.thread))
+                (threads::thread_box(at, diff, &reply.thread))
                 div.dim { "draft " (reply.draft) ", in reply:" }
-                pre { (reply.new.body) }
+                (markdown::render(&reply.new.body, &Context::thread(diff, &reply.thread, at.reviewed)))
             }
         }
     }
