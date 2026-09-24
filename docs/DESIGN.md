@@ -819,7 +819,8 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
 - **Every change passes `mise run check`.** Locally this is a rule in
   `CLAUDE.md`, because jj has no commit hooks. In CI, a GitHub Actions
   workflow in `quodlibetor/sanic-review` runs the same `mise run check` on
-  each push and PR.
+  each push and PR. Its actions are pinned to full commit SHAs, with the
+  release in a trailing comment: `uses: owner/repo@<sha> # vX.Y.Z`.
 
 ### Releases
 
@@ -838,9 +839,10 @@ a formula to the `quodlibetor/homebrew-tap` tap.
   Runners are pinned in `dist-workspace.toml` rather than following GitHub's
   `-latest` labels.
 - Actions in the workflow are pinned to commit SHAs through
-  `github-action-commits`. Binaries get GitHub artifact attestations, so
-  `gh attestation verify <file> --repo quodlibetor/sanic-review` checks a
-  download. `cargo-auditable` is off, since dist installs it unpinned.
+  `github-action-commits`, each with its release in a comment. Binaries
+  get GitHub artifact attestations, so `gh attestation verify <file> --repo
+  quodlibetor/sanic-review` checks a download. `cargo-auditable` is off,
+  since dist installs it unpinned.
 - The crates stay unpublished. The binary crate opts back in to dist with
   `[package.metadata.dist] dist = true`, since `publish = false` would
   otherwise exclude it.
