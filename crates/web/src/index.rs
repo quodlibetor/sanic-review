@@ -296,8 +296,8 @@ fn lists(app: &App, overview: &Overview, show_archived: bool) -> Markup {
             p.help-foot {
                 (keycap("j")) (keycap("k")) " move (a folded group is skipped) · "
                 (keycap("Tab")) " other list · " (keycap("Enter")) " open · "
-                (keycap("r")) (keycap("a")) (keycap("i")) (keycap("c"))
-                " act on the selected row · " (keycap("A")) " archived · "
+                (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c"))
+                " act on the selected row · " (keycap("X")) " archived · "
                 (keycap("?")) " all keys"
             }
         }
@@ -310,10 +310,10 @@ fn archived_toggle(show_archived: bool, hidden: usize) -> Markup {
         span.sp {
             @if show_archived {
                 a.toggle-archived href="/?archived=false" { "hide archived" }
-                " " (keycap("A"))
+                " " (keycap("X"))
             } @else if hidden > 0 {
                 a.toggle-archived href="/?archived=true" { "show " (hidden) " archived" }
-                " " (keycap("A"))
+                " " (keycap("X"))
             }
         }
     }
@@ -539,11 +539,11 @@ pub fn archive_form(app: &App, key: &PrKey, archived: bool, next: &str) -> Marku
             input type="hidden" name="next" value=(next);
             @if next == "index" {
                 button.linkbtn type="submit" {
-                    @if archived { "unarchive " } @else { "archive " } (keycap("a"))
+                    @if archived { "unarchive " } @else { "archive " } (keycap("x"))
                 }
             } @else {
                 button.btn type="submit" {
-                    @if archived { "Unarchive" } @else { "Archive" } (keycap("a"))
+                    @if archived { "Unarchive" } @else { "Archive" } (keycap("x"))
                 }
             }
         }

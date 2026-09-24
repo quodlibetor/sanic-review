@@ -105,13 +105,13 @@ expression: "readable(&f, &page.body)"
 </tr>
 <tr>
 <th>
-<kbd>a</kbd>
+<kbd>x</kbd>
 </th>
 <td>archive or unarchive the selected PR</td>
 </tr>
 <tr>
 <th>
-<kbd>A</kbd>
+<kbd>X</kbd>
 </th>
 <td>show or hide archived PRs</td>
 </tr>

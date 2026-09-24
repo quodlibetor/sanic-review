@@ -118,7 +118,7 @@ pub async fn page(
             (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
             (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
             " reject · " (keycap("u")) " undo · " (keycap("p")) " preview · "
-            (keycap("r")) (keycap("a")) (keycap("i")) (keycap("c")) " act on the PR · "
+            (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c")) " act on the PR · "
             (keycap("q")) " index"
         }
     };
