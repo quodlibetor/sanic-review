@@ -275,8 +275,15 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
         "the revision schema wasn't sent"
     );
     assert!(!read(fake, "env").contains("GITHUB_TOKEN"));
-    // The revision's files are its own.
+    // The revision's files are its own. It's told where it runs, as the
+    // review was, since a resumed session doesn't keep its system prompt.
     assert!(read(&s.data.path().join("runs/4"), "prompt.md").contains("Be terser."));
+    let system = read(&s.data.path().join("runs/4"), "system.md");
+    assert!(system.contains("# Where you're running"), "{system}");
+    assert!(
+        read(fake, "args").contains("# Where you're running"),
+        "the system prompt wasn't sent"
+    );
     assert!(!worktree.exists());
 
     // A chat opened the review's worktree since: it's left alone.

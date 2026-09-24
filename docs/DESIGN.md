@@ -44,7 +44,10 @@ resumes the agent session of a PR's latest run that has one (or of that
 run), so you can ask the reviewer about its review. Claude Code keys
 sessions by directory, so the run's worktree is checked out again at its
 original path, `worktrees/<run id>` in the data dir, at the run's head, and
-`claude --resume` runs there in the foreground. It keeps the review's
+`claude --resume` runs there in the foreground. A resumed session doesn't
+keep its system prompt, so the chat's says it's a chat with the reviewer,
+who can answer now, that it still can't post, run `gh` or reach the
+network, and that drafts change only on the dashboard. It keeps the review's
 limits: `--restricted` and `--strict-mcp-config` (the PR's own
 `.claude/settings.json` and `.mcp.json` don't load), the read-only tools,
 the run's `--add-dir`s, and no GitHub token. `--allow-edits` adds Edit and
@@ -361,6 +364,20 @@ Rules:
    brief: PR metadata, the diff or interdiff, relevant threads, previous drafts
    and how you handled them. PR text goes in as quoted data, never as
    instructions.
+   The system prompt is, in order: sanic-review's own review instructions
+   and output format; where the agent runs; the profile's instruction files;
+   its skill dirs; the reference checkouts. Where it runs comes before
+   anything the profile supplies, since review skills are usually written
+   for an interactive session: it says the agent runs non-interactively,
+   with read-only tools, and can't ask, wait for confirmation, post, run
+   `gh` or write files; that its only output is the drafts, which you
+   triage, edit and post from the dashboard; and how to map interactive
+   steps. Presenting for triage or explaining to the user goes in each
+   draft's private note, your revision requests arrive in a later prompt,
+   delivering, posting or confirming stops at the drafts, and steps that
+   need tools it lacks are skipped without being reported as failures.
+   Otherwise the profile's instructions govern style and content. A
+   regeneration gets the same system prompt.
    The metadata includes the PR's title and description. Each piece of
    PR-authored text is fenced with more backticks than it contains, so it
    can't close its own block.
@@ -404,7 +421,7 @@ Rules:
    new run, of kind `regenerate`, recording its source run and your
    instruction, for the source run's head and profile. It resumes the
    source run's session non-interactively, `claude -p --resume <session> --fork-session` (so the source's own session stays as it was),
-   with a review's restrictions and schema, in the source run's worktree
+   with a review's restrictions, system prompt and schema, in the source run's worktree
    path (Claude Code finds sessions by directory), with its run dir as an
    extra `--add-dir`. The prompt is your instruction, fenced as your words,
    then the drafts of the run being revised as they stand, fenced as your

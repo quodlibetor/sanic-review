@@ -10,7 +10,10 @@ use std::{
     process::Command,
 };
 
-use crate::claude::{READ_ONLY_TOOLS, TOKEN_VARS, token_vars};
+use crate::{
+    claude::{READ_ONLY_TOOLS, TOKEN_VARS, token_vars},
+    prompt::CHAT_ENVIRONMENT,
+};
 
 /// Tools a chat with `--allow-edits` may use.
 pub const EDIT_TOOLS: &str = "Read,Grep,Glob,Edit,Write";
@@ -49,6 +52,9 @@ impl ChatCommand {
             tools,
             "--allowedTools",
             tools,
+            // The review's system prompt isn't kept with its session.
+            "--append-system-prompt",
+            CHAT_ENVIRONMENT,
         ]
         .map(String::from)
         .into();
@@ -163,6 +169,8 @@ mod tests {
                 "Read,Grep,Glob",
                 "--allowedTools",
                 "Read,Grep,Glob",
+                "--append-system-prompt",
+                CHAT_ENVIRONMENT,
                 "--add-dir",
                 "/data/runs/3",
                 "--add-dir",
@@ -204,10 +212,15 @@ mod tests {
     fn the_shell_line_quotes_what_needs_it() {
         assert_eq!(
             chat(false).shell_line_unsetting(&["GH_TOKEN".into(), "odd name".into()]),
-            "cd /data/worktrees/3 && env -u GH_TOKEN -u 'odd name' '/opt/my claude' \
-             --resume sess-9 --restricted \
-             --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob \
-             --add-dir /data/runs/3 --add-dir '/src/lib'\\''s'"
+            format!(
+                "cd /data/worktrees/3 && env -u GH_TOKEN -u 'odd name' '/opt/my claude' \
+                 --resume sess-9 --restricted \
+                 --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob \
+                 --append-system-prompt {} \
+                 --add-dir /data/runs/3 --add-dir '/src/lib'\\''s'",
+                quote(CHAT_ENVIRONMENT)
+            )
         );
+        assert!(!CHAT_ENVIRONMENT.contains(['\n', '\'']));
     }
 }
