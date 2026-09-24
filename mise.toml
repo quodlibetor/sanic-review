@@ -43,6 +43,12 @@ run = [
 description = "Report test coverage (informational, not part of check)"
 run = "cargo llvm-cov nextest --workspace --locked"
 
+# Regenerates docs/images/*.png from the demo example; see scripts/screenshots.mjs.
+[tasks.screenshots]
+description = "Screenshot the demo dashboard for the README (needs Chrome; on Linux, fetches a pinned emoji font once)"
+tools = { node = "26.10.0" }
+run = "node scripts/screenshots.mjs"
+
 [tasks.check]
 description = "The gate every change must pass"
 depends = ["fmt", "lint", "deny", "dist", "test"]
