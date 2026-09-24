@@ -846,6 +846,8 @@ a formula to the `quodlibetor/homebrew-tap` tap.
   otherwise exclude it.
 - The tap job pushes with the `HOMEBREW_TAP_TOKEN` repository secret: a token
   with write access to `quodlibetor/homebrew-tap`'s contents.
+- Each archive ships both license files, and the Homebrew formula declares
+  the license from `Cargo.toml`.
 - macOS binaries aren't signed or notarized.
 
 Installing:
@@ -887,6 +889,11 @@ crates/
   tests.
 - `Cargo.lock` is committed. `cargo-deny` checks advisories, a license
   allowlist, duplicate versions, and that crates come only from crates.io.
+- The code is licensed `MIT OR Apache-2.0` (`LICENSE-MIT`,
+  `LICENSE-APACHE`), set in `[workspace.package]` and inherited by every
+  crate with `license.workspace = true`. cargo-deny's license allowlist
+  covers dependencies only; it skips the unpublished workspace crates
+  (`[licenses.private] ignore`).
 
 ### Errors
 

@@ -4,6 +4,7 @@ description = "GitHub REST and GraphQL client."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 color-eyre.workspace = true

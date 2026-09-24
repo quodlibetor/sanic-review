@@ -4,6 +4,7 @@ description = "Dashboard server; the only caller of GitHub write paths."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 axum.workspace = true
