@@ -11,7 +11,10 @@ button, they're posted as a normal GitHub review under your name.
 
 Nothing is posted until you click.
 
-<!-- screenshot: the dashboard index -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/index-dark.png">
+  <img src="docs/images/index.png" alt="The dashboard index: reviews you owe grouped into needs you, in flight and nothing to do now, then your PRs grouped into needs you, ready and waiting on reviewers. Each row leads with its next step, such as drafts to decide on, drafts to post, a comment to answer or a failed run, and says who has reviewed it.">
+</picture>
 
 ## What it isn't
 
@@ -143,6 +146,8 @@ accepts, `n` rejects, `u` undoes. Pick a verdict, preview exactly what will
 be sent, and confirm. Drafts on lines that aren't in the diff go into the
 review body instead of being dropped.
 
+![A PR page: the review's Markdown summary with a code block and a private reviewer note, then drafts on their diff lines, one with a suggested change, and one that overlaps an existing review thread, offering to post it separately, react in the thread or reply there.](docs/images/drafts.png)
+
 **Regenerate with instructions.** "Agent…" resumes the review's agent session
 with your instruction ("drop the nits", "you misread the locking, look
 again") and produces a new run with revised drafts. The agent is told to
@@ -159,6 +164,8 @@ there, or post it separately anyway.
 laid out like GitHub's Files changed tab, with the drafts and existing
 threads inline, syntax highlighting, unified or split (`s`), per-file Viewed
 boxes, and expandable context read from the local mirror.
+
+![The files view: the file list beside the diff, with the existing thread and the drafts inline under the lines they're on.](docs/images/files.png)
 
 **Profiles** decide how PRs get reviewed. Each profile matches repos (by
 org, `owner/name` or local checkout, optionally narrowed by path globs) and
@@ -227,6 +234,8 @@ network or spend tokens; GitHub, `claude` and the clock sit behind fakes.
 
 - Read [docs/DESIGN.md](docs/DESIGN.md) before changing behaviour, and
   update it when behaviour changes.
+- `mise run screenshots` regenerates the screenshots above from invented
+  data. It needs Chrome, and on Linux it downloads a pinned emoji font once.
 - [CLAUDE.md](CLAUDE.md) has the conventions (dependencies, errors, logging).
 - Nothing may post to GitHub or push except through an explicit user action.
   Don't add code paths that weaken that.
