@@ -3,6 +3,7 @@
 mod edit;
 mod models;
 mod scan;
+mod skills;
 
 use std::{
     collections::BTreeSet,
@@ -26,7 +27,7 @@ use sanic_github::{Client, Token};
 use sanic_runner::vcs::VcsResolver;
 use toml_edit::DocumentMut;
 
-use self::edit::{Selections, apply};
+use self::edit::{Selections, apply, apply_extras};
 use crate::config_edit::write_atomically;
 
 const MULTI_HELP: &str = "space: toggle · →: all · ←: none · type to filter · enter: done";
@@ -125,6 +126,9 @@ pub async fn run(args: SetupArgs) -> Result<()> {
     sel.model = choose_model(current.model.as_deref())?;
 
     apply(&mut doc, &sel, &base)?;
+    // After the repos are applied, so new profiles and checkouts are
+    // searched for skills too.
+    choose_skills(&mut doc, &base)?;
     // Prepended rather than parsed in: a document holding only a comment
     // would keep it after any tables setup adds.
     let updated = format!("{header}{doc}");
@@ -366,6 +370,25 @@ fn model_change(current: Option<&str>, answer: &str) -> Option<String> {
         return (!is_auto_model(current)).then(|| AUTO_MODEL.to_owned());
     }
     (answer != current).then(|| answer.to_owned())
+}
+
+/// Asks, per profile in `doc`, which skills and instruction files it
+/// gets, and applies the answers. `base` is the config file's directory.
+fn choose_skills(doc: &mut DocumentMut, base: &Path) -> Result<()> {
+    let home = std::env::home_dir();
+    let cwd = std::env::current_dir().wrap_err("finding the current directory")?;
+    // Absolute and without `.`s like other paths here, so the skills found
+    // in it match config entries and aren't written relative to the config.
+    let user_skills = models::claude_dir(|var| std::env::var(var).ok(), home.as_deref())
+        .map(|d| cwd.join(d).join("skills").components().collect());
+    let places = skills::Places {
+        cwd,
+        home,
+        user_skills,
+    };
+    let profiles = skills::read_profiles(doc, base, &places);
+    let extras = skills::choose(&mut skills::Terminal(places.clone()), &profiles, &places)?;
+    apply_extras(doc, &extras, base, &places)
 }
 
 fn choose_profile(message: &str, existing: &[String]) -> Result<String> {
