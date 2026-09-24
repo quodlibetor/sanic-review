@@ -15,7 +15,7 @@ use sanic_core::{
     state::PrState,
 };
 use sanic_runner::diff::DiffIndex;
-use sanic_store::{DraftRow, DraftStatus, OwedReview, PrPage, ReviewRun};
+use sanic_store::{DraftRow, DraftStatus, OwedReview, PrPage, ReviewRun, ThreadChoice};
 use serde::Deserialize;
 use tracing::info;
 
@@ -390,6 +390,7 @@ pub fn draft_card(
     } else {
         Vec::new()
     };
+    let accepted = accepted_label(draft, chosen(draft, existing), !overlapping.is_empty());
     html! {
         article.draft.dc.(draft.status).summary[draft.kind == "summary"] #{ "draft-" (draft.id) } {
             div.h {
@@ -425,12 +426,16 @@ pub fn draft_card(
                             (csrf_field(app))
                             @match draft.status.as_str() {
                                 "pending" => {
-                                    button.btn name="status" value="accepted" { "Accept" (keycap("y")) }
+                                    button.btn name="status" value="accepted"
+                                        title=[(!overlapping.is_empty()).then_some("As a comment of its own, not in the existing thread.")] {
+                                        @if overlapping.is_empty() { "Accept" } @else { "Post separately" }
+                                        (keycap("y"))
+                                    }
                                     button.btn name="status" value="rejected" { "Reject" (keycap("n")) }
                                 }
                                 other => {
                                     span.st.(other) {
-                                        @if other == "accepted" { "✓ accepted" } @else { "✕ rejected" }
+                                        @if other == "accepted" { (accepted) } @else { "✕ rejected" }
                                     }
                                     button.btn name="status" value="pending" { "Undo" (keycap("u")) }
                                 }
@@ -442,12 +447,7 @@ pub fn draft_card(
                 }
             }
             @if let Some(context) = context { (context) }
-            @if !overlapping.is_empty() {
-                div.overlaps #{ "draft-" (draft.id) "-threads" } {
-                    div.dim { "Already said on these lines:" }
-                    @for thread in &overlapping { (threads::thread_box(thread, existing.head)) }
-                }
-            }
+            @if open { (in_threads(app, draft, existing, &overlapping, editable)) }
             div.body data-edit[editable] title=[editable.then_some("click or e to edit")] {
                 (draft.body())
             }
@@ -466,6 +466,141 @@ pub fn draft_card(
             }
         }
     }
+}
+
+/// What an accepted draft says it posts: where, if it's in `chosen`, an
+/// existing thread; else whether that's separately from threads it
+/// `overlaps`.
+fn accepted_label(draft: &DraftRow, chosen: Option<&Thread>, overlaps: bool) -> String {
+    match &draft.choice {
+        Some(ThreadChoice::React { comment, .. }) => {
+            let by = chosen
+                .and_then(|t| t.comments.iter().find(|c| c.id == *comment))
+                .map_or("their", |c| c.author.as_str());
+            format!("✓ 👍 on {by}'s comment instead")
+        }
+        Some(ThreadChoice::Reply { .. }) => {
+            let by = chosen
+                .and_then(|t| t.comments.first())
+                .map_or("their", |c| c.author.as_str());
+            format!("✓ reply in {by}'s thread")
+        }
+        None if overlaps => "✓ posts separately".into(),
+        None => "✓ accepted".into(),
+    }
+}
+
+/// The thread `draft` is accepted to post in, if it's still on the PR.
+fn chosen<'a>(draft: &DraftRow, existing: Existing<'a>) -> Option<&'a Thread> {
+    let choice = draft.choice.as_ref()?;
+    existing.inline().find(|t| t.id == choice.thread())
+}
+
+/// The existing threads under `draft`: those it's `overlapping`, and the
+/// one it's accepted to post in, overlapping or not, marked. While it's
+/// `editable`, a comment gets the choices of what to post in each.
+fn in_threads(
+    app: &App,
+    draft: &DraftRow,
+    existing: Existing<'_>,
+    overlapping: &[&Thread],
+    editable: bool,
+) -> Markup {
+    let chosen = chosen(draft, existing);
+    let mut shown = overlapping.to_vec();
+    if let Some(thread) = chosen.filter(|t| !shown.iter().any(|s| s.id == t.id)) {
+        shown.push(thread);
+    }
+    let choosable = editable && draft.kind == "comment";
+    html! {
+        @if !shown.is_empty() {
+            div.overlaps #{ "draft-" (draft.id) "-threads" } {
+                div.dim {
+                    @if overlapping.is_empty() { "Posts in this thread:" } @else { "Already said on these lines:" }
+                }
+                @for thread in shown {
+                    @let actions = if choosable { choose_form(app, draft, thread) } else { html! {} };
+                    (threads::thread_box_with(
+                        thread,
+                        existing.head,
+                        chosen.is_some_and(|c| c.id == thread.id),
+                        &actions,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// What `draft` can post in `thread` instead of a comment of its own: a
+/// thumbs-up on one of its comments, the first unless you pick another,
+/// or itself as a reply there.
+fn choose_form(app: &App, draft: &DraftRow, thread: &Thread) -> Markup {
+    let action = format!("/drafts/{}/thread", draft.id);
+    let picked = match &draft.choice {
+        Some(ThreadChoice::React { thread: t, comment }) if *t == thread.id => Some(comment),
+        _ => None,
+    };
+    html! {
+        form.choose method="post" action=(action) hx-post=(action)
+            hx-target="closest article" hx-swap="outerHTML"
+            hx-sync="closest article:queue all" {
+            (csrf_field(app))
+            input type="hidden" name="thread" value=(thread.id);
+            @if let [only] = &thread.comments[..] {
+                input type="hidden" name="comment" value=(only.id);
+            } @else {
+                select name="comment" title="The comment the 👍 goes on" {
+                    @for (i, c) in thread.comments.iter().enumerate() {
+                        option value=(c.id)
+                            selected[picked.map_or(i == 0, |p| *p == c.id)] {
+                            (c.author) ": " (threads::excerpt_of(&c.body, 40))
+                        }
+                    }
+                }
+            }
+            button.btn name="choice" value="react"
+                title="Post a 👍 on that comment, and not the draft's text" {
+                "👍 instead"
+            }
+            button.btn name="choice" value="reply" title="Post the draft as a reply in this thread" {
+                "Reply here instead"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChoiceForm {
+    choice: String,
+    thread: String,
+    #[serde(default)]
+    comment: String,
+}
+
+/// Accepts a draft to post in an existing thread instead of on its own.
+pub async fn choose_thread(
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<ChoiceForm>,
+) -> Result<Response, Error> {
+    let ChoiceForm {
+        choice,
+        thread,
+        comment,
+    } = form;
+    let choice = match choice.as_str() {
+        "react" if !comment.is_empty() => ThreadChoice::React { thread, comment },
+        "reply" => ThreadChoice::Reply { thread },
+        other => {
+            return Err(Error::Refused(format!(
+                "`{other}` isn't a way to post in a thread"
+            )));
+        }
+    };
+    let _posting = app.posting.lock().await;
+    decided(&app, id, &headers, |store| store.choose_thread(id, &choice))
 }
 
 /// `path:line`, or `path:start-line`, with the side when it's the old one.

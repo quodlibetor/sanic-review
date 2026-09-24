@@ -62,12 +62,11 @@ This file isn't in the diff.</pre>
 </div>
 </div>
 <div class="wirecol">
-<h2>Exactly what's sent · <code>POST /repos/org/repo/pulls/7/reviews</code>
+<h2>Exactly what's sent, 1 of 2 · <code>POST /repos/org/repo/pulls/7/reviews</code>
 </h2>
-<pre id="payload">{
+<pre class="wire">{
   &quot;commit_id&quot;: &quot;head7&quot;,
   &quot;body&quot;: &quot;Mostly fine; see inline.\n\n**[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**\n\nThis file isn't in the diff.&quot;,
-  &quot;event&quot;: &quot;REQUEST_CHANGES&quot;,
   &quot;comments&quot;: [
     {
       &quot;path&quot;: &quot;src/lib.rs&quot;,
@@ -77,12 +76,19 @@ This file isn't in the diff.</pre>
     }
   ]
 }</pre>
+<h2>Exactly what's sent, 2 of 2 · <code>GraphQL submitPullRequestReview, with</code>
+</h2>
+<pre class="wire">{
+  &quot;body&quot;: &quot;Mostly fine; see inline.\n\n**[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**\n\nThis file isn't in the diff.&quot;,
+  &quot;event&quot;: &quot;REQUEST_CHANGES&quot;,
+  &quot;review&quot;: &quot;&lt;the id of the review created above&gt;&quot;
+}</pre>
 </div>
 </div>
 <form class="foot" id="confirm" method="post" action="/pr/org/repo/7/runs/1/submit">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="event" value="REQUEST_CHANGES">
-<input type="hidden" name="payload" value="{&quot;commit_id&quot;:&quot;head7&quot;,&quot;body&quot;:&quot;Mostly fine; see inline.\n\n**[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**\n\nThis file isn't in the diff.&quot;,&quot;event&quot;:&quot;REQUEST_CHANGES&quot;,&quot;comments&quot;:[{&quot;path&quot;:&quot;src/lib.rs&quot;,&quot;body&quot;:&quot;Why `m`?&quot;,&quot;line&quot;:3,&quot;side&quot;:&quot;RIGHT&quot;}]}">
+<input type="hidden" name="payload" value="{&quot;left&quot;:null,&quot;review&quot;:{&quot;commit_id&quot;:&quot;head7&quot;,&quot;body&quot;:&quot;Mostly fine; see inline.\n\n**[src/gone.rs:40](https://github.com/org/repo/blob/head7/src/gone.rs?plain=1#L40)**\n\nThis file isn't in the diff.&quot;,&quot;event&quot;:&quot;REQUEST_CHANGES&quot;,&quot;comments&quot;:[{&quot;path&quot;:&quot;src/lib.rs&quot;,&quot;body&quot;:&quot;Why `m`?&quot;,&quot;line&quot;:3,&quot;side&quot;:&quot;RIGHT&quot;}]},&quot;replies&quot;:[],&quot;reactions&quot;:[]}">
 <button class="btn go" type="submit">Confirm and post to GitHub<span class="k">y</span>
 </button>
 <a class="btn" id="cancel" href="/pr/org/repo/7?run=1">Back to the drafts<span class="k">Esc</span>

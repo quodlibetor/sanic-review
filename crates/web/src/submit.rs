@@ -2,6 +2,7 @@
 //! you confirm, the one GitHub write.
 
 use std::{
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     time::{Duration, SystemTime},
 };
@@ -13,17 +14,23 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
-use sanic_core::{pr::PrKey, run::Side};
-use sanic_github::{ApiError, NewComment, NewReview, ReviewEvent};
-use sanic_store::{DraftRow, PrPage, ReviewRun};
-use serde::Deserialize;
+use sanic_core::{
+    pr::{PrKey, Thread},
+    run::Side,
+};
+use sanic_github::{
+    ApiError, NewComment, NewReaction, NewReply, NewReview, ReviewEvent, ReviewStatus, Step,
+    review_state_step,
+};
+use sanic_store::{DraftRow, PendingReview, PrPage, ReviewRun, ThreadChoice};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
     App, Error, Shared,
     guard::Csrf,
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
-    pr, pr_href,
+    pr, pr_href, threads,
 };
 
 #[derive(Debug, Deserialize)]
@@ -44,25 +51,111 @@ impl RunPath {
     }
 }
 
-/// The review a run's accepted drafts make, and which drafts are in it.
+/// What a run's accepted drafts post, and which drafts are in it: a
+/// review with its replies in existing threads, then thumbs-ups.
 #[derive(Debug)]
 pub struct Built {
-    pub review: NewReview,
+    /// `None` when all there is to post is thumbs-ups.
+    pub review: Option<NewReview>,
+    /// Posted in the review, in existing threads.
+    pub replies: Vec<Reply>,
+    /// Posted after the review, one at a time.
+    pub reactions: Vec<Reaction>,
     /// Everything that's marked posted once GitHub has the review.
     pub included: Vec<i64>,
+    /// The included drafts' bodies, as they go out, by draft.
+    pub bodies: Vec<(i64, String)>,
     /// Accepted comments GitHub won't take inline, posted in the body.
     pub in_body: usize,
-    /// Accepted replies, which can't be posted yet.
-    pub replies: usize,
+    /// Accepted drafts of kind `reply`, which can't be posted yet: they
+    /// don't record their thread.
+    pub unthreaded: usize,
     /// Drafts still pending, which the review leaves out.
     pub pending: Vec<i64>,
+    /// The reviewed head, which the drafts' lines are lines of.
+    pub head: String,
+    /// A review an earlier submit of this run left pending on GitHub,
+    /// which is settled first; see [`settle`].
+    pub left: Option<PendingReview>,
+}
+
+/// A draft posted as a reply in an existing thread.
+#[derive(Debug)]
+pub struct Reply {
+    pub new: NewReply,
+    pub draft: i64,
+    pub thread: Thread,
+}
+
+/// A thumbs-up on an existing comment, in place of the drafts that chose
+/// it.
+#[derive(Debug)]
+pub struct Reaction {
+    pub new: NewReaction,
+    pub drafts: Vec<i64>,
+    pub thread: Thread,
+    pub comment: sanic_core::pr::Comment,
+}
+
+/// What the confirm form carries back, to check nothing changed since the
+/// preview: everything [`Built`] sends.
+#[derive(Serialize)]
+struct Wire<'a> {
+    left: Option<&'a str>,
+    review: Option<&'a NewReview>,
+    replies: Vec<&'a NewReply>,
+    reactions: Vec<&'a NewReaction>,
+}
+
+impl Built {
+    fn wire(&self) -> Wire<'_> {
+        Wire {
+            left: self.left.as_ref().map(|l| l.node_id.as_str()),
+            review: self.review.as_ref(),
+            replies: self.replies.iter().map(|r| &r.new).collect(),
+            reactions: self.reactions.iter().map(|r| &r.new).collect(),
+        }
+    }
+
+    fn new_replies(&self) -> Vec<NewReply> {
+        self.replies.iter().map(|r| r.new.clone()).collect()
+    }
+
+    /// Every request a confirm sends, in order.
+    fn steps(&self, key: &PrKey) -> Vec<Step> {
+        let left = self.left.iter().flat_map(|left| {
+            let mut discard = review_state_step(&left.node_id);
+            discard.endpoint = "GraphQL deletePullRequestReview, only if it's still pending, \
+                                with"
+                .into();
+            [review_state_step(&left.node_id), discard]
+        });
+        let review = self
+            .review
+            .iter()
+            .flat_map(|review| review.steps(key, &self.new_replies()));
+        left.chain(review)
+            .chain(self.reactions.iter().flat_map(|r| r.new.steps()))
+            .collect()
+    }
+
+    fn event(&self) -> Option<ReviewEvent> {
+        self.review.as_ref().map(|r| r.event)
+    }
 }
 
 /// The review of `run` with the verdict you picked: the summary as its
 /// body if you accepted it, and your accepted comments. Accepted comments
-/// that aren't on a line of the diff are added to the body. `Err` says why
-/// there's nothing to post.
-pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result<Built, String> {
+/// that aren't on a line of the diff are added to the body. A comment you
+/// chose to post in an existing thread of `threads` goes in the review as
+/// a reply there, or as a thumbs-up on the comment you picked instead of
+/// its text. `Err` says why there's nothing to post.
+pub fn build(
+    run: &ReviewRun,
+    drafts: &[DraftRow],
+    threads: &[Thread],
+    event: ReviewEvent,
+) -> Result<Built, String> {
     if run.status != "succeeded" {
         return Err(format!(
             "run {} is {}, so it has no drafts",
@@ -73,12 +166,21 @@ pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result
     let mut sections = Vec::new();
     let mut included = Vec::new();
     let mut comments = Vec::new();
+    let mut replies = Vec::new();
+    let mut reactions: Vec<Reaction> = Vec::new();
     let mut in_body = 0;
     for draft in accepted().filter(|d| d.kind == "summary") {
         sections.push(draft.body().to_owned());
         included.push(draft.id);
     }
     for draft in accepted().filter(|d| d.kind == "comment") {
+        if let Some(choice) = &draft.choice {
+            if matches!(choice, ThreadChoice::Reply { .. }) {
+                included.push(draft.id);
+            }
+            in_thread(draft, choice, threads, &mut replies, &mut reactions)?;
+            continue;
+        }
         included.push(draft.id);
         if let Some(comment) = inline(draft) {
             comments.push(comment);
@@ -101,25 +203,101 @@ pub fn build(run: &ReviewRun, drafts: &[DraftRow], event: ReviewEvent) -> Result
         }
     }
     let body = sections.join("\n\n");
-    if event != ReviewEvent::Approve && body.trim().is_empty() && comments.is_empty() {
-        return Err("nothing is accepted, so there's nothing to post".into());
-    }
+    let empty = body.trim().is_empty() && comments.is_empty() && replies.is_empty();
+    let review = match event {
+        ReviewEvent::Approve => true,
+        _ if !empty => true,
+        _ if reactions.is_empty() => {
+            return Err("nothing is accepted, so there's nothing to post".into());
+        }
+        ReviewEvent::RequestChanges => {
+            return Err(
+                "requesting changes needs a review body, a comment or a reply, and \
+                        only thumbs-ups are accepted"
+                    .into(),
+            );
+        }
+        ReviewEvent::Comment => false,
+    };
+    let bodies = accepted()
+        .filter(|d| included.contains(&d.id))
+        .map(|d| (d.id, d.body().to_owned()))
+        .collect();
     Ok(Built {
-        review: NewReview {
+        review: review.then(|| NewReview {
             commit_id: run.head_sha.clone(),
             body,
             event,
             comments,
-        },
+        }),
+        replies,
+        reactions,
         included,
         in_body,
-        replies: accepted().filter(|d| d.kind == "reply").count(),
+        unthreaded: accepted().filter(|d| d.kind == "reply").count(),
         pending: drafts
             .iter()
             .filter(|d| d.status == "pending")
             .map(|d| d.id)
             .collect(),
+        bodies,
+        head: run.head_sha.clone(),
+        left: None,
     })
+}
+
+/// Adds `draft`, accepted to post in an existing thread as `choice`, to
+/// the `replies` in the review or the `reactions` after it. Drafts that
+/// react to one comment share its reaction.
+fn in_thread(
+    draft: &DraftRow,
+    choice: &ThreadChoice,
+    threads: &[Thread],
+    replies: &mut Vec<Reply>,
+    reactions: &mut Vec<Reaction>,
+) -> Result<(), String> {
+    let thread = threads
+        .iter()
+        .find(|t| t.id == choice.thread() && !t.comments.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "draft {} is for a thread that isn't on the PR any more; decide on it again",
+                draft.id
+            )
+        })?;
+    match choice {
+        ThreadChoice::Reply { thread: id } => replies.push(Reply {
+            new: NewReply {
+                thread_id: id.clone(),
+                body: draft.body().to_owned(),
+            },
+            draft: draft.id,
+            thread,
+        }),
+        ThreadChoice::React { comment, .. } => {
+            if let Some(same) = reactions.iter_mut().find(|r| r.new.comment_id == *comment) {
+                same.drafts.push(draft.id);
+                return Ok(());
+            }
+            let Some(target) = thread.comments.iter().find(|c| c.id == *comment).cloned() else {
+                return Err(format!(
+                    "draft {} is for a comment that isn't in its thread any more; decide on \
+                     it again",
+                    draft.id
+                ));
+            };
+            reactions.push(Reaction {
+                new: NewReaction {
+                    comment_id: comment.clone(),
+                },
+                drafts: vec![draft.id],
+                thread,
+                comment: target,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A link to `draft`'s lines in the file at `head`, so a comment that
@@ -218,12 +396,11 @@ fn easy_to_miss<'a>(texts: impl Iterator<Item = &'a String>) -> Vec<&'static str
     found
 }
 
+/// A PR as a submit sees it: its page, and a run's review.
+type Loaded = (PrPage, Result<Built, String>);
+
 /// Loads `run` of the PR at `path` and builds its review.
-fn load(
-    app: &App,
-    path: &RunPath,
-    event: ReviewEvent,
-) -> Result<(PrPage, Result<Built, String>), Error> {
+fn load(app: &App, path: &RunPath, event: ReviewEvent) -> Result<Loaded, Error> {
     let key = path.pr().key()?;
     let store = app.store();
     let pr = store
@@ -236,14 +413,25 @@ fn load(
         .into_iter()
         .find(|run| run.id == path.run)
         .ok_or_else(|| Error::NotFound(format!("{} has no run {}", key.url(), path.run)))?;
-    let drafts = store.draft_rows(run.id).map_err(Error::pr(&key))?;
-    Ok((pr, build(&run, &drafts, event)))
+    let mut drafts = store.draft_rows(run.id).map_err(Error::pr(&key))?;
+    // GitHub has these, though the store couldn't say so.
+    let taken = app.taken();
+    for draft in &mut drafts {
+        if taken.contains(&draft.id) {
+            draft.status = "posted".into();
+        }
+    }
+    let threads = store.threads(&key).map_err(Error::pr(&key))?;
+    // Any run's: a regeneration copies drafts GitHub may have in it.
+    let left = store.pending_review(&key).map_err(Error::pr(&key))?;
+    let built = build(&run, &drafts, &threads, event).map(|built| Built { left, ..built });
+    Ok((pr, built))
 }
 
-/// The payload as the confirm form carries it back. Compact, so it has no
+/// What's sent, as the confirm form carries it back. Compact, so it has no
 /// line breaks for the browser to rewrite.
-fn wire(review: &NewReview) -> Result<String, Error> {
-    Ok(serde_json::to_string(review).map_err(color_eyre::Report::from)?)
+fn wire(built: &Built) -> Result<String, Error> {
+    Ok(serde_json::to_string(&built.wire()).map_err(color_eyre::Report::from)?)
 }
 
 /// How long a pick lasts: long enough to read the preview, short enough
@@ -359,57 +547,49 @@ pub async fn preview(
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
     };
-    let endpoint = format!(
-        "POST /repos/{}/{}/pulls/{}/reviews",
-        pr.key.repo.owner, pr.key.repo.name, pr.key.number
-    );
-    let pretty = serde_json::to_string_pretty(&built.review).map_err(color_eyre::Report::from)?;
+    let steps = built.steps(&pr.key);
     let action = format!("{}/runs/{}/submit", pr_href(&pr.key), path.run);
-    let review = &built.review;
-    let approve = review.event == ReviewEvent::Approve;
-    let payload = wire(review)?;
+    let approve = built.event() == Some(ReviewEvent::Approve);
+    let payload = wire(&built)?;
     if approve {
         // The confirm may post only what this preview shows.
         if let Some(pick) = app.picks().get_mut(&pick) {
             pick.shown = Some(payload.clone());
         }
     }
-    let (chip, verdict_class) = match review.event {
-        ReviewEvent::Comment => ("COMMENT", "cm"),
-        ReviewEvent::RequestChanges => ("REQUEST CHANGES", "rc"),
-        ReviewEvent::Approve => ("APPROVE", "ap"),
-    };
-    let comments = review.comments.len();
+    let bare = built
+        .review
+        .as_ref()
+        .is_some_and(|r| r.body.is_empty() && r.comments.is_empty())
+        && built.replies.is_empty();
     let content = html! {
         h1 { "Post this review?" }
-        div.sumline {
-            span.verdict-chip.(verdict_class) { (chip) }
-            span { (pr.title) " " (pr_ref(&pr.key)) }
-            span {
-                @if review.body.is_empty() { "no body" } @else { "body" }
-                " + " (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
-            }
-            span { "at " code { (pr::short(&review.commit_id)) } }
-        }
+        (sumline(&pr, &built))
         div.cols {
             div {
                 (checklist(&built, &pr, &back))
-                (readable_review(review))
+                (readable_review(&built))
             }
             div.wirecol {
-                h2 { "Exactly what's sent · " code { (endpoint) } }
-                pre #payload { (pretty) }
+                @for (i, step) in steps.iter().enumerate() {
+                    h2 {
+                        "Exactly what's sent"
+                        @if steps.len() > 1 { ", " (i + 1) " of " (steps.len()) }
+                        " · " code { (step.endpoint) }
+                    }
+                    pre.wire { (step.body) }
+                }
             }
         }
         form.foot #confirm method="post" action=(action) {
             (csrf_field(&app))
-            input type="hidden" name="event" value=(review.event.as_str());
+            input type="hidden" name="event" value=(event.as_str());
             input type="hidden" name="payload" value=(payload);
             @if approve {
                 input type="hidden" name="pick" value=(pick);
             }
             button.btn.go type="submit" {
-                @if approve && review.body.is_empty() && review.comments.is_empty() {
+                @if approve && bare {
                     "Approve this PR"
                 } @else if approve {
                     "Approve this PR with the above comments"
@@ -432,20 +612,69 @@ pub async fn preview(
     .into_response())
 }
 
+/// The preview's summary line: the verdict, the PR, what's sent and at
+/// which commit.
+fn sumline(pr: &PrPage, built: &Built) -> Markup {
+    let (chip, verdict_class) = match built.event() {
+        Some(ReviewEvent::Comment) => ("COMMENT", "cm"),
+        Some(ReviewEvent::RequestChanges) => ("REQUEST CHANGES", "rc"),
+        Some(ReviewEvent::Approve) => ("APPROVE", "ap"),
+        None => ("NO REVIEW", "cm"),
+    };
+    let review = built.review.as_ref();
+    let comments = review.map_or(0, |r| r.comments.len());
+    let (replies, reactions) = (built.replies.len(), built.reactions.len());
+    html! {
+        div.sumline {
+            span.verdict-chip.(verdict_class) { (chip) }
+            span { (pr.title) " " (pr_ref(&pr.key)) }
+            span {
+                @if let Some(review) = review {
+                    @if review.body.is_empty() { "no body" } @else { "body" }
+                    " + " (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
+                    @if replies > 0 {
+                        " + " (replies) @if replies == 1 { " reply" } @else { " replies" }
+                    }
+                } @else {
+                    "no review"
+                }
+                @if reactions > 0 { " + " (reactions) " 👍" }
+            }
+            @if let Some(review) = review {
+                span { "at " code { (pr::short(&review.commit_id)) } }
+            }
+        }
+    }
+}
+
 /// What to check before posting: an approval, a stale head, comments moved
-/// into the body, Markdown that hides things, and drafts left out.
+/// into the body, replies and thumbs-ups in existing threads, Markdown that
+/// hides things, and drafts left out.
 fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
-    let review = &built.review;
-    let texts = std::iter::once(&review.body).chain(review.comments.iter().map(|c| &c.body));
+    let review = built.review.as_ref();
+    let texts = review
+        .into_iter()
+        .flat_map(|r| std::iter::once(&r.body).chain(r.comments.iter().map(|c| &c.body)))
+        .chain(built.replies.iter().map(|r| &r.new.body));
     let missable = easy_to_miss(texts);
     let mut checks = Vec::new();
-    if review.event == ReviewEvent::Approve {
+    if built.left.is_some() {
+        checks.push(html! {
+            b { "An earlier submit on this PR left a review pending." }
+            " It's checked first: if GitHub submitted it after all, its drafts are marked "
+            "posted and nothing else is sent; if it's still pending, it's deleted, then "
+            "this is posted."
+        });
+    }
+    if built.event() == Some(ReviewEvent::Approve) {
         checks.push(html! {
             b { "You picked Approve." }
             " The agent never suggests approving."
         });
     }
-    if review.commit_id != pr.head_sha {
+    if let Some(review) = review
+        && review.commit_id != pr.head_sha
+    {
         checks.push(pr::moved_on(&review.commit_id, &pr.head_sha));
     }
     if built.in_body > 0 {
@@ -453,6 +682,21 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
             b { (built.in_body) }
             " accepted comment(s) aren't on a line of the diff, so "
             "they're in the body, each headed by a link to its lines."
+        });
+    }
+    if !built.replies.is_empty() {
+        checks.push(html! {
+            b { (built.replies.len()) }
+            " draft(s) go as replies in existing threads, in the review. If a reply "
+            "fails, the pending review is deleted, so nothing is posted."
+        });
+    }
+    if !built.reactions.is_empty() {
+        checks.push(html! {
+            b { (built.reactions.len()) }
+            " 👍 go on existing comments, in place of those drafts' text"
+            @if review.is_some() { ", after the review" }
+            "."
         });
     }
     if !missable.is_empty() {
@@ -472,9 +716,9 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
             "."
         });
     }
-    if built.replies > 0 {
+    if built.unthreaded > 0 {
         checks.push(html! {
-            b { (built.replies) }
+            b { (built.unthreaded) }
             " accepted repl(ies) aren't included: posting replies "
             "isn't supported yet."
         });
@@ -489,26 +733,58 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
     }
 }
 
-/// The review as GitHub will show it: its body, then each inline comment.
-fn readable_review(review: &NewReview) -> Markup {
-    let comments = review.comments.len();
+/// The review as GitHub will show it: its body, then each inline comment;
+/// then the replies in existing threads, and the thumbs-ups.
+fn readable_review(built: &Built) -> Markup {
     html! {
-    h2.sec { "Review body" }
-    div.rv {
-        @if review.body.is_empty() { pre.dim { "(empty)" } } @else { pre.body { (review.body) } }
-    }
-    h2.sec { "Inline comments " span.dim { (comments) } }
-    @for c in &review.comments {
+    @if let Some(review) = &built.review {
+        @let comments = review.comments.len();
+        h2.sec { "Review body" }
         div.rv {
-            div.h {
-                span.mono {
-                    (c.path) ":"
-                    @if let Some(start) = c.start_line { (start) "-" }
-                    (c.line)
+            @if review.body.is_empty() { pre.dim { "(empty)" } } @else { pre.body { (review.body) } }
+        }
+        h2.sec { "Inline comments " span.dim { (comments) } }
+        @for c in &review.comments {
+            div.rv {
+                div.h {
+                    span.mono {
+                        (c.path) ":"
+                        @if let Some(start) = c.start_line { (start) "-" }
+                        (c.line)
+                    }
+                    span.sp { (c.side.as_str()) }
                 }
-                span.sp { (c.side.as_str()) }
+                pre { (c.body) }
             }
-            pre { (c.body) }
+        }
+    } @else {
+        h2.sec { "No review" }
+        p.dim { "Only thumbs-ups are accepted, so no review is posted." }
+    }
+    @if !built.replies.is_empty() {
+        h2.sec { "Replies in existing threads " span.dim { (built.replies.len()) } }
+        @for reply in &built.replies {
+            div.rv {
+                (threads::thread_box(&reply.thread, &built.head))
+                div.dim { "draft " (reply.draft) ", in reply:" }
+                pre { (reply.new.body) }
+            }
+        }
+    }
+    @if !built.reactions.is_empty() {
+        h2.sec { "👍 on existing comments " span.dim { (built.reactions.len()) } }
+        @for reaction in &built.reactions {
+            div.rv {
+                (threads::thread_head(&reaction.thread, &built.head))
+                div { "👍 on " (threads::said(&reaction.comment)) }
+                div.dim {
+                    "in place of "
+                    @for (i, id) in reaction.drafts.iter().enumerate() {
+                        @if i > 0 { ", " }
+                        "draft " (id)
+                    }
+                }
+            }
         }
     }
     }
@@ -524,8 +800,10 @@ pub struct SubmitForm {
     pick: String,
 }
 
-/// Posts the review, if it's still exactly what the preview showed. One
-/// attempt: a failure is shown, never retried.
+/// Posts the review with its replies, then the thumbs-ups, if they're
+/// still exactly what the preview showed. Each request is sent once: a
+/// failure is shown, never retried. What GitHub took is marked posted as
+/// soon as it has it, so a submit after a failure sends only the rest.
 pub async fn submit(
     State(app): State<Shared>,
     Path(path): Path<RunPath>,
@@ -541,9 +819,7 @@ pub async fn submit(
     let back = format!("{}?run={}", pr_href(key), path.run);
     let sent = format!("{}:{}", path.run, form.payload);
     let built = match built {
-        Ok(built) if wire(&built.review)? == form.payload && !posted_before.contains(&sent) => {
-            built
-        }
+        Ok(built) if wire(&built)? == form.payload && !posted_before.contains(&sent) => built,
         _ => {
             let preview = format!(
                 "{}/runs/{}/preview?event={}",
@@ -572,89 +848,647 @@ pub async fn submit(
             return Ok((StatusCode::CONFLICT, page).into_response());
         }
     };
-    let posted = app.github.post_review(key, &built.review).await;
-    let content = match posted {
-        Ok(posted) => {
-            info!(url = %key.url(), review = %posted.html_url, "review posted");
-            posted_before.insert(sent);
-            let marked = app.store().mark_posted(&built.included);
-            if let Err(err) = &marked {
-                warn!(url = %key.url(), "marking drafts posted failed: {err:?}");
+    let mut marking = Vec::new();
+    if let Some(left) = &built.left {
+        match settle(&app, key, path.run, left).await {
+            Ok(Settled::Cleared) => {}
+            Ok(Settled::Submitted(done)) => {
+                posted_before.insert(sent);
+                let content = submitted_after_all(&pr, left, &done, &back, path.run);
+                let page = result_page(&app, key, "Posted earlier", &content);
+                return Ok((StatusCode::CONFLICT, page).into_response());
             }
-            posted_card(&pr, &built, &posted.html_url, marked.err(), &back)
+            Err(failure) => {
+                let content = review_failed(&pr, &built, &failure, &back);
+                let page = result_page(&app, key, "Not posted", &content);
+                return Ok((StatusCode::BAD_GATEWAY, page).into_response());
+            }
         }
-        Err(err) => {
-            warn!(url = %key.url(), "posting the review failed: {err}");
-            // Plain text: the report's `Debug` carries terminal colours and
-            // a backtrace hint.
-            let why = match &err {
-                ApiError::Other(report) => format!("{report:#}"),
-                other => other.to_string(),
-            };
-            let content = result_card(
-                &pr,
-                "Posting failed",
-                html! {
-                    pre.error { (why) }
-                    p.note {
-                        "Nothing was marked posted, and it won't be retried. If the failure "
-                        "came after GitHub took the request, the review may be there "
-                        "anyway: " a href=(key.url()) { "check the PR" }
-                        " before you submit again."
-                    }
-                },
-                html! {},
-                (&back, "Back to the drafts"),
-                Tone::Failed,
-            );
-            let page = result_page(&app, key, "Not posted", &content);
-            return Ok((StatusCode::BAD_GATEWAY, page).into_response());
+    }
+    let mut posted = None;
+    let (mut copies, mut copies_marked) = (Vec::new(), true);
+    if let Some(review) = &built.review {
+        match post_review(&app, key, path.run, review, &built).await {
+            Ok(review) => {
+                info!(url = %key.url(), review = %review.html_url, "review posted");
+                posted_before.insert(sent.clone());
+                let failed;
+                (copies, failed) = mark_review(&app, key, path.run, &built);
+                copies_marked = failed.is_none();
+                marking.extend(failed);
+                posted = Some(review);
+            }
+            Err(failure) => {
+                let content = review_failed(&pr, &built, &failure, &back);
+                let page = result_page(&app, key, "Not posted", &content);
+                return Ok((StatusCode::BAD_GATEWAY, page).into_response());
+            }
         }
+    }
+    // After the review, so a failure here leaves it posted and marked, and
+    // a submit again sends only the thumbs-ups left.
+    let (reacted, failed) = react(&app, key, &built.reactions, &mut marking).await;
+    if failed.is_none() {
+        posted_before.insert(sent);
+    } else {
+        info!(url = %key.url(), reacted, "thumbs-ups added before one failed");
+    }
+    let outcome = Outcome {
+        posted: posted.as_ref().map(|p: &PendingReview| p.html_url.as_str()),
+        reacted,
+        failed: failed.as_ref().map(|(r, err)| (*r, plain(err))),
+        copies,
+        copies_marked,
+        marking,
     };
-    Ok(result_page(&app, key, "Posted", &content).into_response())
+    let status = if outcome.failed.is_some() {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::OK
+    };
+    let content = posted_card(&pr, &built, &outcome, &back, path.run);
+    let page = result_page(&app, key, outcome.heading(), &content);
+    Ok((status, page).into_response())
 }
 
-/// What a review GitHub took looks like: the card, with a link to it
-/// there, and a warning if its drafts couldn't be marked posted.
-fn posted_card(
-    pr: &PrPage,
+/// How far a review got, when GitHub didn't take all of it.
+#[derive(Debug)]
+enum Failure {
+    /// Checking the review an earlier submit left pending failed.
+    Check(ApiError),
+    /// Deleting the review an earlier submit left pending failed.
+    Discard(ApiError),
+    /// GitHub didn't create the pending review.
+    NotCreated(ApiError),
+    /// The pending review couldn't be recorded here, so it was deleted
+    /// rather than risk not knowing about it; `discarded` says how that went.
+    Unrecorded {
+        err: color_eyre::Report,
+        discarded: Result<(), ApiError>,
+    },
+    /// Reply `index` failed; `discarded` says how deleting the pending
+    /// review went.
+    Reply {
+        index: usize,
+        err: ApiError,
+        discarded: Result<(), ApiError>,
+    },
+    /// Submitting the pending review failed: it may be submitted anyway.
+    NotSubmitted(ApiError),
+}
+
+/// How [`settle`] left the review an earlier submit left pending.
+enum Settled {
+    /// Deleted, or already gone, and forgotten: post afresh.
+    Cleared,
+    /// GitHub had submitted it after all, and nothing else is sent.
+    Submitted(Submitted),
+}
+
+/// What settling a review GitHub had submitted after all did.
+struct Submitted {
+    /// Its drafts' copies in the PR's runs.
+    copies: Copies,
+    /// Why they couldn't be found or marked, if they couldn't. The record
+    /// is kept, so the next submit, after a restart too, finds it again.
+    marking: Option<color_eyre::Report>,
+}
+
+/// Settles `left`, the review an earlier submit on the PR left pending,
+/// before run `run` posts anything.
+async fn settle(
+    app: &App,
+    key: &PrKey,
+    run: i64,
+    left: &PendingReview,
+) -> Result<Settled, Failure> {
+    let state = app
+        .github
+        .review_state(key, &left.node_id)
+        .await
+        .map_err(Failure::Check)?;
+    match state {
+        ReviewStatus::Submitted => {
+            info!(url = %key.url(), review = %left.html_url, "the review left pending was submitted");
+            let ids: Vec<i64> = left.drafts.iter().map(|(id, _)| *id).collect();
+            let (copies, marking) = mark_with_copies(app, key, run, &left.drafts, &ids);
+            if marking.is_none() {
+                forget(app, key);
+            }
+            return Ok(Settled::Submitted(Submitted { copies, marking }));
+        }
+        ReviewStatus::Pending => {
+            app.github
+                .delete_review(key, &left.node_id)
+                .await
+                .map_err(Failure::Discard)?;
+        }
+        ReviewStatus::Gone => {}
+    }
+    forget(app, key);
+    Ok(Settled::Cleared)
+}
+
+/// Drafts of a PR's runs related to ones a review posted.
+#[derive(Default)]
+struct Copies {
+    /// Word for word ones it posted, kind and anchor too, so they're
+    /// marked posted as well: each with its run.
+    copies: Vec<(i64, i64)>,
+    /// The submitted run's that share revisions with ones it posted but
+    /// aren't word for word those, which may repeat them, left as they are
+    /// for you to check.
+    revised: Vec<i64>,
+}
+
+/// Marks the drafts of `run`'s review, which GitHub just took, posted with
+/// their copies, and forgets its pending review. If marking fails, it's
+/// kept, for the next submit, after a restart too, to find submitted and
+/// mark. The copies marked, as `(run, draft)`, and why marking failed.
+fn mark_review(
+    app: &App,
+    key: &PrKey,
+    run: i64,
     built: &Built,
-    html_url: &str,
-    marked: Option<color_eyre::Report>,
+) -> (Vec<(i64, i64)>, Option<color_eyre::Report>) {
+    let (found, failed) = mark_with_copies(app, key, run, &built.bodies, &built.included);
+    if failed.is_none() {
+        forget(app, key);
+    }
+    (found.copies, failed)
+}
+
+/// Marks `ids`, the drafts GitHub took, posted, with their copies in the
+/// PR's runs (see [`copies_of`]), so a submit of any of them doesn't post
+/// them again. `posted` has what each draft went out as. Returns the
+/// copies, and why finding or marking them failed, if it did.
+fn mark_with_copies(
+    app: &App,
+    key: &PrKey,
+    run: i64,
+    posted: &[(i64, String)],
+    ids: &[i64],
+) -> (Copies, Option<color_eyre::Report>) {
+    let (found, failed) = match copies_of(app, key, run, posted) {
+        Ok(found) => (found, None),
+        Err(err) => {
+            warn!(url = %key.url(), "finding copies of posted drafts failed: {err:?}");
+            (Copies::default(), Some(err))
+        }
+    };
+    let mut ids = ids.to_vec();
+    ids.extend(found.copies.iter().map(|(_, id)| *id));
+    let marking = mark(app, key, &ids).or(failed);
+    (found, marking)
+}
+
+/// The copies GitHub has of `posted`, drafts with the bodies they went out
+/// with, in `key`'s runs: drafts that share a line of revisions with one
+/// (through `based_on`: revised from it, it from them, or both from one
+/// draft), and are word for word what it posted, with the same kind and
+/// anchor. Each comes with its run. Also, `run`'s drafts that share one
+/// but aren't copies, which may repeat what was posted.
+fn copies_of(
+    app: &App,
+    key: &PrKey,
+    run: i64,
+    posted: &[(i64, String)],
+) -> color_eyre::Result<Copies> {
+    let rows: HashMap<i64, DraftRow> = {
+        let store = app.store();
+        let mut rows = HashMap::new();
+        for review in store.review_runs(key)? {
+            rows.extend(store.draft_rows(review.id)?.into_iter().map(|d| (d.id, d)));
+        }
+        rows
+    };
+    let taken = app.taken().clone();
+    // A draft and what it's revised from, up the chain a run at a time.
+    let lineage = |id: i64| {
+        let mut chain = HashSet::new();
+        let mut from = Some(id);
+        while let Some(id) = from.filter(|_| chain.len() < 64) {
+            if !chain.insert(id) {
+                break;
+            }
+            from = rows.get(&id).and_then(|d| d.based_on);
+        }
+        chain
+    };
+    let posted: Vec<(&DraftRow, &String, HashSet<i64>)> = posted
+        .iter()
+        .filter_map(|(id, body)| Some((rows.get(id)?, body, lineage(*id))))
+        .collect();
+    let mut drafts: Vec<&DraftRow> = rows
+        .values()
+        .filter(|d| {
+            d.status != "posted"
+                && !taken.contains(&d.id)
+                && !posted.iter().any(|(p, ..)| p.id == d.id)
+        })
+        .collect();
+    drafts.sort_unstable_by_key(|d| d.id);
+    let (mut copies, mut revised) = (Vec::new(), Vec::new());
+    for draft in drafts {
+        let chain = lineage(draft.id);
+        let mut related = posted
+            .iter()
+            .filter(|(.., theirs)| !theirs.is_disjoint(&chain))
+            .peekable();
+        if related.peek().is_none() {
+            continue;
+        }
+        let copy = related.any(|(base, body, _)| {
+            base.kind == draft.kind
+                && (&base.path, base.line, base.start_line, &base.side)
+                    == (&draft.path, draft.line, draft.start_line, &draft.side)
+                && body.as_str() == draft.body()
+        });
+        if copy {
+            copies.push((draft.run_id, draft.id));
+        } else if draft.run_id == run {
+            revised.push(draft.id);
+        }
+    }
+    Ok(Copies { copies, revised })
+}
+
+/// Posts `review` with `built`'s replies: it's created pending, recorded
+/// here, given its replies and submitted. Until the submit, nothing in it
+/// is visible to anyone else, and the record makes the next submit check it
+/// first, so a submit that failed after GitHub took it isn't posted twice.
+/// The record stays until the caller has marked its drafts posted.
+async fn post_review(
+    app: &App,
+    key: &PrKey,
+    run: i64,
+    review: &NewReview,
+    built: &Built,
+) -> Result<PendingReview, Failure> {
+    let github = &app.github;
+    let created = github
+        .create_pending_review(key, review)
+        .await
+        .map_err(Failure::NotCreated)?;
+    let pending = PendingReview {
+        node_id: created.node_id,
+        html_url: created.html_url,
+        run,
+        drafts: built.bodies.clone(),
+    };
+    let recorded = app.store().record_pending_review(key, &pending);
+    if let Err(err) = recorded {
+        let discarded = github.delete_review(key, &pending.node_id).await;
+        return Err(Failure::Unrecorded { err, discarded });
+    }
+    for (index, reply) in built.replies.iter().enumerate() {
+        if let Err(err) = github.add_reply(key, &pending.node_id, &reply.new).await {
+            let discarded = github.delete_review(key, &pending.node_id).await;
+            if discarded.is_ok() {
+                forget(app, key);
+            }
+            return Err(Failure::Reply {
+                index,
+                err,
+                discarded,
+            });
+        }
+    }
+    github
+        .submit_review(key, &pending.node_id, review)
+        .await
+        .map_err(Failure::NotSubmitted)?;
+    Ok(pending)
+}
+
+/// Forgets `run`'s pending review. If that fails, the next submit checks
+/// it again, which finds it submitted or gone; nothing is sent twice.
+fn forget(app: &App, key: &PrKey) {
+    if let Err(err) = app.store().clear_pending_review(key) {
+        warn!(url = %key.url(), "forgetting the pending review failed: {err:?}");
+    }
+}
+
+/// Sends `reactions` in turn, marking each one's drafts posted as GitHub
+/// takes it, until one fails: how many were sent, and the one that failed.
+async fn react<'a>(
+    app: &App,
+    key: &PrKey,
+    reactions: &'a [Reaction],
+    marking: &mut Vec<color_eyre::Report>,
+) -> (usize, Option<(&'a Reaction, ApiError)>) {
+    let mut reacted = 0;
+    for reaction in reactions {
+        // Checked first, so one whose answer was lost isn't sent again.
+        let sent = match app.github.has_thumbs_up(&reaction.new).await {
+            Ok(true) => Ok(()),
+            Ok(false) => app.github.add_reaction(&reaction.new).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = sent {
+            warn!(url = %key.url(), "adding a thumbs-up failed: {err}");
+            return (reacted, Some((reaction, err)));
+        }
+        reacted += 1;
+        marking.extend(mark(app, key, &reaction.drafts));
+    }
+    (reacted, None)
+}
+
+/// Marks `ids` posted, returning the failure, if any, to show. If the
+/// store can't, they're remembered as posted until `serve` restarts.
+fn mark(app: &App, key: &PrKey, ids: &[i64]) -> Option<color_eyre::Report> {
+    let marked = app.store().mark_posted(ids);
+    if let Err(err) = &marked {
+        warn!(url = %key.url(), "marking drafts posted failed: {err:?}");
+        app.taken().extend(ids);
+    }
+    marked.err()
+}
+
+/// What a submit that found the earlier attempt's review submitted after
+/// all says: nothing else was sent, and the rest needs a new preview.
+fn submitted_after_all(
+    pr: &PrPage,
+    left: &PendingReview,
+    done: &Submitted,
     back: &str,
+    run: i64,
 ) -> Markup {
+    let marking = done.marking.as_ref();
+    let list = |ids: &[i64]| {
+        html! {
+            @for (i, id) in ids.iter().enumerate() {
+                @if i > 0 { ", " }
+                a href={ (back) "#draft-" (id) } { "draft " (id) }
+            }
+        }
+    };
+    let preview = format!(
+        "{}/runs/{run}/preview?event={}",
+        pr_href(&pr.key),
+        ReviewEvent::Comment.as_str()
+    );
+    result_card(
+        pr,
+        "Posted earlier",
+        html! {
+            p.note {
+                "The review an earlier submit left was submitted after all, so its drafts "
+                "are now marked posted and nothing else was sent."
+                @if left.run != run { " It was from " a href={ (pr_href(&pr.key)) "?run=" (left.run) } { "another run" } "." }
+            }
+            (copies_note(&pr.key, &done.copies.copies, marking.is_none()))
+            @if !done.copies.revised.is_empty() {
+                p.warn {
+                    "This run's " (list(&done.copies.revised)) " are revised from drafts it posted, "
+                    "and may repeat them: check them against "
+                    a href=(left.html_url) { "the posted review" } " before you submit again."
+                }
+            }
+            p.note { "Preview again for anything left." }
+            @if let Some(err) = marking {
+                p.warn {
+                    "GitHub has it, but marking its drafts posted failed: " (err)
+                    ". Don't submit them again."
+                }
+            }
+        },
+        html! {
+            a.btn.primary href=(preview) { "Preview the rest with Comment" }
+            @if left.html_url.starts_with("https://") {
+                a.btn href=(left.html_url) { "Open it on GitHub ↗" }
+            }
+        },
+        (back, "Back to the drafts"),
+        Tone::Ask,
+    )
+}
+
+/// An error as plain text: the report's `Debug` carries terminal colours
+/// and a backtrace hint.
+fn plain(err: &ApiError) -> String {
+    match err {
+        ApiError::Other(report) => format!("{report:#}"),
+        other => other.to_string(),
+    }
+}
+
+/// What a review GitHub didn't take says: how far it got, and what that
+/// leaves on GitHub. Nothing is marked posted.
+fn review_failed(pr: &PrPage, built: &Built, failure: &Failure, back: &str) -> Markup {
     let key = &pr.key;
-    let comments = built.review.comments.len();
+    let replies = built.replies.len();
+    // Whether the next submit finds it depends on whether it's recorded.
+    let discard_note = |discarded: &Result<(), ApiError>, recorded: bool| match discarded {
+        Ok(()) => html! { "The pending review was deleted, so nothing was posted." },
+        Err(err) => html! {
+            "Deleting the pending review failed too: " code { (plain(err)) } ". It's on "
+            a href=(key.url()) { "the PR" } ", visible only to you; "
+            @if recorded {
+                "the next submit checks it first and deletes it."
+            } @else {
+                "discard it there: GitHub takes only one pending review of yours per PR."
+            }
+        },
+    };
+    let (what, err, note) = match failure {
+        Failure::Check(err) => (
+            "checking the review left pending",
+            plain(err),
+            html! {
+                "An earlier submit left a review pending, and it couldn't be checked, so "
+                "nothing was sent: it may have been submitted after all."
+            },
+        ),
+        Failure::Discard(err) => (
+            "deleting the review left pending",
+            plain(err),
+            html! {
+                "An earlier submit left a review pending, visible only to you, and it "
+                "couldn't be deleted, so nothing was sent."
+            },
+        ),
+        Failure::NotCreated(err) => (
+            "creating the pending review",
+            plain(err),
+            html! {
+                "Nothing was posted. If GitHub created it anyway, it's pending on "
+                a href=(key.url()) { "the PR" } ", visible only to you: discard it there."
+            },
+        ),
+        Failure::Unrecorded { err, discarded } => (
+            "recording the pending review",
+            format!("{err:#}"),
+            html! {
+                "The review was created pending but couldn't be recorded here, so it isn't "
+                "submitted. " (discard_note(discarded, false))
+            },
+        ),
+        Failure::Reply {
+            index,
+            err,
+            discarded,
+        } => (
+            "adding a reply to the pending review",
+            plain(err),
+            html! { "Adding reply " (index + 1) " of " (replies) " failed. " (discard_note(discarded, true)) },
+        ),
+        Failure::NotSubmitted(err) => (
+            "submitting the pending review",
+            plain(err),
+            html! {
+                "Submitting the review failed, but GitHub may have taken it. The next submit "
+                "checks it first: if it was submitted, its drafts are marked posted and it "
+                "isn't sent again; if it's still pending, it's deleted and posted afresh."
+            },
+        ),
+    };
+    warn!(url = %key.url(), "{what} failed: {err}");
+    result_card(
+        pr,
+        "Posting failed",
+        html! {
+            pre.error { (err) }
+            p.note { (note) " Nothing was marked posted, and nothing is retried." }
+            @if !built.reactions.is_empty() {
+                p.note { "No 👍 were sent: they go after the review." }
+            }
+        },
+        html! {},
+        (back, "Back to the drafts"),
+        Tone::Failed,
+    )
+}
+
+/// How a submit went, once GitHub took something.
+struct Outcome<'a> {
+    /// The review's page, if there was one to post.
+    posted: Option<&'a str>,
+    /// Thumbs-ups added.
+    reacted: usize,
+    /// The thumbs-up that failed, and why; none after it were sent.
+    failed: Option<(&'a Reaction, String)>,
+    /// Word for word copies of the posted drafts in the PR's runs, as
+    /// `(run, draft)`, marked posted with them.
+    copies: Vec<(i64, i64)>,
+    /// Whether marking the review's drafts and `copies` posted worked.
+    copies_marked: bool,
+    /// Failures marking what GitHub took as posted.
+    marking: Vec<color_eyre::Report>,
+}
+
+impl Outcome<'_> {
+    /// "Not posted" when the only request, or the first of only
+    /// thumbs-ups, failed.
+    fn heading(&self) -> &'static str {
+        match (&self.failed, self.posted, self.reacted) {
+            (None, ..) => "Posted",
+            (Some(_), None, 0) => "Not posted",
+            (Some(_), ..) => "Partly posted",
+        }
+    }
+}
+
+/// The drafts that are word for word `copies` of posted ones, each linked
+/// through its own run, and whether they were `marked` posted with them.
+/// Nothing when there are none.
+fn copies_note(key: &PrKey, copies: &[(i64, i64)], marked: bool) -> Markup {
+    html! {
+        @if !copies.is_empty() {
+            p.note {
+                @for (i, (run, id)) in copies.iter().enumerate() {
+                    @if i > 0 { ", " }
+                    a href={ (pr_href(key)) "?run=" (run) "#draft-" (id) } { "draft " (id) }
+                }
+                @if copies.len() == 1 { " is" } @else { " are" }
+                " word for word what was posted, so "
+                @if marked {
+                    @if copies.len() == 1 { "it's" } @else { "they're" }
+                    " marked posted too."
+                } @else {
+                    "don't submit " @if copies.len() == 1 { "it" } @else { "them" } " either."
+                }
+            }
+        }
+    }
+}
+
+/// What a submit GitHub took looks like: the card, with a link to the
+/// review there, the thumbs-ups added and any that failed, with a way to
+/// preview the rest, and a warning if drafts couldn't be marked posted.
+fn posted_card(pr: &PrPage, built: &Built, outcome: &Outcome<'_>, back: &str, run: i64) -> Markup {
+    let preview_rest = format!(
+        "{}/runs/{run}/preview?event={}",
+        pr_href(&pr.key),
+        ReviewEvent::Comment.as_str()
+    );
+    let key = &pr.key;
+    let comments = built.review.as_ref().map_or(0, |r| r.comments.len());
+    let replies = built.replies.len();
     let meta = html! {
-        (pr_ref(key)) " · " (verdict(built.review.event)) " · "
-        (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
+        (pr_ref(key))
+        @if let Some(event) = built.event() {
+            " · " (verdict(event)) " · "
+            (comments) @if comments == 1 { " inline comment" } @else { " inline comments" }
+            @if replies > 0 { " · " (replies) @if replies == 1 { " reply" } @else { " replies" } }
+        }
+        @if outcome.reacted > 0 { " · " (outcome.reacted) " 👍" }
     };
     let extra = html! {
-        @if let Some(err) = marked {
+        (copies_note(key, &outcome.copies, outcome.copies_marked))
+        @if let Some((reaction, why)) = &outcome.failed {
             p.warn {
-                "GitHub has the review, but marking its drafts posted failed: " (err)
+                "The 👍 on " (reaction.comment.author) "'s comment failed"
+                @let left = built.reactions.len() - outcome.reacted;
+                @if left > 1 { ", so it and the " (left - 1) " after it weren't sent" }
+                ": "
+            }
+            pre.error { (why) }
+            p.note {
+                "Everything GitHub took is marked posted. To send the rest, preview again "
+                "with Comment, which sends only what's left: Approve would post a second "
+                "review, and Request changes needs one. A 👍 the comment already has "
+                "from you isn't sent again."
+            }
+        }
+        @for err in &outcome.marking {
+            p.warn {
+                "GitHub has it, but marking its drafts posted failed: " (err)
                 ". Don't submit them again."
             }
         }
     };
     let go = html! {
+        @if outcome.failed.is_some() {
+            // Comment: an approval would post a second review.
+            a.btn.primary href=(preview_rest) { "Preview the rest with Comment" }
+        }
         // It's GitHub's to say, but only a web link is a link.
-        @if html_url.starts_with("https://") {
-            a.btn.primary href=(html_url) { "Open it on GitHub ↗" }
-        } @else {
-            code { (html_url) }
+        @match outcome.posted {
+            Some(url) if url.starts_with("https://") => {
+                a.btn.primary href=(url) { "Open it on GitHub ↗" }
+            }
+            Some(url) => code { (url) },
+            None => a.btn.primary href=(key.url()) { "Open the PR on GitHub ↗" },
         }
     };
+    let tone = if outcome.failed.is_some() {
+        Tone::Failed
+    } else {
+        Tone::Done
+    };
+    let heading = outcome.heading();
     page::card(&Card {
         kind: "Submit review",
-        heading: html! { "Posted" },
+        heading: html! { (heading) },
         title: &pr.title,
         meta,
         extra,
         cost: None,
         go,
         back: (back, "Back to the PR"),
-        tone: Tone::Done,
+        tone,
     })
 }
 
@@ -725,6 +1559,7 @@ mod tests {
             based_on: None,
             status: "accepted".into(),
             unanchored: true,
+            choice: None,
         }
     }
 

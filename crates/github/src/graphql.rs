@@ -12,7 +12,10 @@ use sanic_core::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 
-use crate::client::{ApiError, Client, next_link};
+use crate::{
+    client::{ApiError, Client, next_link},
+    review,
+};
 
 /// Connections fetch the newest items (`last:`), since new comments are what
 /// triggers care about.
@@ -73,6 +76,12 @@ pub(crate) const QUERIES: &[(&str, &str)] = &[
     ("PR_QUERY", PR_QUERY),
     ("SEARCH_QUERY", SEARCH_QUERY),
     ("VIEWER_QUERY", VIEWER_QUERY),
+    ("REPLY_MUTATION", review::REPLY_MUTATION),
+    ("SUBMIT_REVIEW_MUTATION", review::SUBMIT_REVIEW_MUTATION),
+    ("DELETE_REVIEW_MUTATION", review::DELETE_REVIEW_MUTATION),
+    ("REVIEW_STATE_QUERY", review::REVIEW_STATE_QUERY),
+    ("REACTION_MUTATION", review::REACTION_MUTATION),
+    ("THUMBS_UP_QUERY", review::THUMBS_UP_QUERY),
 ];
 
 const SEARCH_QUERY: &str = r"
@@ -113,6 +122,14 @@ impl Client {
         let req = self
             .post(&self.url("/graphql"))
             .json(&Request { query, variables });
+        self.graphql_sent(req, what).await
+    }
+
+    async fn graphql_sent<T: DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<Response<T>, ApiError> {
         let resp: Response<T> = self
             .send(req, what)
             .await?
@@ -131,7 +148,7 @@ impl Client {
         Ok(resp)
     }
 
-    async fn graphql<V: Serialize, T: DeserializeOwned>(
+    pub(crate) async fn graphql<V: Serialize, T: DeserializeOwned>(
         &self,
         query: &str,
         variables: V,
@@ -143,6 +160,52 @@ impl Client {
         }
         resp.data
             .ok_or_else(|| eyre!("GraphQL returned no data for {what}").into())
+    }
+
+    /// Sends `mutation`, a write, once, giving up after
+    /// [`review::POST_TIMEOUT`]. Any GraphQL error is a failure.
+    pub(crate) async fn mutate<V: Serialize, T: DeserializeOwned>(
+        &self,
+        mutation: &str,
+        variables: V,
+        what: &str,
+    ) -> Result<T, ApiError> {
+        let req = self
+            .post(&self.url("/graphql"))
+            .json(&Request {
+                query: mutation,
+                variables,
+            })
+            .timeout(review::POST_TIMEOUT);
+        let resp: Response<T> = self.graphql_sent(req, what).await?;
+        if !resp.errors.is_empty() {
+            return Err(eyre!("GraphQL errors for {what}: {}", messages(&resp.errors)).into());
+        }
+        resp.data
+            .ok_or_else(|| eyre!("GraphQL returned no data for {what}").into())
+    }
+
+    /// `query`'s data, or `None` when GitHub says what it names doesn't
+    /// exist.
+    pub(crate) async fn graphql_or_missing<V: Serialize, T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: V,
+        what: &str,
+    ) -> Result<Option<T>, ApiError> {
+        let resp: Response<T> = self.graphql_raw(query, variables, what).await?;
+        let missing = resp
+            .errors
+            .iter()
+            .all(|e| e.kind.as_deref() == Some("NOT_FOUND"));
+        if !resp.errors.is_empty() && !missing {
+            return Err(eyre!("GraphQL errors for {what}: {}", messages(&resp.errors)).into());
+        }
+        Ok(if resp.errors.is_empty() {
+            resp.data
+        } else {
+            None
+        })
     }
 
     /// The authenticated user's login.

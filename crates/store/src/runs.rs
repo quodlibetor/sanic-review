@@ -455,9 +455,10 @@ impl Store {
                 &format!(
                     "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
                                          confidence, original_body, edited_body, status,
-                                         unanchored, based_on, created_at, updated_at)
+                                         unanchored, based_on, thread_choice, thread_id,
+                                         react_to, created_at, updated_at)
                      VALUES (?1, 'comment', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                             {NOW}, {NOW})"
+                             ?13, ?14, ?15, {NOW}, {NOW})"
                 ),
                 params![
                     id,
@@ -471,7 +472,10 @@ impl Store {
                     stored.edited_body,
                     stored.status,
                     draft.unanchored,
-                    stored.based_on
+                    stored.based_on,
+                    stored.choice.0,
+                    stored.choice.1,
+                    stored.choice.2
                 ],
             )?;
         }
@@ -873,8 +877,13 @@ struct Base {
     original_body: String,
     edited_body: Option<String>,
     status: String,
+    /// Its thread choice's columns, as stored.
+    choice: Choice,
     shown: Option<String>,
 }
+
+/// A draft's `thread_choice`, `thread_id` and `react_to`.
+type Choice = (Option<String>, Option<String>, Option<String>);
 
 impl Base {
     /// The revised run's draft `id`, if it is one.
@@ -887,7 +896,8 @@ impl Base {
             .map(|d| d.text.clone());
         Ok(tx
             .query_row(
-                "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status
+                "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status,
+                        thread_choice, thread_id, react_to
                  FROM drafts WHERE id = ?1 AND run_id = ?2",
                 params![id, revision.revises],
                 |row| {
@@ -898,6 +908,7 @@ impl Base {
                         original_body: row.get(6)?,
                         edited_body: row.get(7)?,
                         status: row.get(8)?,
+                        choice: (row.get(9)?, row.get(10)?, row.get(11)?),
                         shown,
                     })
                 },
@@ -913,15 +924,16 @@ impl Base {
     }
 }
 
-/// How a draft is stored: its text, your edit, its status and what it's
-/// based on. A revised draft that's word for word its base (as it stands,
-/// or as the agent was shown it), at the same anchor, keeps the base's edit
-/// and status as they stand, unless an earlier draft
-/// already kept them (`kept`); any other is pending.
+/// How a draft is stored: its text, your edit, its status and thread
+/// choice, and what it's based on. A revised draft that's word for word its
+/// base (as it stands, or as the agent was shown it), at the same anchor,
+/// keeps the base's edit, status and choice as they stand, unless an
+/// earlier draft already kept them (`kept`); any other is pending.
 struct Stored {
     original_body: String,
     edited_body: Option<String>,
     status: String,
+    choice: Choice,
     based_on: Option<i64>,
 }
 
@@ -944,6 +956,7 @@ impl Stored {
                     original_body: base.original_body,
                     edited_body: base.edited_body,
                     status: base.status,
+                    choice: base.choice,
                     based_on: Some(base.id),
                 }
             }
@@ -952,6 +965,7 @@ impl Stored {
                 original_body: body.to_owned(),
                 edited_body: None,
                 status: "pending".into(),
+                choice: (None, None, None),
                 based_on: base.filter(|b| b.kind == kind).map(|b| b.id),
             },
         }
@@ -1597,6 +1611,56 @@ mod tests {
             before,
             ["pending", "accepted", "accepted", "rejected", "pending"]
         );
+    }
+
+    #[test]
+    fn a_revision_keeps_the_thread_choice_of_a_draft_it_keeps() {
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        let original = ReviewResult {
+            comments: vec![comment("A", 1), comment("B", 2)],
+            ..result()
+        };
+        store.finish_review(source.id, &original).unwrap();
+        let ids: Vec<i64> = store
+            .drafts(source.id)
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        // Both are thumbs-ups on the snapshot's thread.
+        let react = crate::ThreadChoice::React {
+            thread: "t1".into(),
+            comment: "c1".into(),
+        };
+        for id in &ids[1..] {
+            assert!(store.choose_thread(*id, &react).unwrap());
+        }
+        let Regeneration::Queued(run) =
+            store.queue_regeneration(source.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        let revised = ReviewResult {
+            comments: vec![comment("A", 1), comment("B, reworded", 2)],
+            ..result()
+        };
+        let basis = Basis {
+            summary: None,
+            comments: vec![Some(ids[1]), Some(ids[2])],
+        };
+        store
+            .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
+            .unwrap();
+        let choices: Vec<_> = store
+            .draft_rows(run.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.choice)
+            .collect();
+        // Kept whole, A keeps it; B changed, so it's pending with none.
+        assert_eq!(choices, [None, Some(react), None]);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{any, body_json, method, path},
+    matchers::{any, body_json, body_partial_json, body_string_contains, method, path},
 };
 
 use crate::{Context, Control, Dashboard};
@@ -614,6 +614,7 @@ async fn state_changes_need_the_token_and_the_dashboards_own_origin() {
         f.submit_uri(),
         "/pr/org/repo/8/review-now".into(),
         "/pr/org/repo/7/archive".into(),
+        format!("/drafts/{}/thread", f.drafts[1]),
     ] {
         refused(f.send(form(&uri).body(Body::empty()).unwrap()).await);
     }
@@ -684,20 +685,11 @@ async fn nothing_is_posted_until_you_confirm_the_previewed_payload() {
             { "path": "src/lib.rs", "body": "Why `m`?", "line": 3, "side": "RIGHT" },
         ],
     });
-    Mock::given(method("POST"))
-        .and(path("/repos/org/repo/pulls/7/reviews"))
-        .and(body_json(&expected))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 5,
-            "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-5",
-        })))
-        .expect(1)
-        .mount(&f.github)
-        .await;
+    takes_review(&f, &expected).await;
     let payload = hidden_value(&preview.body, "payload");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
-        expected
+        json!({ "left": null, "review": expected, "replies": [], "reactions": [] })
     );
     let posted = f
         .post(
@@ -787,7 +779,7 @@ async fn githubs_refusal_is_shown_and_not_retried() {
         "{}",
         reply.body
     );
-    assert!(reply.body.contains("won't be retried"), "{}", reply.body);
+    assert!(reply.body.contains("nothing is retried"), "{}", reply.body);
     for i in 0..3 {
         assert_eq!(f.status(i), "accepted");
     }
@@ -806,17 +798,9 @@ async fn nothing_accepted_means_nothing_to_submit_except_an_approval() {
     let expected = json!({ "commit_id": "head7", "body": "", "event": "APPROVE", "comments": [] });
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
-        expected
+        json!({ "left": null, "review": expected, "replies": [], "reactions": [] })
     );
-    Mock::given(method("POST"))
-        .and(body_json(&expected))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 6,
-            "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-6",
-        })))
-        .expect(1)
-        .mount(&f.github)
-        .await;
+    takes_review(&f, &expected).await;
     // Approve in a URL alone isn't picked: only the PR page's verdict
     // form, a post, hands out a pick.
     let unpicked = f.get(&f.preview_uri("APPROVE")).await;
@@ -1792,4 +1776,701 @@ fn card_of_draft(html: &str, id: i64) -> &str {
     let start = html[..start].rfind("<article").unwrap();
     let end = start + html[start..].find("</article>").unwrap() + "</article>".len();
     &html[start..end]
+}
+
+/// Posts draft `i` in `thread`, as the page's thread form does: `react`
+/// on `comment`, or `reply`.
+async fn choose(f: &Fixture, i: usize, choice: &str, thread: &str, comment: &str) -> Reply {
+    let uri = format!("/drafts/{}/thread", f.drafts[i]);
+    f.post(
+        &uri,
+        &[("choice", choice), ("thread", thread), ("comment", comment)],
+    )
+    .await
+}
+
+fn accept(f: &Fixture, i: usize) -> impl Future<Output = Reply> + '_ {
+    let uri = format!("/drafts/{}/status", f.drafts[i]);
+    async move { f.post(&uri, &[("status", "accepted")]).await }
+}
+
+/// A GraphQL mutation named `name` with `variables`, answered `data`.
+fn mutation(name: &str, variables: &serde_json::Value) -> wiremock::MockBuilder {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(name))
+        .and(body_partial_json(json!({ "variables": variables })))
+}
+
+fn data(data: &serde_json::Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+}
+
+fn reacted() -> ResponseTemplate {
+    data(&json!({ "addReaction": { "reaction": { "content": "THUMBS_UP" } } }))
+}
+
+#[tokio::test]
+async fn an_overlapping_draft_offers_a_thumbs_up_a_reply_or_posting_separately() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    let card = |page: &str| card_of_draft(page, f.drafts[1]).to_owned();
+    let page = f.get("/pr/org/repo/7").await.body;
+    let pending = card(&page);
+    assert!(pending.contains(">Post separately<"), "{pending}");
+    assert_eq!(pending.matches(r#"<form class="choose""#).count(), 2);
+    assert!(pending.contains(r#"value="t-range-c1""#), "{pending}");
+    // Drafts that overlap nothing are accepted as ever.
+    assert!(card_of_draft(&page, f.drafts[2]).contains(">Accept<"));
+
+    // Each choice is saved on the draft, like accepting it, and htmx gets
+    // the card back.
+    let reply = choose(&f, 1, "react", "t-range", "t-range-c1").await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(f.status(1), "accepted");
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(
+        card(&page).contains("✓ 👍 on bob's comment instead"),
+        "{}",
+        card(&page)
+    );
+    assert!(
+        card(&page).contains(r#"class="thread chosen""#),
+        "{}",
+        card(&page)
+    );
+    choose(&f, 1, "reply", "t-outdated", "").await;
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(card(&page).contains("✓ reply in dave"), "{}", card(&page));
+    accept(&f, 1).await;
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(
+        card(&page).contains("✓ posts separately"),
+        "{}",
+        card(&page)
+    );
+    // Posted separately, it's an inline comment as before.
+    accept(&f, 0).await;
+    let payload: serde_json::Value =
+        serde_json::from_str(&f.previewed_payload("COMMENT").await).unwrap();
+    assert_eq!(payload["review"]["comments"][0]["body"], "Why `m`?");
+    assert_eq!(payload["replies"], json!([]));
+    assert_eq!(payload["reactions"], json!([]));
+
+    // Not a thread of this PR, or no comment to react to.
+    for (choice, thread, comment) in [
+        ("reply", "elsewhere", ""),
+        ("react", "t-range", "t-other-c1"),
+        ("react", "t-range", ""),
+        ("vote", "t-range", ""),
+    ] {
+        let refused = choose(&f, 1, choice, thread, comment).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::CONFLICT,
+            "{choice} {thread} {comment}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_thumbs_up_is_sent_after_the_review_in_place_of_the_draft() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    accept(&f, 0).await;
+    choose(&f, 1, "react", "t-range", "t-range-c1").await;
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(
+        preview.contains("GraphQL addReaction (THUMBS_UP), unless you have, with"),
+        "{preview}"
+    );
+    assert!(preview.contains("4 of 4"), "{preview}");
+    let payload = hidden_value(&preview, "payload");
+
+    let review = json!({
+        "commit_id": "head7", "body": "Mostly fine.", "event": "COMMENT", "comments": [],
+    });
+    takes_review(&f, &review).await;
+    not_reacted(&f, "t-range-c1").await;
+    mutation("addReaction", &json!({ "subject": "t-range-c1" }))
+        .respond_with(reacted())
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert!(posted.body.contains("1 👍"), "{}", posted.body);
+    assert_eq!(f.status(0), "posted");
+    assert_eq!(f.status(1), "posted");
+}
+
+#[tokio::test]
+async fn replies_go_in_the_review_and_the_preview_shows_every_request() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    accept(&f, 0).await;
+    choose(&f, 1, "reply", "t-range", "").await;
+    // The store takes any thread of the PR; the page offers overlapping ones.
+    choose(&f, 2, "react", "t-outdated", "t-outdated-c1").await;
+    let preview = f.get(&f.preview_uri("COMMENT")).await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    let body = &preview.body;
+    let cols = &body
+        [body.find(r#"<div class="cols">"#).unwrap()..body.find("<form class=\"foot\"").unwrap()];
+    insta::assert_snapshot!(readable(&f, cols));
+    let payload = hidden_value(body, "payload");
+
+    let pending = json!({ "commit_id": "head7", "body": "Mostly fine.", "comments": [] });
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .and(body_json(&pending))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 5, "node_id": "PRR_5",
+            "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-5",
+        })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation(
+        "addPullRequestReviewThreadReply",
+        &json!({ "review": "PRR_5", "thread": "t-range", "body": "Why `m`?" }),
+    )
+    .respond_with(data(
+        &json!({ "addPullRequestReviewThreadReply": { "comment": { "id": "C" } } }),
+    ))
+    .expect(1)
+    .mount(&f.github)
+    .await;
+    mutation(
+        "submitPullRequestReview",
+        &json!({ "review": "PRR_5", "event": "COMMENT", "body": "Mostly fine." }),
+    )
+    .respond_with(data(
+        &json!({ "submitPullRequestReview": { "pullRequestReview": { "id": "PRR_5" } } }),
+    ))
+    .expect(1)
+    .mount(&f.github)
+    .await;
+    not_reacted(&f, "t-outdated-c1").await;
+    mutation("addReaction", &json!({ "subject": "t-outdated-c1" }))
+        .respond_with(reacted())
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert!(posted.body.contains("1 reply"), "{}", posted.body);
+    for i in 0..3 {
+        assert_eq!(f.status(i), "posted");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_reply_deletes_the_pending_review_and_marks_nothing() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    accept(&f, 0).await;
+    choose(&f, 1, "reply", "t-range", "").await;
+    let payload = f.previewed_payload("COMMENT").await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 5, "node_id": "PRR_5",
+            "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-5",
+        })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("addPullRequestReviewThreadReply", &json!({}))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": null, "errors": [{ "message": "thread is locked" }],
+        })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("deletePullRequestReview", &json!({ "review": "PRR_5" }))
+        .respond_with(data(
+            &json!({ "deletePullRequestReview": { "clientMutationId": null } }),
+        ))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("submitPullRequestReview", &json!({}))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    let reply = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{}", reply.body);
+    assert!(reply.body.contains("thread is locked"), "{}", reply.body);
+    assert!(
+        reply.body.contains("pending review was deleted"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(f.status(0), "accepted");
+    assert_eq!(f.status(1), "accepted");
+}
+
+#[tokio::test]
+async fn after_a_failed_thumbs_up_a_retry_sends_only_what_github_lacks() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    accept(&f, 0).await;
+    choose(&f, 1, "react", "t-range", "t-range-c1").await;
+    // The store takes any thread of the PR; the page offers overlapping ones.
+    choose(&f, 2, "react", "t-outdated", "t-outdated-c1").await;
+    let payload = f.previewed_payload("COMMENT").await;
+    // One review ever, and each thumbs-up once it's taken.
+    takes_review(
+        &f,
+        &json!({ "commit_id": "head7", "body": "Mostly fine.", "event": "COMMENT", "comments": [] }),
+    )
+    .await;
+    not_reacted(&f, "t-range-c1").await;
+    // Checked on the first try and the retry.
+    not_reacted(&f, "t-outdated-c1").await;
+    mutation("addReaction", &json!({ "subject": "t-range-c1" }))
+        .respond_with(reacted())
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("addReaction", &json!({ "subject": "t-outdated-c1" }))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let f = &f;
+    let confirm = async |payload: String| {
+        f.post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await
+    };
+    let partly = confirm(payload.clone()).await;
+    assert_eq!(partly.status, StatusCode::BAD_GATEWAY, "{}", partly.body);
+    assert!(partly.body.contains("Partly posted"), "{}", partly.body);
+    // The way on is a Comment preview: an approval would be a second review.
+    assert!(
+        partly
+            .body
+            .contains(&f.preview_uri("COMMENT").replace('&', "&amp;")),
+        "{}",
+        partly.body
+    );
+    assert!(
+        partly.body.contains("pullrequestreview-5"),
+        "{}",
+        partly.body
+    );
+    // What GitHub took is marked posted: the review and the first 👍.
+    assert_eq!(f.status(0), "posted");
+    assert_eq!(f.status(1), "posted");
+    assert_eq!(f.status(2), "accepted");
+
+    // The same confirm again sends nothing.
+    let again = confirm(payload).await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
+
+    // A new preview has only the second thumbs-up left, with no review.
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(preview.contains("NO REVIEW"), "{preview}");
+    let payload = hidden_value(&preview, "payload");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
+        json!({
+            "left": null, "review": null, "replies": [],
+            "reactions": [{ "comment_id": "t-outdated-c1" }],
+        })
+    );
+    mutation("addReaction", &json!({ "subject": "t-outdated-c1" }))
+        .respond_with(reacted())
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let done = confirm(payload).await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    assert_eq!(f.status(2), "posted");
+
+    // Requesting changes with only thumbs-ups isn't a review GitHub takes.
+    let f = fixture(false).await;
+    record_threads(&f);
+    choose(&f, 1, "react", "t-range", "t-range-c1").await;
+    let refused = f.get(&f.preview_uri("REQUEST_CHANGES")).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert!(
+        refused.body.contains("only thumbs-ups are accepted"),
+        "{}",
+        refused.body
+    );
+}
+
+/// GitHub taking `review`, a create-review body with its verdict, once:
+/// created pending as `PRR_5`, then submitted with the verdict.
+async fn takes_review(f: &Fixture, review: &serde_json::Value) {
+    let mut pending = review.clone();
+    let event = pending.as_object_mut().unwrap().remove("event").unwrap();
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .and(body_json(&pending))
+        .respond_with(created("PRR_5"))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation(
+        "submitPullRequestReview",
+        &json!({ "review": "PRR_5", "event": event, "body": review["body"] }),
+    )
+    .respond_with(submitted())
+    .expect(1)
+    .mount(&f.github)
+    .await;
+}
+
+/// GitHub's answer to creating pending review `node_id`.
+fn created(node_id: &str) -> ResponseTemplate {
+    let n = node_id.trim_start_matches("PRR_");
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": n.parse::<u64>().unwrap(),
+        "node_id": node_id,
+        "html_url": format!("https://github.com/org/repo/pull/7#pullrequestreview-{n}"),
+    }))
+}
+
+fn submitted() -> ResponseTemplate {
+    data(&json!({ "submitPullRequestReview": { "pullRequestReview": { "id": "PRR" } } }))
+}
+
+/// PR 7 with drafts `accepted`, after a submit whose last step, the
+/// submit of pending review `PRR_5`, failed.
+async fn submit_failed(accepted: &[usize]) -> Fixture {
+    let f = fixture(false).await;
+    for &i in accepted {
+        accept(&f, i).await;
+    }
+    let payload = f.previewed_payload("COMMENT").await;
+    let review = Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(created("PRR_5"))
+        .expect(1)
+        .mount_as_scoped(&f.github)
+        .await;
+    let submit = mutation("submitPullRequestReview", &json!({ "review": "PRR_5" }))
+        .respond_with(ResponseTemplate::new(502))
+        .expect(1)
+        .mount_as_scoped(&f.github)
+        .await;
+    let failed = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(failed.status, StatusCode::BAD_GATEWAY, "{}", failed.body);
+    assert!(failed.body.contains("checks it first"), "{}", failed.body);
+    assert_eq!(f.status(0), "accepted");
+    drop((review, submit));
+    f
+}
+
+/// The review state query for `node_id`, answered `state`.
+async fn review_is(f: &Fixture, node_id: &str, state: &str) {
+    mutation("node(id: $review)", &json!({ "review": node_id }))
+        .respond_with(data(&json!({ "node": { "state": state } })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+}
+
+#[tokio::test]
+async fn a_review_submitted_despite_an_error_is_found_and_not_posted_again() {
+    let f = submit_failed(&[0]).await;
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(
+        preview.contains("An earlier submit on this PR left a review pending."),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("GraphQL node (the review's state), with"),
+        "{preview}"
+    );
+    let payload = hidden_value(&preview, "payload");
+    // Nothing is created or submitted: GitHub has it.
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    review_is(&f, "PRR_5", "COMMENTED").await;
+    let found = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(found.status, StatusCode::CONFLICT, "{}", found.body);
+    assert!(found.body.contains("submitted after all"), "{}", found.body);
+    assert_eq!(f.status(0), "posted");
+    // And it's forgotten: the next preview has nothing to post.
+    assert_eq!(
+        f.get(&f.preview_uri("COMMENT")).await.status,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn a_review_left_pending_is_deleted_before_it_is_posted_afresh() {
+    let f = submit_failed(&[0]).await;
+    let payload = f.previewed_payload("COMMENT").await;
+    review_is(&f, "PRR_5", "PENDING").await;
+    mutation("deletePullRequestReview", &json!({ "review": "PRR_5" }))
+        .respond_with(data(
+            &json!({ "deletePullRequestReview": { "clientMutationId": null } }),
+        ))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(created("PRR_6"))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("submitPullRequestReview", &json!({ "review": "PRR_6" }))
+        .respond_with(submitted())
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert!(
+        posted.body.contains("pullrequestreview-6"),
+        "{}",
+        posted.body
+    );
+    assert_eq!(f.status(0), "posted");
+}
+
+/// GitHub saying you haven't given comment `id` a thumbs-up, however often
+/// it's asked.
+async fn not_reacted(f: &Fixture, id: &str) {
+    mutation("reactionGroups", &json!({ "subject": id }))
+        .respond_with(data(&json!({ "node": { "reactionGroups": [
+            { "content": "THUMBS_UP", "viewerHasReacted": false },
+        ] } })))
+        .mount(&f.github)
+        .await;
+}
+
+#[tokio::test]
+async fn a_thumbs_up_github_already_has_is_marked_posted_and_not_sent() {
+    let f = fixture(false).await;
+    record_threads(&f);
+    choose(&f, 1, "react", "t-range", "t-range-c1").await;
+    let payload = f.previewed_payload("COMMENT").await;
+    // As after a 👍 whose answer was lost: GitHub has it.
+    mutation("reactionGroups", &json!({ "subject": "t-range-c1" }))
+        .respond_with(data(&json!({ "node": { "reactionGroups": [
+            { "content": "THUMBS_UP", "viewerHasReacted": true },
+        ] } })))
+        .expect(1)
+        .mount(&f.github)
+        .await;
+    mutation("addReaction", &json!({}))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert_eq!(f.status(1), "posted");
+}
+
+/// A regeneration of `f`'s run, finished: a copy of its summary and its
+/// comment, still as they were decided, and the comment revised. Its
+/// drafts, in that order.
+fn regenerate(f: &Fixture) -> (i64, Vec<i64>) {
+    let mut store = f.dashboard.app.store();
+    let sanic_store::Regeneration::Queued(run) = store
+        .queue_regeneration(f.run, "Say more.", |_| false)
+        .unwrap()
+    else {
+        panic!("refused");
+    };
+    store.claim_run(run.id).unwrap();
+    let result = ReviewResult {
+        summary: "Mostly fine.".into(),
+        verdict: Verdict::Comment,
+        comments: vec![
+            comment("src/lib.rs", 3, Side::Right, "Why `m`?", false),
+            comment("src/lib.rs", 3, Side::Right, "Why `m`, really?", false),
+        ],
+        session_id: Some("sess-7".into()),
+        transcript_path: "t".into(),
+    };
+    let basis = Basis {
+        summary: Some(f.drafts[0]),
+        comments: vec![Some(f.drafts[1]), Some(f.drafts[1])],
+    };
+    let revision = run.revision.as_ref().unwrap();
+    store
+        .finish_revision(run.id, &result, revision, &basis)
+        .unwrap();
+    let ids = store
+        .draft_rows(run.id)
+        .unwrap()
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    (run.id, ids)
+}
+
+#[tokio::test]
+async fn a_regeneration_after_a_review_github_took_anyway_does_not_post_it_again() {
+    let f = submit_failed(&[0, 1]).await;
+    // Revising the run copies its accepted drafts, still accepted.
+    let (regeneration, ids) = regenerate(&f);
+    let status = |id: i64| {
+        let store = f.dashboard.app.store();
+        store.draft_row(id).unwrap().unwrap().status
+    };
+    assert_eq!(status(ids[0]), "accepted");
+    assert_eq!(status(ids[1]), "accepted");
+    assert_eq!(status(ids[2]), "pending");
+
+    // Its preview checks the review the first run left, first.
+    let uri = format!("/pr/org/repo/7/runs/{regeneration}/preview?event=COMMENT");
+    let preview = f.get(&uri).await.body;
+    assert!(
+        preview.contains("An earlier submit on this PR left a review pending."),
+        "{preview}"
+    );
+    let payload = hidden_value(&preview, "payload");
+    review_is(&f, "PRR_5", "COMMENTED").await;
+    Mock::given(method("POST"))
+        .and(path("/repos/org/repo/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&f.github)
+        .await;
+    let found = f
+        .post(
+            &format!("/pr/org/repo/7/runs/{regeneration}/submit"),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(found.status, StatusCode::CONFLICT, "{}", found.body);
+    assert!(found.body.contains("submitted after all"), "{}", found.body);
+    // The first run's drafts, and the copies of them, are posted; the one
+    // revised from a posted draft is left, named, for you to check.
+    assert_eq!(f.status(0), "posted");
+    assert_eq!(f.status(1), "posted");
+    assert_eq!(status(ids[0]), "posted");
+    assert_eq!(status(ids[1]), "posted");
+    assert_eq!(status(ids[2]), "pending");
+    assert!(
+        found.body.contains(&format!(
+            "draft {}</a> are revised from drafts it posted",
+            ids[2]
+        )),
+        "{}",
+        found.body
+    );
+}
+
+#[tokio::test]
+async fn a_review_github_took_anyway_marks_its_copies_in_a_regeneration_posted() {
+    let f = submit_failed(&[0, 1]).await;
+    let (_, ids) = regenerate(&f);
+    // The run the review is from is submitted again, not the regeneration.
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    let payload = hidden_value(&preview, "payload");
+    review_is(&f, "PRR_5", "COMMENTED").await;
+    let found = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(found.status, StatusCode::CONFLICT, "{}", found.body);
+    let status = |id: i64| {
+        let store = f.dashboard.app.store();
+        store.draft_row(id).unwrap().unwrap().status
+    };
+    // Submitting the regeneration can't post them again.
+    assert_eq!(status(ids[0]), "posted");
+    assert_eq!(status(ids[1]), "posted");
+    assert_eq!(status(ids[2]), "pending");
+}
+
+#[tokio::test]
+async fn a_posted_review_lists_the_copies_it_marks_posted_in_other_runs() {
+    let f = fixture(false).await;
+    accept(&f, 0).await;
+    accept(&f, 1).await;
+    let payload = f.previewed_payload("COMMENT").await;
+    // Regenerated before the post: its copies are accepted.
+    let (regeneration, ids) = regenerate(&f);
+    takes_review(
+        &f,
+        &json!({
+            "commit_id": "head7", "body": "Mostly fine.", "event": "COMMENT",
+            "comments": [{ "path": "src/lib.rs", "body": "Why `m`?", "line": 3, "side": "RIGHT" }],
+        }),
+    )
+    .await;
+    let posted = f
+        .post(
+            &f.submit_uri(),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    let card = card_of(&posted.body);
+    for id in &ids[..2] {
+        assert!(
+            card.contains(&format!(
+                r#"<a href="/pr/org/repo/7?run={regeneration}#draft-{id}">draft {id}</a>"#
+            )),
+            "{card}"
+        );
+    }
+    assert!(card.contains("are word for word what was posted"), "{card}");
+    // The revised one isn't a copy, so it isn't listed.
+    assert!(!card.contains(&format!("draft {}<", ids[2])), "{card}");
+    let status = |id: i64| {
+        let store = f.dashboard.app.store();
+        store.draft_row(id).unwrap().unwrap().status
+    };
+    assert_eq!(status(ids[0]), "posted");
+    assert_eq!(status(ids[1]), "posted");
+    assert_ne!(status(ids[2]), "posted");
 }
