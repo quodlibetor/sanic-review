@@ -46,6 +46,9 @@ pub struct ReviewRun {
     /// For a regeneration of one draft: that draft, and the run it's of.
     pub draft_id: Option<i64>,
     pub draft_run: Option<i64>,
+    /// How many comments of your pending review on GitHub its agent was
+    /// shown, when it was shown the review.
+    pub in_progress_comments: Option<u32>,
 }
 
 /// A stored draft with everything the dashboard shows and edits.
@@ -252,7 +255,8 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
                     source_run, instruction, draft_id,
-                    (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id)
+                    (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id),
+                    in_progress_comments
              FROM runs
              WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
@@ -273,6 +277,7 @@ impl Store {
                         instruction: row.get(8)?,
                         draft_id: row.get(9)?,
                         draft_run: row.get(10)?,
+                        in_progress_comments: row.get(11)?,
                     })
                 },
             )?
@@ -447,11 +452,20 @@ impl Store {
     }
 
     /// Forgets `key`'s pending review: it was submitted or deleted, or
-    /// GitHub answered the call that sent it.
+    /// GitHub answered the call that sent it. The last poll's copy of it,
+    /// if the poll saw it pending, goes too, so it isn't taken for yours.
     pub fn clear_pending_review(&self, key: &PrKey) -> Result<()> {
+        let repo = key.repo.to_string();
+        // First, while the pending review still says which it was.
+        self.conn.execute(
+            "DELETE FROM in_progress_reviews
+             WHERE repo = ?1 AND number = ?2 AND review_id IN (
+                 SELECT node_id FROM pending_reviews WHERE repo = ?1 AND number = ?2)",
+            params![repo, key.number],
+        )?;
         self.conn.execute(
             "DELETE FROM pending_reviews WHERE repo = ?1 AND number = ?2",
-            params![key.repo.to_string(), key.number],
+            params![repo, key.number],
         )?;
         Ok(())
     }
@@ -546,6 +560,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         }
     }
 

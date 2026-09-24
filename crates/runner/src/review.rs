@@ -242,10 +242,10 @@ impl ReviewRunner {
         let target = target(run)?;
         let brief = match (&run.revision, target) {
             (Some(revision), Some(target)) => {
-                prompt::draft_revision(&revision.instruction, target, &ctx.threads)
+                prompt::draft_revision(&revision.instruction, target, ctx)
             }
             (Some(revision), None) => {
-                prompt::revision(&revision.instruction, &revision.baseline, &ctx.threads)
+                prompt::revision(&revision.instruction, &revision.baseline, ctx)
             }
             (None, _) => prompt::brief(&run.request, ctx, &diff, &diff_path),
         };

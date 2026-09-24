@@ -373,6 +373,9 @@ impl Worker {
             }
         } else {
             info!(head = %req.head_sha, trigger = req.trigger.as_str(), "reviewing");
+            // The brief shows it your pending review's comments.
+            let shown = ctx.in_progress.as_ref().map_or(0, |r| r.comments.len());
+            self.store().record_in_progress_shown(run.id, shown)?;
         }
         self.runner.review(run, &ctx, &settings, cancel).await
     }
@@ -565,6 +568,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
@@ -695,6 +699,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
         let source = store.queue_review(&source.request).unwrap().unwrap();
@@ -735,13 +740,18 @@ mod tests {
         let before = store.run(source.id).unwrap().unwrap();
         assert_eq!(before.session_id.as_deref(), Some("sess-0"));
         assert_eq!(store.drafts(source.id).unwrap()[0].body, "Original.");
-        let sent: String = std::fs::read_dir(&fake)
+        let sent = briefs(&fake);
+        assert!(sent.contains("Be terser."), "{sent}");
+    }
+
+    /// Every brief the fake `claude` in `fake` was sent.
+    fn briefs(fake: &Path) -> String {
+        std::fs::read_dir(fake)
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| p.to_string_lossy().contains("stdin."))
             .map(|p| std::fs::read_to_string(p).unwrap())
-            .collect();
-        assert!(sent.contains("Be terser."), "{sent}");
+            .collect()
     }
 
     /// A fake `claude` in `fake` that hangs until killed when briefed on
@@ -815,6 +825,17 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: Some(sanic_core::pr::InProgressReview {
+                id: "PRR_1".into(),
+                comments: vec![sanic_core::pr::InProgressComment {
+                    id: "PRRC_1".into(),
+                    path: "lib.rs".into(),
+                    line: Some(1),
+                    start_line: None,
+                    outdated: false,
+                    body: "My own pending comment.".into(),
+                }],
+            }),
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
         let store = Arc::new(Mutex::new(store));
@@ -859,5 +880,10 @@ mod tests {
         assert!(!data.join(format!("worktrees/{}", old.id)).exists());
         assert_eq!(store.run(new.id).unwrap().unwrap().status, "succeeded");
         assert_eq!(store.drafts(new.id).unwrap()[0].body, "fine");
+        // Its brief had your pending review, and the run says so.
+        let runs = store.review_runs(&key).unwrap();
+        assert_eq!(runs[0].id, new.id);
+        assert_eq!(runs[0].in_progress_comments, Some(1));
+        assert!(briefs(&fake).contains("My own pending comment."));
     }
 }

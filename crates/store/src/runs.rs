@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use color_eyre::eyre::{Result, WrapErr, bail};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
-    pr::{Comment, Placement, PrKey, Reaction, Thread},
+    pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread},
     repo::RepoName,
     run::{
         BaselineDraft, Basis, DraftRevision, InlineComment, PrContext, QueuedRun, ReviewRequest,
@@ -309,9 +309,9 @@ impl Store {
             &format!(
                 "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
                                    base_sha, status, queued_at, source_run, instruction,
-                                   draft_id)
+                                   draft_id, in_progress_comments)
                  VALUES (?1, ?2, ?3, 'regenerate', ?4, ?5, ?6, ?7, 'queued', {NOW}, ?8, ?9,
-                         ?10)"
+                         ?10, (SELECT in_progress_comments FROM runs WHERE id = ?11))"
             ),
             params![
                 repo,
@@ -323,7 +323,8 @@ impl Store {
                 base_sha,
                 original,
                 instruction,
-                draft
+                draft,
+                source
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -847,7 +848,44 @@ impl Store {
             url,
             author,
             threads: self.threads(key)?,
+            in_progress: self.in_progress_review(key)?,
         }))
+    }
+
+    /// Your own review pending on GitHub for `key`, as last polled,
+    /// unless it's one a submit here left pending, which is the submit's
+    /// to settle rather than yours.
+    pub fn in_progress_review(&self, key: &PrKey) -> Result<Option<InProgressReview>> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT review_id, comments FROM in_progress_reviews i
+                 WHERE repo = ?1 AND number = ?2 AND NOT EXISTS (
+                     SELECT 1 FROM pending_reviews p
+                     WHERE p.repo = i.repo AND p.number = i.number
+                       AND p.node_id = i.review_id)",
+                params![key.repo.to_string(), key.number],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(id, comments)| {
+            Ok(InProgressReview {
+                id,
+                comments: serde_json::from_str(&comments)
+                    .wrap_err("reading your pending review's comments")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Records that run `id`'s agent was shown `comments` of your pending
+    /// review.
+    pub fn record_in_progress_shown(&self, id: i64, comments: usize) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET in_progress_comments = ?2 WHERE id = ?1",
+            params![id, i64::try_from(comments).unwrap_or(i64::MAX)],
+        )?;
+        Ok(())
     }
 
     /// `key`'s threads as last polled, each's comments oldest first.
@@ -1306,6 +1344,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         }
     }
 
@@ -2308,6 +2347,102 @@ mod tests {
         assert_eq!(store.recover_runs().unwrap(), [queued]);
         assert_eq!(status(&store, running.id), "superseded");
         assert_eq!(store.run_counts().unwrap().queued, 1);
+    }
+
+    #[test]
+    fn your_pending_review_is_kept_as_last_polled_and_counted_per_run() {
+        use sanic_core::pr::{InProgressComment, InProgressReview};
+
+        let mut store = store();
+        let key = snapshot().key;
+        assert_eq!(store.pr_context(&key).unwrap().unwrap().in_progress, None);
+        let yours = InProgressReview {
+            id: "PRR_1".into(),
+            comments: vec![InProgressComment {
+                id: "PRRC_1".into(),
+                path: "src/lib.rs".into(),
+                line: Some(3),
+                start_line: None,
+                outdated: false,
+                body: "Can this be null?".into(),
+            }],
+        };
+        let with = PrSnapshot {
+            in_progress: Some(yours.clone()),
+            ..snapshot()
+        };
+        store.record(&with, "me", "default", &[]).unwrap();
+        assert_eq!(
+            store.pr_context(&key).unwrap().unwrap().in_progress,
+            Some(yours)
+        );
+
+        // A review is shown it; a regeneration's session saw what it did.
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.record_in_progress_shown(run.id, 1).unwrap();
+        store.finish_review(run.id, &result()).unwrap();
+        let Regeneration::Queued(regeneration) =
+            store.queue_regeneration(run.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        let counts: Vec<(i64, Option<u32>)> = store
+            .review_runs(&key)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id, r.in_progress_comments))
+            .collect();
+        assert_eq!(counts, [(regeneration.id, Some(1)), (run.id, Some(1))]);
+
+        // Submitted or discarded on GitHub, it's gone at the next poll.
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        assert_eq!(store.in_progress_review(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn a_review_a_submit_here_left_pending_isnt_yours() {
+        use sanic_core::pr::InProgressReview;
+
+        use crate::{OnGithub, PendingReview};
+
+        let mut store = store();
+        let key = snapshot().key;
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        let polled = |id: &str| PrSnapshot {
+            in_progress: Some(InProgressReview {
+                id: id.into(),
+                comments: vec![],
+            }),
+            ..snapshot()
+        };
+        store
+            .record_pending_review(
+                &key,
+                &PendingReview {
+                    run: run.id,
+                    drafts: vec![],
+                    on_github: OnGithub::Pending {
+                        node_id: "PRR_ours".into(),
+                        html_url: "https://github.com/org/repo/pull/7".into(),
+                    },
+                },
+            )
+            .unwrap();
+        store
+            .record(&polled("PRR_ours"), "me", "default", &[])
+            .unwrap();
+        assert_eq!(store.in_progress_review(&key).unwrap(), None);
+        assert_eq!(store.pr_context(&key).unwrap().unwrap().in_progress, None);
+        // Settled, its copy from the last poll goes with it.
+        store.clear_pending_review(&key).unwrap();
+        assert_eq!(store.in_progress_review(&key).unwrap(), None);
+
+        // Yours is yours.
+        store
+            .record(&polled("PRR_yours"), "me", "default", &[])
+            .unwrap();
+        assert!(store.in_progress_review(&key).unwrap().is_some());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::pr::{PrKey, Thread};
+use crate::pr::{InProgressReview, PrKey, Thread};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RunKind {
@@ -83,6 +83,8 @@ pub struct PrContext {
     pub url: String,
     pub author: String,
     pub threads: Vec<Thread>,
+    /// Your own review pending on GitHub, as last polled.
+    pub in_progress: Option<InProgressReview>,
 }
 
 /// A run the store has accepted and the runner should pick up.

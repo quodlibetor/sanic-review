@@ -78,6 +78,33 @@ pub struct PrSnapshot {
     /// When GitHub last saw activity on the PR, as it writes timestamps.
     /// `None` if it didn't say.
     pub updated_at: Option<String>,
+    /// Your own review, pending on GitHub, if you have one.
+    pub in_progress: Option<InProgressReview>,
+}
+
+/// Your review of a PR that's pending on GitHub: begun there and not yet
+/// submitted, which only you can see. GitHub takes one per person per PR.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InProgressReview {
+    /// Its node id.
+    pub id: String,
+    pub comments: Vec<InProgressComment>,
+}
+
+/// A comment in your [`InProgressReview`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InProgressComment {
+    /// Its node id, which the PR's threads have it by too.
+    pub id: String,
+    pub path: String,
+    /// Its lines on the PR's head, or, `outdated`, on the commit it was
+    /// left on.
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    /// It's no longer on the PR's head.
+    #[serde(default)]
+    pub outdated: bool,
+    pub body: String,
 }
 
 /// A GitHub team, lowercased.

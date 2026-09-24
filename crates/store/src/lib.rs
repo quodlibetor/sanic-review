@@ -42,6 +42,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0018_sent_reviews.sql"),
     include_str!("migrations/0019_draft_note.sql"),
     include_str!("migrations/0020_draft_revision.sql"),
+    include_str!("migrations/0021_in_progress_reviews.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -553,6 +554,23 @@ fn write_snapshot(tx: &Transaction<'_>, snap: &PrSnapshot, me: &str, profile: &s
         params![repo, number, snap.head_sha, snap.base_sha],
     )?;
     write_threads(tx, snap)?;
+    // As last polled: submitted or discarded, it's gone.
+    tx.execute(
+        "DELETE FROM in_progress_reviews WHERE repo = ?1 AND number = ?2",
+        params![repo, number],
+    )?;
+    if let Some(review) = &snap.in_progress {
+        tx.execute(
+            "INSERT INTO in_progress_reviews (repo, number, review_id, comments)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                repo,
+                number,
+                review.id,
+                serde_json::to_string(&review.comments)?
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -701,6 +719,7 @@ mod tests {
             review_decision: None,
             merge_state: None,
             checks: None,
+            in_progress: None,
         }
     }
 
