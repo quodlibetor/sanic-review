@@ -125,6 +125,9 @@ pub struct BaselineDraft {
     /// `pending`, `accepted`, `rejected`, `stale` or `posted`.
     pub status: String,
     pub edited: bool,
+    /// The agent's private note on it, if it wrote one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The structured output of a `regenerate` run: a review whose drafts may
@@ -133,6 +136,8 @@ pub struct BaselineDraft {
 #[serde(deny_unknown_fields)]
 pub struct RevisedOutput {
     pub summary: String,
+    #[serde(default)]
+    pub summary_note: Option<String>,
     #[serde(default)]
     pub summary_based_on: Option<i64>,
     pub suggested_verdict: Verdict,
@@ -151,6 +156,8 @@ pub struct RevisedComment {
     pub body: String,
     pub severity: Severity,
     pub confidence: Confidence,
+    #[serde(default)]
+    pub note: Option<String>,
     #[serde(default)]
     pub based_on: Option<i64>,
 }
@@ -171,12 +178,14 @@ impl RevisedOutput {
                     body: c.body,
                     severity: c.severity,
                     confidence: c.confidence,
+                    note: c.note,
                 };
                 (comment, c.based_on)
             })
             .unzip();
         let output = ReviewOutput {
             summary: self.summary,
+            summary_note: self.summary_note,
             suggested_verdict: self.suggested_verdict,
             comments,
         };
@@ -290,6 +299,10 @@ pub struct InlineComment {
     pub body: String,
     pub severity: Severity,
     pub confidence: Confidence,
+    /// The agent's private note for you, which is never posted: why it
+    /// matters, how sure it is, what it checked and what it couldn't.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// The structured output of a `review` run.
@@ -297,6 +310,9 @@ pub struct InlineComment {
 #[serde(deny_unknown_fields)]
 pub struct ReviewOutput {
     pub summary: String,
+    /// The private note on the summary; see [`InlineComment::note`].
+    #[serde(default)]
+    pub summary_note: Option<String>,
     pub suggested_verdict: Verdict,
     #[serde(default)]
     pub comments: Vec<InlineComment>,
@@ -315,6 +331,8 @@ pub struct DraftComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewResult {
     pub summary: String,
+    /// See [`InlineComment::note`].
+    pub summary_note: Option<String>,
     pub verdict: Verdict,
     pub comments: Vec<DraftComment>,
     /// Lets "regenerate with instruction" resume the conversation.

@@ -71,6 +71,8 @@ pub struct DraftRow {
     /// For an accepted comment that overlaps an existing thread, what to
     /// post there instead of a comment of its own.
     pub choice: Option<ThreadChoice>,
+    /// The agent's private note on it, for you: never posted.
+    pub note: Option<String>,
 }
 
 /// What an accepted draft that overlaps an existing review thread posts,
@@ -182,7 +184,7 @@ const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 
 const DRAFT_COLUMNS: &str = "r.repo, r.number, d.id, d.run_id, d.kind, d.path, d.line,
     d.start_line, d.side, d.severity, d.confidence, d.original_body, d.edited_body,
-    d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to";
+    d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to, d.note";
 
 fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     Ok(DraftRow {
@@ -206,6 +208,7 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
             row.get(17)?,
             row.get(18)?,
         ),
+        note: row.get(19)?,
     })
 }
 
@@ -537,6 +540,7 @@ mod tests {
     fn result() -> ReviewResult {
         ReviewResult {
             summary: "Looks fine.".into(),
+            summary_note: None,
             verdict: Verdict::RequestChanges,
             comments: vec![DraftComment {
                 comment: InlineComment {
@@ -547,6 +551,7 @@ mod tests {
                     body: "off by one?".into(),
                     severity: Severity::Major,
                     confidence: Confidence::High,
+                    note: None,
                 },
                 unanchored: false,
             }],

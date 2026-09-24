@@ -290,6 +290,7 @@ impl ReviewRunner {
         let index = DiffIndex::parse(&diff);
         let result = ReviewResult {
             summary: output.summary,
+            summary_note: output.summary_note,
             verdict: output.suggested_verdict,
             comments: output
                 .comments
@@ -345,6 +346,7 @@ pub fn review_schema() -> Value {
         "required": ["summary", "suggested_verdict", "comments"],
         "properties": {
             "summary": { "type": "string" },
+            "summary_note": { "type": ["string", "null"] },
             "suggested_verdict": { "enum": ["comment", "request_changes", "none"] },
             "comments": {
                 "type": "array",
@@ -359,7 +361,8 @@ pub fn review_schema() -> Value {
                         "side": { "enum": ["LEFT", "RIGHT"] },
                         "body": { "type": "string" },
                         "severity": { "enum": ["blocker", "major", "minor", "nit"] },
-                        "confidence": { "enum": ["high", "medium", "low"] }
+                        "confidence": { "enum": ["high", "medium", "low"] },
+                        "note": { "type": ["string", "null"] }
                     }
                 }
             }
@@ -385,11 +388,11 @@ mod tests {
     #[test]
     fn revision_schema_example_parses() {
         let example = json!({
-            "summary": "s", "summary_based_on": 4,
+            "summary": "s", "summary_based_on": 4, "summary_note": "why",
             "suggested_verdict": "comment",
             "comments": [{
                 "path": "a.rs", "line": 3, "side": "RIGHT", "body": "b",
-                "severity": "nit", "confidence": "high", "based_on": 5
+                "severity": "nit", "confidence": "high", "based_on": 5, "note": "checked"
             }, {
                 "path": "a.rs", "line": 9, "side": "RIGHT", "body": "new",
                 "severity": "nit", "confidence": "high"
@@ -405,6 +408,9 @@ mod tests {
         assert_eq!(output.comments.len(), 2);
         assert_eq!(basis.summary, Some(4));
         assert_eq!(basis.comments, [Some(5), None]);
+        assert_eq!(output.summary_note.as_deref(), Some("why"));
+        assert_eq!(output.comments[0].note.as_deref(), Some("checked"));
+        assert_eq!(output.comments[1].note, None);
     }
 
     /// The schema and the serde types must accept the same shapes.
@@ -415,7 +421,7 @@ mod tests {
             "suggested_verdict": "request_changes",
             "comments": [{
                 "path": "a.rs", "line": 3, "start_line": null, "side": "RIGHT",
-                "body": "b", "severity": "nit", "confidence": "low"
+                "body": "b", "severity": "nit", "confidence": "low", "note": null
             }]
         });
         let parsed: ReviewOutput = serde_json::from_value(example.clone()).unwrap();

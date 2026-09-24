@@ -565,6 +565,18 @@ pub fn draft_card(
                     button.btn.save type="submit" { "Save" }
                 }
             }
+            @if open { @if let Some(note) = &draft.note { (private_note(note)) } }
+        }
+    }
+}
+
+/// The agent's note on a draft, for you: set apart from the draft, and
+/// labelled, since nothing in it is posted.
+fn private_note(note: &str) -> Markup {
+    html! {
+        aside.pnote {
+            div.lbl { "Reviewer note " span { "(not posted)" } }
+            div.text { (note) }
         }
     }
 }
