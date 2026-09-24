@@ -132,7 +132,7 @@ impl Overview {
 }
 
 /// The start of the recency window the lists are cut to.
-fn since(app: &App) -> Option<String> {
+pub(crate) fn since(app: &App) -> Option<String> {
     window_start(app.clock.now(), app.window.borrow().days())
 }
 
@@ -188,7 +188,14 @@ pub async fn index(
     let mut overview = Overview::load(&app)?;
     overview.load_facts(&app)?;
     let content = lists(&app, &overview, query.archived);
-    Ok(page::layout(&app, Kind::Index, "Dashboard", &content))
+    Ok(page::layout(
+        &app,
+        Kind::Index {
+            archived: query.archived,
+        },
+        "Dashboard",
+        &content,
+    ))
 }
 
 /// Where an owed review sits in the index, by what it asks of you.

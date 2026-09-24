@@ -1190,6 +1190,48 @@ async fn review_now_asks_first_and_then_asks_serve() {
     assert_eq!(*f.serve.started.lock().unwrap(), [key(8), key(10)]);
 }
 
+/// The top bar's pending draft count on the page at `uri`.
+async fn pending_in_top_bar(f: &Fixture, uri: &str) -> String {
+    let page = f.get(uri).await.body;
+    let at = page.find(r#"<b class="cnt">"#).expect(&page) + r#"<b class="cnt">"#.len();
+    page[at..at + page[at..].find('<').unwrap()].to_owned()
+}
+
+#[tokio::test]
+async fn the_top_bar_counts_the_pending_drafts_the_lists_show() {
+    let f = fixture(false).await;
+    // PR 7's review: its summary and both comments.
+    assert_eq!(pending_in_top_bar(&f, "/").await, "3");
+    assert_eq!(pending_in_top_bar(&f, "/pr/org/repo/8").await, "3");
+    // Older than the recency window, it's off the lists, and out of the
+    // count until a window wide enough is picked.
+    let old = PrSnapshot {
+        updated_at: Some("2026-08-01T00:00:00Z".into()),
+        ..fixture_prs().remove(0)
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&old, "me", "default", &[])
+        .unwrap();
+    assert_eq!(pending_in_top_bar(&f, "/").await, "0");
+    f.post("/window", &[("window", "all")]).await;
+    assert_eq!(pending_in_top_bar(&f, "/").await, "3");
+    // Archived, it's counted only where archived PRs are shown.
+    f.dashboard.app.store().set_archived(&key(7), true).unwrap();
+    assert_eq!(pending_in_top_bar(&f, "/").await, "0");
+    assert_eq!(pending_in_top_bar(&f, "/?archived=true").await, "3");
+    assert_eq!(pending_in_top_bar(&f, "/pr/org/repo/8").await, "0");
+    f.dashboard
+        .app
+        .store()
+        .set_archived(&key(7), false)
+        .unwrap();
+    // Closed, it's off the lists, and out of the count.
+    f.dashboard.app.store().mark_closed(&key(7)).unwrap();
+    assert_eq!(pending_in_top_bar(&f, "/?archived=true").await, "0");
+}
+
 #[tokio::test]
 async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
     let f = fixture(false).await;

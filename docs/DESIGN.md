@@ -585,8 +585,8 @@ icon is embedded in the binary, so nothing is fetched at runtime.
     that failed, crashed or is held by `--manual-reviews`), **In flight**
     (waiting out the quiet period, queued or running) and **Nothing to do
     now**, folded (skipped, archived, posted, or reviewed with nothing
-    left). Drafts count from the latest review that succeeded, the one the
-    PR page shows;
+    left). Drafts count from the latest review or regeneration that
+    succeeded, the one the PR page shows;
   - your PRs: **Needs you** (comments to answer, changes requested,
     drafts to decide on or post, or an approval held up by failing CI or
     conflicts), **Ready** (mergeable, or approved and waiting only on CI
@@ -643,7 +643,13 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   reconcile with it as soon as no rate limit pauses polling; "back to
   default" goes back to the config's.
 - **Top bar.** Every page's: home, where the page is, and the queued,
-  running and pending draft counts.
+  running and pending draft counts. Pending drafts are counted, here, in
+  the lists and in the TUI, only from each PR's current run: its latest
+  review or regeneration that succeeded, the one its page shows. A
+  regeneration copies the drafts it keeps, so counting every run's would
+  count them again. The total, here and in the TUI's status bar, is of the
+  PRs the lists show: open, within the recency window, and archived only
+  while archived PRs are shown.
 - **PR page.** Drafts first. A header with the PR, its state and actions;
   under it the description and the review runs folded away, the runs'
   summary saying which one's drafts are shown ("Run 2 of 3", when it
@@ -905,8 +911,8 @@ icon is embedded in the binary, so nothing is fetched at runtime.
 
 ## Terminal UI
 
-- `--ui logs`: structured tracing lines. On each state change it also prints a
-  one-line summary: unseen PRs, pending drafts, running and queued runs.
+- `--ui logs`: structured tracing lines. As each run ends it also prints a
+  one-line summary of the queued and running runs.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
