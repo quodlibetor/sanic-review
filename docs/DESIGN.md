@@ -852,8 +852,13 @@ a formula to the `quodlibetor/homebrew-tap` tap.
 - [dist](https://github.com/axodotdev/cargo-dist) generates the workflow from
   `dist-workspace.toml`. Don't edit `release.yml` by hand: change the config
   and run `dist generate`. `dist plan` shows what a release would build.
-- The version comes from `[workspace.package]` in `Cargo.toml` and must match
-  the tag.
+- The version comes from `[workspace.package]` in `Cargo.toml`. Push only a
+  `vX.Y.Z` tag equal to it, on a commit that carries that version. The
+  trigger is dist's default and runs for anything that looks like a version
+  (`v0.1.0`, `0.1.0`, `sanic-review-v0.1.0`); a tag for any other version
+  fails the plan job and publishes nothing. A suffix such as `-rc.1` makes a
+  prerelease, so the workspace version needs the same suffix. On pull
+  requests the workflow runs only the plan job.
 - Targets are macOS and Linux (glibc), each on arm64 and x86_64. Linux builds
   run on Ubuntu 22.04 so the binaries run on Debian 12, Ubuntu 22.04 and
   newer. The x86_64 macOS binary is cross-compiled on the arm64 macOS runner.
