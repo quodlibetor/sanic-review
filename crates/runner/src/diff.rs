@@ -9,6 +9,10 @@ use std::{collections::HashMap, ops::Range};
 
 use sanic_core::run::{InlineComment, Side};
 
+/// The unchanged lines a PR's diff has around each change: GitHub's, and
+/// git's by default.
+pub const CONTEXT: usize = 3;
+
 #[derive(Debug, Default)]
 pub struct DiffIndex {
     /// In diff order.

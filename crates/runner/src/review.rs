@@ -86,7 +86,7 @@ impl ReviewRunner {
     #[must_use]
     pub fn new(data_dir: &Path) -> Self {
         Self {
-            mirrors: Mirrors::new(data_dir.join("mirrors")),
+            mirrors: Mirrors::in_data_dir(data_dir),
             data_dir: data_dir.to_owned(),
         }
     }

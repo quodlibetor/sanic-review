@@ -6,8 +6,9 @@
 
 use std::{
     collections::HashMap,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
     sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
@@ -17,6 +18,8 @@ use color_eyre::{
 };
 use sanic_core::{pr::PrKey, repo::RepoName};
 use tokio::process::Command;
+
+use crate::diff::CONTEXT;
 
 pub struct Mirrors {
     root: PathBuf,
@@ -84,6 +87,48 @@ impl Mirrors {
         self.root
             .join(&repo.owner)
             .join(format!("{}.git", repo.name))
+    }
+
+    /// The mirrors a data dir keeps, under `mirrors/`.
+    #[must_use]
+    pub fn in_data_dir(data_dir: &Path) -> Self {
+        Self::new(data_dir.join("mirrors"))
+    }
+
+    /// Whether `repo`'s mirror has `commit`, a full or short SHA. Blocks
+    /// on `git`, and never fetches.
+    #[must_use]
+    pub fn has_commit(&self, repo: &RepoName, commit: &str) -> bool {
+        let mirror = self.mirror_path(repo);
+        is_sha(commit)
+            && mirror.is_dir()
+            && git_blocking(
+                &mirror,
+                &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+            )
+            .is_ok()
+    }
+
+    /// `path` as it is at `commit` in `repo`'s mirror, or `None` if the
+    /// mirror doesn't have that commit, or that commit doesn't have that
+    /// file (a submodule's entry isn't one). Blocks on `git`, and never
+    /// fetches.
+    pub fn file_at(&self, repo: &RepoName, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let mirror = self.mirror_path(repo);
+        if !is_sha(commit) || !mirror.is_dir() {
+            return Ok(None);
+        }
+        // One argument, so a path can't pass for an option. Asking its
+        // type fails too if the mirror doesn't have the commit.
+        let spec = format!("{commit}:{path}");
+        let is_blob = git_blocking(&mirror, &["cat-file", "-t", &spec])
+            .is_ok_and(|kind| kind.trim_ascii() == b"blob");
+        if !is_blob {
+            return Ok(None);
+        }
+        git_blocking(&mirror, &["cat-file", "blob", &spec])
+            .map(Some)
+            .wrap_err_with(|| format!("reading {path} at {commit} from {}", mirror.display()))
     }
 
     /// Removes a worktree of `repo`'s mirror whose [`Worktree`] was lost,
@@ -194,6 +239,8 @@ impl Worktree {
                 "diff",
                 "--no-color",
                 "--no-ext-diff",
+                // GitHub's context, whatever `diff.context` says.
+                &format!("--unified={CONTEXT}"),
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
                 &self.merge_base,
@@ -224,20 +271,29 @@ async fn remove_worktree(mirror: &Path, path: &Path) {
     let _ = git(mirror, &["worktree", "prune"]).await;
 }
 
-/// Runs git in `repo`, returning stdout, which is decoded lossily because
-/// diffs can hold any bytes. Never prompts for credentials. In its own
-/// process group, so a Ctrl-C meant for a TUI chat doesn't reach a
-/// review's checkout.
-async fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+/// Whether `commit` looks like a SHA, so it can only ever name one.
+fn is_sha(commit: &str) -> bool {
+    (4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `git` in `repo`. Never prompts for credentials. In its own process
+/// group, so a Ctrl-C meant for a TUI chat doesn't reach a review's
+/// checkout or the dashboard's reads.
+fn git_command(repo: &Path, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
         .arg("-C")
         .arg(repo)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .process_group(0)
-        .output()
-        .await
+        .process_group(0);
+    command
+}
+
+/// `git args`' stdout, as it is, if it ran and succeeded.
+fn git_stdout(args: &[&str], output: std::io::Result<Output>) -> Result<Vec<u8>> {
+    let output = output
         .wrap_err("running `git`")
         .suggestion("is `git` installed and on PATH?")?;
     if !output.status.success() {
@@ -248,5 +304,18 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
         ))
         .section(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
+}
+
+/// Runs git in `repo` and waits, returning stdout as it is.
+fn git_blocking(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    git_stdout(args, git_command(repo, args).output())
+}
+
+/// Runs git in `repo`, returning stdout, which is decoded lossily because
+/// diffs can hold any bytes.
+async fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::from(git_command(repo, args)).output().await;
+    let stdout = git_stdout(args, output)?;
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }

@@ -109,3 +109,38 @@ async fn mirror_file_locks_exclude_other_holders() {
         .expect("the lock wasn't released")
         .unwrap();
 }
+
+#[tokio::test]
+async fn files_are_read_at_a_commit_the_mirror_has() {
+    let remote = remote();
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::in_data_dir(data.path());
+    let repo = key().repo;
+    // Nothing's fetched yet.
+    assert!(!mirrors.has_commit(&repo, &remote.head));
+    assert_eq!(
+        mirrors.file_at(&repo, &remote.head, "lib.rs").unwrap(),
+        None
+    );
+
+    let url = remote.root.path().to_string_lossy();
+    let dest = data.path().join("worktrees/1");
+    let worktree = mirrors
+        .checkout(&url, &key(), &remote.head, &remote.base, &dest)
+        .await
+        .unwrap();
+    worktree.remove().await;
+    // The worktree's gone, but the mirror keeps the commits.
+    assert!(mirrors.has_commit(&repo, &remote.head));
+    assert_eq!(
+        mirrors.file_at(&repo, &remote.head, "lib.rs").unwrap(),
+        Some(b"one\n2\nthree\n".to_vec())
+    );
+    assert_eq!(
+        mirrors.file_at(&repo, &remote.head, "absent.rs").unwrap(),
+        None
+    );
+    // Only SHAs name commits.
+    assert!(!mirrors.has_commit(&repo, "HEAD"));
+    assert!(!mirrors.has_commit(&repo, "--all"));
+}
