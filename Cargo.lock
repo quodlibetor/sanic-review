@@ -3110,6 +3110,7 @@ dependencies = [
  "http-body-util",
  "insta",
  "maud",
+ "rusqlite",
  "sanic-core",
  "sanic-github",
  "sanic-runner",

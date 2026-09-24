@@ -1217,7 +1217,7 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   it as Rust's version file, and rustup reads it directly, so local builds,
   `check` CI and release builds use the same toolchain.
 - `mise.toml` pins every other tool: `cargo-deny`, `cargo-nextest`,
-  `cargo-llvm-cov`, `cargo-insta`, `dist`.
+  `cargo-llvm-cov`, `cargo-insta`, `dist`, and Node for the screenshots task.
 - mise is also the task runner:
 
   | Task | Runs |
@@ -1229,12 +1229,44 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   | `mise run test` | `cargo nextest run --workspace` plus doctests |
   | `mise run coverage` | `cargo llvm-cov nextest`. Informational, not part of `check` |
   | `mise run check` | fmt, lint, deny, dist, test |
+  | `mise run screenshots` | regenerates the README's screenshots; see below |
 
 - **Every change passes `mise run check`.** Locally this is a rule in
   `CLAUDE.md`, because jj has no commit hooks. In CI, a GitHub Actions
   workflow in `quodlibetor/sanic-review` runs the same `mise run check` on
   each push and PR. Its actions are pinned to full commit SHAs, with the
   release in a trailing comment: `uses: owner/repo@<sha> # vX.Y.Z`.
+
+### Screenshots
+
+The README's screenshots in `docs/images/` come from `mise run screenshots`,
+which runs `scripts/screenshots.mjs` under a pinned Node:
+
+- It builds and starts `sanic-web`'s `demo` example: the dashboard on a free
+  loopback port over a fresh store in a temp dir. The store is seeded through
+  the `Store` API from invented PRs, all in
+  `crates/web/examples/demo/seed.rs`, which is the place to change what the
+  screenshots show. You are `quodlibetor`, and everyone else is made up.
+- The demo polls nothing, runs no agents, and its GitHub client points at a
+  closed port. Its clock is fixed, and the times the store writes as the
+  real now are rewritten to the seed's, so the shots come out the same each
+  run.
+- Headless Chrome (`$CHROME`, else `google-chrome`), driven over the
+  DevTools protocol, captures each page in light or dark mode, cropped to
+  what it shows. The index goes first, since opening a PR's page marks its
+  review seen. PNGs go through `oxipng` when it's installed.
+- On Linux, Chrome gets Noto Color Emoji through a temp fontconfig, since
+  without an emoji font it draws the dashboard's emoji as empty boxes. The
+  font is pinned by commit and sha256 in the script. The first run
+  downloads it from GitHub into `~/.cache/sanic-review/fonts/`, and a
+  download or cached copy that doesn't match the hash fails the run.
+- A page that doesn't load with a 200 fails the run rather than being
+  captured.
+- The script stops the demo and Chrome and removes their temp dirs when it
+  ends, whether or not it succeeded.
+
+The example's test, run by `mise run test`, checks the seed still builds
+and the pages it shows render; it takes no screenshots.
 
 ### Dependency updates
 

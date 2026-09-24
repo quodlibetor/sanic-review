@@ -28,10 +28,18 @@ tracing.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 insta.workspace = true
+# The demo pins the times the store writes; see examples/demo/seed.rs.
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 wiremock.workspace = true
+
+# The dashboard over invented data, for the README's screenshots. Its test
+# checks the seed still builds.
+[[example]]
+name = "demo"
+test = true
 
 [lints]
 workspace = true
