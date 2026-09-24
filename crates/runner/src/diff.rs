@@ -407,6 +407,7 @@ Binary files a/img.png and b/img.png differ
             body: String::new(),
             severity: Severity::Nit,
             confidence: Confidence::Low,
+            note: None,
         }
     }
 

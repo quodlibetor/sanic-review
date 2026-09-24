@@ -107,6 +107,8 @@ pub struct Draft {
     /// For a regenerated draft: the draft of the run it revised that it's
     /// based on.
     pub based_on: Option<i64>,
+    /// The agent's private note on it, never posted.
+    pub note: Option<String>,
 }
 
 /// Counts for the terminal's summary line.
@@ -423,22 +425,23 @@ impl Store {
         let summary = Stored::new(
             "summary",
             &none,
-            &result.summary,
+            (&result.summary, result.summary_note.as_deref()),
             base(summary_based_on)?,
             &mut kept,
         );
         tx.execute(
             &format!(
                 "INSERT INTO drafts (run_id, kind, original_body, edited_body, status, unanchored,
-                                     based_on, created_at, updated_at)
-                 VALUES (?1, 'summary', ?2, ?3, ?4, 0, ?5, {NOW}, {NOW})"
+                                     based_on, note, created_at, updated_at)
+                 VALUES (?1, 'summary', ?2, ?3, ?4, 0, ?5, ?6, {NOW}, {NOW})"
             ),
             params![
                 id,
                 summary.original_body,
                 summary.edited_body,
                 summary.status,
-                summary.based_on
+                summary.based_on,
+                summary.note
             ],
         )?;
         for (i, draft) in result.comments.iter().enumerate() {
@@ -450,15 +453,21 @@ impl Store {
                 c.start_line,
                 Some(c.side.as_str().to_owned()),
             );
-            let stored = Stored::new("comment", &anchor, &c.body, base(based_on)?, &mut kept);
+            let stored = Stored::new(
+                "comment",
+                &anchor,
+                (&c.body, c.note.as_deref()),
+                base(based_on)?,
+                &mut kept,
+            );
             tx.execute(
                 &format!(
                     "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
                                          confidence, original_body, edited_body, status,
                                          unanchored, based_on, thread_choice, thread_id,
-                                         react_to, created_at, updated_at)
+                                         react_to, note, created_at, updated_at)
                      VALUES (?1, 'comment', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                             ?13, ?14, ?15, {NOW}, {NOW})"
+                             ?13, ?14, ?15, ?16, {NOW}, {NOW})"
                 ),
                 params![
                     id,
@@ -475,7 +484,8 @@ impl Store {
                     stored.based_on,
                     stored.choice.0,
                     stored.choice.1,
-                    stored.choice.2
+                    stored.choice.2,
+                    stored.note
                 ],
             )?;
         }
@@ -720,7 +730,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT kind, path, line, start_line, side, severity,
                     coalesce(edited_body, original_body), status, unanchored, id,
-                    edited_body IS NOT NULL, based_on
+                    edited_body IS NOT NULL, based_on, note
              FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
         )?;
         let drafts = stmt
@@ -738,6 +748,7 @@ impl Store {
                     id: row.get(9)?,
                     edited: row.get(10)?,
                     based_on: row.get(11)?,
+                    note: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -874,7 +885,7 @@ impl Store {
 fn baseline(tx: &Transaction<'_>, run: i64) -> Result<Vec<BaselineDraft>> {
     let mut stmt = tx.prepare(
         "SELECT id, kind, path, line, start_line, side, coalesce(edited_body, original_body),
-                status, edited_body IS NOT NULL
+                status, edited_body IS NOT NULL, note
          FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
     )?;
     let drafts = stmt
@@ -889,6 +900,7 @@ fn baseline(tx: &Transaction<'_>, run: i64) -> Result<Vec<BaselineDraft>> {
                 text: row.get(6)?,
                 status: row.get(7)?,
                 edited: row.get(8)?,
+                note: row.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -906,6 +918,7 @@ struct Base {
     status: String,
     /// Its thread choice's columns, as stored.
     choice: Choice,
+    note: Option<String>,
     shown: Option<String>,
 }
 
@@ -924,7 +937,7 @@ impl Base {
         Ok(tx
             .query_row(
                 "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status,
-                        thread_choice, thread_id, react_to
+                        thread_choice, thread_id, react_to, note
                  FROM drafts WHERE id = ?1 AND run_id = ?2",
                 params![id, revision.revises],
                 |row| {
@@ -936,6 +949,7 @@ impl Base {
                         edited_body: row.get(7)?,
                         status: row.get(8)?,
                         choice: (row.get(9)?, row.get(10)?, row.get(11)?),
+                        note: row.get(12)?,
                         shown,
                     })
                 },
@@ -952,15 +966,17 @@ impl Base {
 }
 
 /// How a draft is stored: its text, your edit, its status and thread
-/// choice, and what it's based on. A revised draft that's word for word its
-/// base (as it stands, or as the agent was shown it), at the same anchor,
-/// keeps the base's edit, status and choice as they stand, unless an
-/// earlier draft already kept them (`kept`); any other is pending.
+/// choice, its note, and what it's based on. A revised draft that's word
+/// for word its base (as it stands, or as the agent was shown it), at the
+/// same anchor, keeps the base's edit, status and choice as they stand,
+/// and its note unless it brings its own, unless an earlier draft already
+/// kept them (`kept`); any other is pending.
 struct Stored {
     original_body: String,
     edited_body: Option<String>,
     status: String,
     choice: Choice,
+    note: Option<String>,
     based_on: Option<i64>,
 }
 
@@ -968,7 +984,7 @@ impl Stored {
     fn new(
         kind: &str,
         anchor: &(Option<String>, Option<u32>, Option<u32>, Option<String>),
-        body: &str,
+        (body, note): (&str, Option<&str>),
         base: Option<Base>,
         kept: &mut HashSet<i64>,
     ) -> Self {
@@ -984,6 +1000,7 @@ impl Stored {
                     edited_body: base.edited_body,
                     status: base.status,
                     choice: base.choice,
+                    note: note.map(str::to_owned).or(base.note),
                     based_on: Some(base.id),
                 }
             }
@@ -993,6 +1010,7 @@ impl Stored {
                 edited_body: None,
                 status: "pending".into(),
                 choice: (None, None, None),
+                note: note.map(str::to_owned),
                 based_on: base.filter(|b| b.kind == kind).map(|b| b.id),
             },
         }
@@ -1127,6 +1145,7 @@ mod tests {
     fn result() -> ReviewResult {
         ReviewResult {
             summary: "Looks reasonable.".into(),
+            summary_note: None,
             verdict: Verdict::Comment,
             comments: vec![DraftComment {
                 comment: InlineComment {
@@ -1137,6 +1156,7 @@ mod tests {
                     body: "off by one?".into(),
                     severity: Severity::Major,
                     confidence: Confidence::Medium,
+                    note: None,
                 },
                 unanchored: true,
             }],
@@ -1530,6 +1550,7 @@ mod tests {
                 body: body.into(),
                 severity: Severity::Minor,
                 confidence: Confidence::High,
+                note: None,
             },
             unanchored: false,
         }
@@ -1639,6 +1660,88 @@ mod tests {
         assert_eq!(
             before,
             ["pending", "accepted", "accepted", "rejected", "pending"]
+        );
+    }
+
+    #[test]
+    fn notes_are_stored_and_kept_with_the_text_they_explain() {
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        let with_note = |body: &str, line: u32, note: Option<&str>| {
+            let mut c = comment(body, line);
+            c.comment.note = note.map(Into::into);
+            c
+        };
+        let original = ReviewResult {
+            summary: "S".into(),
+            summary_note: Some("Checked the callers.".into()),
+            comments: vec![
+                with_note("A", 1, Some("Verified in the test.")),
+                with_note("B", 2, Some("Couldn't build it.")),
+                with_note("C", 3, Some("Old reason.")),
+            ],
+            ..result()
+        };
+        store.finish_review(source.id, &original).unwrap();
+        let drafts = store.drafts(source.id).unwrap();
+        let notes: Vec<Option<&str>> = drafts.iter().map(|d| d.note.as_deref()).collect();
+        assert_eq!(
+            notes,
+            [
+                Some("Checked the callers."),
+                Some("Verified in the test."),
+                Some("Couldn't build it."),
+                Some("Old reason."),
+            ]
+        );
+        let ids: Vec<i64> = drafts.iter().map(|d| d.id).collect();
+        let Regeneration::Queued(run) =
+            store.queue_regeneration(source.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        // The agent is shown its notes.
+        let shown: Vec<Option<&str>> = run
+            .revision
+            .as_ref()
+            .unwrap()
+            .baseline
+            .iter()
+            .map(|d| d.note.as_deref())
+            .collect();
+        assert_eq!(shown, notes);
+        let revised = ReviewResult {
+            summary: "S".into(),
+            summary_note: None,
+            comments: vec![
+                with_note("A", 1, None), // kept whole, no note: keeps its note
+                with_note("B, reworded", 2, Some("Built.")), // changed: its own note
+                with_note("C", 3, Some("New reason.")), // kept whole, new note
+            ],
+            ..result()
+        };
+        let basis = Basis {
+            summary: Some(ids[0]),
+            comments: vec![Some(ids[1]), Some(ids[2]), Some(ids[3])],
+        };
+        store
+            .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
+            .unwrap();
+        let notes: Vec<Option<String>> = store
+            .drafts(run.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.note)
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                Some("Checked the callers.".to_owned()),
+                Some("Verified in the test.".to_owned()),
+                Some("Built.".to_owned()),
+                Some("New reason.".to_owned()),
+            ]
         );
     }
 

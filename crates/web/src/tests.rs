@@ -201,6 +201,7 @@ fn comment(path: &str, line: u32, side: Side, body: &str, unanchored: bool) -> D
             body: body.into(),
             severity: Severity::Major,
             confidence: Confidence::High,
+            note: None,
         },
         unanchored,
     }
@@ -302,6 +303,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
             run,
             &ReviewResult {
                 summary: "Mostly fine.".into(),
+                summary_note: None,
                 verdict: Verdict::RequestChanges,
                 comments: vec![
                     comment("src/lib.rs", 3, Side::Right, "Why `m`?", false),
@@ -1455,6 +1457,7 @@ async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
                 run,
                 &ReviewResult {
                     summary: "Fine.".into(),
+                    summary_note: None,
                     verdict: Verdict::Comment,
                     comments: vec![],
                     session_id: Some("sess-9".into()),
@@ -1614,6 +1617,7 @@ fn reviewed_pr(f: &Fixture, snap: &PrSnapshot, statuses: &[&str]) {
             run,
             &ReviewResult {
                 summary: "Fine.".into(),
+                summary_note: None,
                 verdict: Verdict::Comment,
                 comments,
                 session_id: None,
@@ -2010,6 +2014,7 @@ async fn the_chat_card_is_for_the_run_whose_drafts_the_page_shows() {
                 run,
                 &ReviewResult {
                     summary: "Fine now.".into(),
+                    summary_note: None,
                     verdict: Verdict::Comment,
                     comments: vec![],
                     session_id: Some("sess-newer".into()),
@@ -2111,6 +2116,7 @@ async fn the_run_list_says_what_each_revision_revises_and_how() {
         store.claim_run(revision).unwrap();
         let result = ReviewResult {
             summary: "Fine.".into(),
+            summary_note: None,
             verdict: Verdict::Comment,
             comments: vec![comment("src/lib.rs", 3, Side::Right, "Why?", false)],
             session_id: Some("sess-7".into()),
@@ -2949,6 +2955,7 @@ fn regenerate(f: &Fixture) -> (i64, Vec<i64>) {
     store.claim_run(run.id).unwrap();
     let result = ReviewResult {
         summary: "Mostly fine.".into(),
+        summary_note: None,
         verdict: Verdict::Comment,
         comments: vec![
             comment("src/lib.rs", 3, Side::Right, "Why `m`?", false),
@@ -2972,6 +2979,115 @@ fn regenerate(f: &Fixture) -> (i64, Vec<i64>) {
         .map(|d| d.id)
         .collect();
     (run.id, ids)
+}
+
+/// A regeneration of the fixture's run whose summary and inline comment
+/// carry the agent's private notes. Its drafts, summary first.
+fn noted_regeneration(f: &Fixture) -> (i64, Vec<i64>) {
+    let mut store = f.dashboard.app.store();
+    let sanic_store::Regeneration::Queued(run) = store
+        .queue_regeneration(f.run, "Say why.", |_| false)
+        .unwrap()
+    else {
+        panic!("refused");
+    };
+    store.claim_run(run.id).unwrap();
+    let mut noted = comment("src/lib.rs", 3, Side::Right, "Why `m`?", false);
+    noted.comment.note = Some("NOTE-C: checked every caller; couldn't run the tests.".into());
+    let result = ReviewResult {
+        summary: "Mostly fine.".into(),
+        summary_note: Some("NOTE-S: low confidence overall.".into()),
+        verdict: Verdict::Comment,
+        comments: vec![noted],
+        session_id: Some("sess-7".into()),
+        transcript_path: "t".into(),
+    };
+    let basis = Basis {
+        summary: None,
+        comments: vec![None],
+    };
+    store
+        .finish_revision(run.id, &result, run.revision.as_ref().unwrap(), &basis)
+        .unwrap();
+    let run_dir = f.data.path().join("runs").join(run.id.to_string());
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("pr.diff"), DIFF).unwrap();
+    let ids = store
+        .draft_rows(run.id)
+        .unwrap()
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    (run.id, ids)
+}
+
+#[tokio::test]
+async fn a_drafts_private_note_is_shown_on_its_card_in_both_views() {
+    let f = fixture(false).await;
+    let (_, ids) = noted_regeneration(&f);
+    for uri in ["/pr/org/repo/7", "/pr/org/repo/7?view=files"] {
+        let page = f.get(uri).await.body;
+        let summary = card_of_draft(&page, ids[0]);
+        assert!(summary.contains("Reviewer note"), "{uri}: {summary}");
+        assert!(summary.contains("(not posted)"), "{uri}: {summary}");
+        assert!(
+            summary.contains("NOTE-S: low confidence overall."),
+            "{uri}: {summary}"
+        );
+        let comment = card_of_draft(&page, ids[1]);
+        assert!(
+            comment.contains("NOTE-C: checked every caller; couldn&#39;t run the tests.")
+                || comment.contains("NOTE-C: checked every caller; couldn't run the tests."),
+            "{uri}: {comment}"
+        );
+        // Set apart from the text that's posted.
+        let body = &comment[comment.find(r#"class="body""#).unwrap()..];
+        let body = &body[..body.find("</div>").unwrap()];
+        assert!(!body.contains("NOTE-C"), "{uri}: {comment}");
+    }
+}
+
+#[tokio::test]
+async fn a_private_note_is_never_in_what_is_posted() {
+    let f = fixture(false).await;
+    let (run, ids) = noted_regeneration(&f);
+    for id in &ids {
+        let reply = f
+            .post(&format!("/drafts/{id}/status"), &[("status", "accepted")])
+            .await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    }
+    let preview = f
+        .get(&format!("/pr/org/repo/7/runs/{run}/preview?event=COMMENT"))
+        .await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    // Not in the review as it'll read, nor any request's body.
+    assert!(!preview.body.contains("NOTE-"), "{}", preview.body);
+    let payload = hidden_value(&preview.body, "payload");
+    assert!(payload.contains("Why `m`?"), "{payload}");
+    assert!(!payload.contains("NOTE-"), "{payload}");
+
+    let expected = json!({
+        "commit_id": "head7",
+        "body": "Mostly fine.",
+        "event": "COMMENT",
+        "comments": [
+            { "path": "src/lib.rs", "body": "Why `m`?", "line": 3, "side": "RIGHT" },
+        ],
+    });
+    // The submit sends exactly this, with no note in it.
+    takes_review(&f, &expected).await;
+    let posted = f
+        .post(
+            &format!("/pr/org/repo/7/runs/{run}/submit"),
+            &[("event", "COMMENT"), ("payload", &payload)],
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    for request in f.github.received_requests().await.unwrap() {
+        let body = String::from_utf8(request.body).unwrap();
+        assert!(!body.contains("NOTE-"), "{body}");
+    }
 }
 
 #[tokio::test]

@@ -1577,6 +1577,35 @@ main:has(> .prh) {
   margin-top: 0.35rem;
 }
 
+/* The agent's note to you: muted and dashed, so it never reads as part of
+   the draft. */
+.dc .pnote {
+  margin: 0.45rem 0 0;
+  padding: 0.3rem 0.5rem;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  background: var(--raise);
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.dc .pnote .lbl {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.dc .pnote .lbl span {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.dc .pnote .text {
+  white-space: pre-wrap;
+}
+
 /* A draft's box reads as the text it replaces: the same font, colours and
    place, its border inside the body's padding so nothing moves. The
    script grows it to fit, so it doesn't scroll. */

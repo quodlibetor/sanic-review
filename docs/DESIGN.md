@@ -409,7 +409,7 @@ Rules:
    extra `--add-dir`. The prompt is your instruction, fenced as your words,
    then the drafts of the run being revised as they stand, fenced as your
    material: each one's id, kind, anchor, current text (your edit if you
-   made one) and status; then the PR's threads as they stand now, as a
+   made one), status and private note; then the PR's threads as they stand now, as a
    review's brief has them, since they may have changed since. The agent is told to keep accepted and edited
    drafts word for word unless you ask otherwise, not to propose rejected
    ones again, not to repeat posted ones, and to return the complete revised
@@ -462,10 +462,11 @@ empty `model` is an error.
 ```json
 {
   "summary": "string",
+  "summary_note": null,
   "suggested_verdict": "comment | request_changes | none",
   "comments": [{ "path": "", "line": 0, "start_line": null, "side": "RIGHT",
                  "body": "", "severity": "blocker|major|minor|nit",
-                 "confidence": "high|medium|low" }],
+                 "confidence": "high|medium|low", "note": null }],
   "replies":  [{ "thread_id": "", "body": "" }],
   "fixes":    [{ "thread_id": "", "description": "" }]
 }
@@ -473,6 +474,13 @@ empty `model` is an error.
 
 The dashboard never offers `approve` as an agent suggestion. You can still
 pick it yourself.
+
+`summary_note`, and each comment's `note`, are the agent's private notes to
+you, which are never posted: why it matters, how confident it is, what it
+verified and what it couldn't. They're where a skill's "explain it to the
+user" goes, so the posted text stays what the author should read. A note
+is stored with its draft. A regeneration is shown each draft's note, and a
+draft it keeps word for word keeps its note unless it gives a new one.
 
 Each run kind gets its own schema with only the fields it uses: a `review`
 run's has `summary`, `suggested_verdict` and `comments`, so the agent isn't
@@ -489,7 +497,7 @@ invited to draft replies or fixes on someone else's PR.
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings |
-| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
+| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, and for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment) |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
 | `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
@@ -603,7 +611,9 @@ icon is embedded in the binary, so nothing is fetched at runtime.
   only that commit's changes. Once the PR has moved on, it's the lines in
   the file at the reviewed head, for new lines only; old ones get no
   link. A draft that isn't on a line of the diff links to its lines in
-  the file at that head.
+  the file at that head. A draft with a private note from the agent shows
+  it under the draft, muted, dashed and labelled "Reviewer note (not
+  posted)"; nothing in it goes in any request or the preview's review.
 - **Files changed.** Tabs over the drafts switch to a view of the whole
   diff the run reviewed, laid out as GitHub's Files changed tab, and back
   (`f`). The URL says which (`?view=files`), so it's linkable, and a page

@@ -36,6 +36,10 @@ Approving is the human's decision and is not an option.
 range) must be lines shown in the diff: `side` `RIGHT` numbers lines in the \
 new file, `LEFT` in the old file, for removed lines. Keep a range inside one \
 hunk.
+- `summary_note`, and `note` on each comment: optional, and private to the \
+reviewer: never posted. Say why it matters, how confident you are, what you \
+verified and what you couldn't. Keep that out of `summary` and `body`, which \
+are what gets posted.
 
 The PR's existing review threads and conversation are in the brief. Don't \
 comment on a point one of them already makes, resolved or not. If you agree \
@@ -201,7 +205,8 @@ pub fn revision(instruction: &str, baseline: &[BaselineDraft], threads: &[Thread
          words:\n\n{}\n\
          This is your review as it stands after the reviewer went through it, one entry \
          per draft: its `id`, `kind` (`summary` or `comment`), anchor, current `text` \
-         (the reviewer's edit if `edited`), and `status`:\n\n{}\n\
+         (the reviewer's edit if `edited`), `status`, and your private `note` if you \
+         wrote one:\n\n{}\n\
          - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, \
          word for word, unless the request asks otherwise.\n\
          - `rejected` drafts were turned down: don't propose them again.\n\

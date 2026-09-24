@@ -508,6 +508,7 @@ mod tests {
     fn result() -> ReviewResult {
         ReviewResult {
             summary: "Fine.".into(),
+            summary_note: None,
             verdict: Verdict::Comment,
             comments: vec![],
             session_id: None,

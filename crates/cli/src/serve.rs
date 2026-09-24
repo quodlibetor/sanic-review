@@ -1163,6 +1163,7 @@ mod tests {
         store.claim_run(source.id).unwrap();
         let result = sanic_core::run::ReviewResult {
             summary: "s".into(),
+            summary_note: None,
             verdict: sanic_core::run::Verdict::None,
             comments: vec![],
             session_id: Some("sess".into()),

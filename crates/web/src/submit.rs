@@ -1653,6 +1653,7 @@ mod tests {
             status: "accepted".into(),
             unanchored: true,
             choice: None,
+            note: None,
         }
     }
 

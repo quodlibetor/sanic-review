@@ -216,6 +216,7 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
             text: "Your edit, kept.".into(),
             status: "accepted".into(),
             edited: true,
+            note: None,
         }],
     });
     let result = s
