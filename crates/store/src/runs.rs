@@ -1340,6 +1340,100 @@ mod tests {
         );
     }
 
+    #[test]
+    fn revising_a_regeneration_starts_from_its_drafts() {
+        use crate::DraftStatus;
+
+        let mut store = store();
+        let review = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(review.id).unwrap();
+        store.finish_review(review.id, &result()).unwrap();
+        // Regenerates `source`, as the agent answering with `comments`, each
+        // based on nothing, in session `session`.
+        let mut regenerate = |source: i64, comments: Vec<DraftComment>, session: &str| {
+            let Regeneration::Queued(run) =
+                store.queue_regeneration(source, "x", |_| false).unwrap()
+            else {
+                panic!("refused");
+            };
+            store.claim_run(run.id).unwrap();
+            let basis = Basis {
+                summary: None,
+                comments: vec![None; comments.len()],
+            };
+            let revised = ReviewResult {
+                session_id: Some(session.into()),
+                comments,
+                ..result()
+            };
+            store
+                .finish_revision(run.id, &revised, source, &basis)
+                .unwrap();
+            run.id
+        };
+        let first = regenerate(review.id, vec![comment("A", 1)], "sess-1");
+        let second = regenerate(first, vec![comment("B", 2), comment("C", 3)], "sess-2");
+        let ids: Vec<i64> = store.drafts(second).unwrap().iter().map(|d| d.id).collect();
+        let [summary, b, c] = ids[..] else {
+            panic!("{ids:?}")
+        };
+        store.edit_draft(b, "B, as you put it").unwrap();
+        store.set_draft_status(b, DraftStatus::Accepted).unwrap();
+        store.set_draft_status(c, DraftStatus::Rejected).unwrap();
+
+        let Regeneration::Queued(third) = store.queue_regeneration(second, "y", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        let revision = third.revision.clone().unwrap();
+        assert_eq!(revision.source_run, review.id);
+        assert_eq!(revision.revises, second);
+        assert_eq!(revision.session_id, "sess-2");
+        let baseline: Vec<(i64, &str, &str, bool)> = revision
+            .baseline
+            .iter()
+            .map(|d| (d.id, d.text.as_str(), d.status.as_str(), d.edited))
+            .collect();
+        assert_eq!(
+            baseline,
+            [
+                (summary, "Looks reasonable.", "pending", false),
+                (b, "B, as you put it", "accepted", true),
+                (c, "C", "rejected", false),
+            ]
+        );
+
+        store.claim_run(third.id).unwrap();
+        let revised = ReviewResult {
+            comments: vec![comment("B, as you put it", 2), comment("C, reworded", 3)],
+            ..result()
+        };
+        let basis = Basis {
+            summary: Some(summary),
+            comments: vec![Some(b), Some(c)],
+        };
+        store
+            .finish_revision(third.id, &revised, revision.revises, &basis)
+            .unwrap();
+        let got: Vec<(String, String, Option<i64>)> = store
+            .drafts(third.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.body, d.status, d.based_on))
+            .collect();
+        let row = |body: &str, status: &str, based_on: i64| {
+            (body.to_owned(), status.to_owned(), Some(based_on))
+        };
+        assert_eq!(
+            got,
+            [
+                row("Looks reasonable.", "pending", summary),
+                row("B, as you put it", "accepted", b),
+                row("C, reworded", "pending", c),
+            ]
+        );
+    }
+
     /// An anchored comment on `src/lib.rs`.
     fn comment(body: &str, line: u32) -> DraftComment {
         DraftComment {

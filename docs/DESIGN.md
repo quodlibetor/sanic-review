@@ -395,7 +395,8 @@ Rules:
    a regeneration of it is already queued or running, and when its worktree
    is in use, e.g. by a chat; the worker checks that again before checking
    out, since checkout replaces what's there. Revising a regeneration
-   resumes its session, but records the original review as the source,
+   resumes its session and starts from its drafts, but records the
+   original review as the source,
    whose worktree path every revision's session lives under; chats with a
    regeneration use that path too. A regeneration cancelled by `serve` exiting,
    or left unfinished by a crash, fails rather than starting again unasked.
