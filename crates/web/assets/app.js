@@ -80,7 +80,7 @@
     // Moving on leaves a Copy that c focused, so Enter opens the draft
     // rather than copying again.
     const active = document.activeElement;
-    if (active && active.matches("button[data-copy]")) active.blur();
+    if (active && active.matches("button[data-copy], .rb, .pp")) active.blur();
     draw(true);
   }
 
@@ -241,6 +241,12 @@
       e.preventDefault();
       return;
     }
+    // Esc closes a popover that v, d or Tab opened.
+    if (e.key === "Escape" && popover(document.activeElement)) {
+      document.activeElement.blur();
+      e.preventDefault();
+      return;
+    }
     switch (e.key) {
       case "?":
         help.hidden = false;
@@ -259,6 +265,7 @@
       case "Tab": {
         const n = lists().length;
         if (page !== "index" || n === 0) return;
+        if (popover(document.activeElement)) document.activeElement.blur();
         focus = (focus + (e.shiftKey ? n - 1 : 1)) % n;
         draw(true);
         break;
@@ -340,6 +347,17 @@
           if (copy) copy.focus();
         } else if (href) go(href);
         else say("c chats with the agent that reviewed the selected PR");
+        break;
+      }
+      case "v":
+      case "d": {
+        // The selected row's reviewers, or its lead's run and drafts: focus
+        // opens the popover, and Esc closes it.
+        const row = page === "index" && currentRow();
+        const opener = row && row.querySelector(e.key === "v" ? ".rb" : ".pp");
+        if (opener) opener.focus();
+        else if (page === "index") say(e.key + " shows the selected row's " + (e.key === "v" ? "reviewers" : "run and drafts"));
+        else return;
         break;
       }
       case "i": {
@@ -436,7 +454,7 @@
       return d.toDateString();
     };
     const yesterday = new Date(now.getTime() - 86400000);
-    root.querySelectorAll("time[datetime]").forEach(function (t) {
+    root.querySelectorAll("time[datetime]:not(.ago)").forEach(function (t) {
       const at = new Date(t.dateTime);
       if (isNaN(at.getTime())) return;
       const clock = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -451,6 +469,58 @@
     });
   }
   localTimes(document);
+
+  // The index's popovers: who reviewed a PR (.rb), and what's behind its
+  // lead (.pp). CSS shows them on hover and focus; while one is shown it's
+  // pinned to the window beside its opener, so a row can't clip it.
+  function popover(el) {
+    return el && el.matches && el.matches(".rb, .pp") ? el : null;
+  }
+  function place(opener) {
+    const pop = opener.querySelector(".pop");
+    if (!pop) return;
+    pop.classList.add("fixed");
+    const r = opener.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    const h = pop.offsetHeight;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+    let top = r.bottom + 4;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+  }
+  function unplace(opener) {
+    const pop = opener.querySelector(".pop");
+    if (!pop) return;
+    pop.classList.remove("fixed");
+    pop.style.left = "";
+    pop.style.top = "";
+  }
+  document.addEventListener("mouseover", function (e) {
+    const opener = e.target.closest && e.target.closest(".rb, .pp");
+    if (opener && !opener.contains(e.relatedTarget)) place(opener);
+  });
+  document.addEventListener("mouseout", function (e) {
+    const opener = e.target.closest && e.target.closest(".rb, .pp");
+    if (opener && !opener.contains(e.relatedTarget) && document.activeElement !== opener) {
+      unplace(opener);
+    }
+  });
+  document.addEventListener("focusin", function (e) {
+    if (popover(e.target)) place(e.target);
+  });
+  document.addEventListener("focusout", function (e) {
+    if (popover(e.target) && !e.target.matches(":hover")) unplace(e.target);
+  });
+  window.addEventListener(
+    "scroll",
+    function () {
+      const active = popover(document.activeElement);
+      if (active) place(active);
+      document.querySelectorAll(".rb:hover, .pp:hover").forEach(place);
+    },
+    { passive: true }
+  );
 
   document.addEventListener("keydown", onKey);
   // A link to a confirm page opens its card over this page instead; a
@@ -479,7 +549,7 @@
   // Clicking a row, not one of its links, selects it.
   document.addEventListener("click", function (e) {
     const row = e.target.closest("[data-row], .draft");
-    if (!row || e.target.closest("a, button, textarea, input, summary")) return;
+    if (!row || e.target.closest("a, button, textarea, input, summary, .rb, .pp")) return;
     lists().forEach(function (list, i) {
       if (list.contains(row)) {
         focus = i;
@@ -555,11 +625,24 @@
     },
     true
   );
-  document.body.addEventListener("htmx:afterSwap", function () {
+  // A popover v, d or Tab opened, by its id, so the refresh can open it
+  // again on the row that comes back.
+  let reopen = null;
+  document.body.addEventListener("htmx:beforeSwap", function () {
+    const active = document.activeElement;
+    reopen = popover(active) ? active.getAttribute("aria-describedby") : null;
+  });
+  document.body.addEventListener("htmx:afterSwap", function (e) {
     unfolded.forEach(function (id) {
       const group = document.getElementById(id);
       if (group) group.open = true;
     });
+    localTimes(e.detail.target.isConnected ? e.detail.target : document);
+    const pop = reopen && document.getElementById(reopen);
+    if (pop && pop.parentElement) pop.parentElement.focus({ preventScroll: true });
+    reopen = null;
+    // One shown by hover came back unpinned, so the row would clip it.
+    document.querySelectorAll(".rb:hover, .pp:hover").forEach(place);
   });
   // The index rereads its lists every few seconds; keep the selection.
   // A PR page's draft card comes back alone, so its tally is recounted.

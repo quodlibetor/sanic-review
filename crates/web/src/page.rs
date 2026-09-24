@@ -46,6 +46,8 @@ const KEYS: &[(&str, &str)] = &[
     ("x", "archive or unarchive the selected PR"),
     ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
+    ("v", "who reviewed the selected PR, and when; Esc closes"),
+    ("d", "the selected PR's review run and drafts; Esc closes"),
     (
         "c",
         "chat with the agent that reviewed it: shows the command",

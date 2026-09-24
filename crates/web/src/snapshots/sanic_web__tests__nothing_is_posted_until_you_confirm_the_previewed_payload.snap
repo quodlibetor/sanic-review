@@ -156,6 +156,18 @@ This file isn't in the diff.</pre>
 </tr>
 <tr>
 <th>
+<kbd>v</kbd>
+</th>
+<td>who reviewed the selected PR, and when; Esc closes</td>
+</tr>
+<tr>
+<th>
+<kbd>d</kbd>
+</th>
+<td>the selected PR's review run and drafts; Esc closes</td>
+</tr>
+<tr>
+<th>
 <kbd>c</kbd>
 </th>
 <td>chat with the agent that reviewed it: shows the command</td>

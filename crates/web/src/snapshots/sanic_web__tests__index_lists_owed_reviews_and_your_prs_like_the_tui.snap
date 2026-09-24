@@ -28,6 +28,14 @@ expression: "readable(&f, &page.body)"
 <span class="sp">
 </span>
 </h2>
+<div class="colh" aria-hidden="true">
+<span>
+</span>
+<span>
+</span>
+<span>REVIEWED BY · WAITING ON</span>
+<span>PR</span>
+</div>
 <div class="group-h act">NEEDS YOU · 2</div>
 <div class="ib" data-row data-key="org/repo#7" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
 <span class="n">
@@ -35,14 +43,44 @@ expression: "readable(&f, &page.body)"
 </span>
 </span>
 <span class="x">
+<span class="pp" tabindex="0" aria-describedby="lead-org/repo#7">
 <span class="cnt">3 drafts</span>
+<span class="pop" role="tooltip" id="lead-org/repo#7">
+<table>
+<tr>
+<td class="when">review run</td>
+<td>succeeded, finished <time>
+</td>
+</tr>
+<tr>
+<td class="when">drafts</td>
+<td>
+<span class="cnt">3 pending</span>
+</td>
+</tr>
+</table>
+</span>
+</span>
+</span>
+<span class="y">
+<span class="rb" tabindex="0" aria-describedby="rb-org/repo#7">
+<span class="none">no reviews</span>
+<span class="pop" role="tooltip" id="rb-org/repo#7">
+<div class="ph">head <b class="mono">head7</b>, first seen <time>
+</div>
+<p class="dim nobody">Nobody has reviewed it yet.</p>
+<div class="foot">Each person's latest review; bots and dismissed reviews left out.</div>
+</span>
+</span>
+<span class="needs">
+<span class="sig you" title="comments by others you haven't answered">1 to answer</span>
+</span>
 </span>
 <span class="t">
 <a href="/pr/org/repo/7" title="Add the thing">Add the thing</a>
 </span>
 <span class="m">
-<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a> · alice · drafted · <span class="u-act">1 unanswered</span>
-</span>
+<a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a> · alice</span>
 <span class="a">
 <a class="linkbtn" href="/pr/org/repo/7/ignore">ignore by title <span class="k">i</span>
 </a>
@@ -61,14 +99,39 @@ expression: "readable(&f, &page.body)"
 <span class="n">
 </span>
 <span class="x">
+<span class="pp" tabindex="0" aria-describedby="lead-org/repo#8">
 <span class="chip bad">failed</span>
+<span class="pop" role="tooltip" id="lead-org/repo#8">
+<table>
+<tr>
+<td class="when">review run</td>
+<td>failed <time>
+</td>
+</tr>
+</table>
+<pre class="error perr">claude exited with 1
+and more detail</pre>
+</span>
+</span>
+</span>
+<span class="y">
+<span class="rb" tabindex="0" aria-describedby="rb-org/repo#8">
+<span class="none">no reviews</span>
+<span class="pop" role="tooltip" id="rb-org/repo#8">
+<div class="ph">head <b class="mono">head8</b>, first seen <time>
+</div>
+<p class="dim nobody">Nobody has reviewed it yet.</p>
+<div class="foot">Each person's latest review; bots and dismissed reviews left out.</div>
+</span>
+</span>
+<span class="needs">
+</span>
 </span>
 <span class="t">
 <a href="/pr/org/repo/8" title="Fix &lt;script&gt; escaping">Fix &lt;script&gt; escaping</a>
 </span>
 <span class="m">
-<a class="ref" href="https://github.com/org/repo/pull/8" title="https://github.com/org/repo/pull/8">org/repo#8 ↗</a> · bob · <span class="u-quiet">changes requested</span> · <span class="error" title="claude exited with 1
-and more detail">claude exited with 1</span>
+<a class="ref" href="https://github.com/org/repo/pull/8" title="https://github.com/org/repo/pull/8">org/repo#8 ↗</a> · bob · <span class="u-quiet">changes requested</span>
 </span>
 <span class="a">
 <a class="linkbtn" href="/pr/org/repo/8/review-now" data-dialog>review now <span class="k">r</span>
@@ -93,13 +156,41 @@ and more detail">claude exited with 1</span>
 <span class="n">
 </span>
 <span class="x">
+<span class="pp" tabindex="0" aria-describedby="lead-org/repo#10">
 <span class="chip dim">skipped: draft</span>
+<span class="pop" role="tooltip" id="lead-org/repo#10">
+<table>
+<tr>
+<td class="when">status</td>
+<td>not reviewed automatically: it's a draft PR</td>
+</tr>
+<tr>
+<td class="when">review run</td>
+<td>none yet</td>
+</tr>
+</table>
+</span>
+</span>
+</span>
+<span class="y">
+<span class="rb" tabindex="0" aria-describedby="rb-org/repo#10">
+<span class="none">no reviews</span>
+<span class="pop" role="tooltip" id="rb-org/repo#10">
+<div class="ph">head <b class="mono">head10</b>, first seen <time>
+</div>
+<p class="dim nobody">Nobody has reviewed it yet.</p>
+<div class="foot">Each person's latest review; bots and dismissed reviews left out.</div>
+</span>
+</span>
+<span class="needs">
+</span>
 </span>
 <span class="t">
 <a href="/pr/org/repo/10" title="WIP: try things">WIP: try things</a>
 </span>
 <span class="m">
-<a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol</span>
+<a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol · <span class="tagpr">draft PR</span>
+</span>
 <span class="a">
 <a class="linkbtn" href="/pr/org/repo/10/review-now" data-dialog>review now <span class="k">r</span>
 </a>
@@ -121,12 +212,43 @@ and more detail">claude exited with 1</span>
 <span class="sp">
 </span>
 </h2>
+<div class="colh" aria-hidden="true">
+<span>
+</span>
+<span>
+</span>
+<span>REVIEWED BY · WAITING ON</span>
+<span>PR</span>
+</div>
 <div class="group-h">READY · 1</div>
 <div class="ib" data-row data-key="org/repo#9" data-href="/pr/org/repo/9">
 <span class="n">
 </span>
 <span class="x">
+<span class="pp" tabindex="0" aria-describedby="lead-org/repo#9">
 <span class="chip u-good">mergeable</span>
+<span class="pop" role="tooltip" id="lead-org/repo#9">
+<table>
+<tr>
+<td class="when">review run</td>
+<td>none yet</td>
+</tr>
+</table>
+</span>
+</span>
+</span>
+<span class="y">
+<span class="rb" tabindex="0" aria-describedby="rb-org/repo#9">
+<span class="none">no reviews</span>
+<span class="pop" role="tooltip" id="rb-org/repo#9">
+<div class="ph">head <b class="mono">head9</b>, first seen <time>
+</div>
+<p class="dim nobody">Nobody has reviewed it yet.</p>
+<div class="foot">Each person's latest review; bots and dismissed reviews left out.</div>
+</span>
+</span>
+<span class="needs">
+</span>
 </span>
 <span class="t">
 <a href="/pr/org/repo/9" title="My change">My change</a>
@@ -150,7 +272,7 @@ and more detail">claude exited with 1</span>
 <span class="k">k</span> move (a folded group is skipped) · <span class="k">Tab</span> other list · <span class="k">Enter</span> open · <span class="k">r</span>
 <span class="k">x</span>
 <span class="k">i</span>
-<span class="k">c</span> act on the selected row · <span class="k">X</span> archived · <span class="k">?</span> all keys</p>
+<span class="k">c</span> act on the selected row · <span class="k">v</span> reviewers · <span class="k">d</span> details · <span class="k">X</span> archived · <span class="k">?</span> all keys</p>
 </div>
 </main>
 <div class="overlay" id="help" hidden>
@@ -210,6 +332,18 @@ and more detail">claude exited with 1</span>
 <kbd>i</kbd>
 </th>
 <td>skip PRs with titles like the selected one</td>
+</tr>
+<tr>
+<th>
+<kbd>v</kbd>
+</th>
+<td>who reviewed the selected PR, and when; Esc closes</td>
+</tr>
+<tr>
+<th>
+<kbd>d</kbd>
+</th>
+<td>the selected PR's review run and drafts; Esc closes</td>
 </tr>
 <tr>
 <th>

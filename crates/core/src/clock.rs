@@ -113,6 +113,25 @@ impl WindowChoice {
     }
 }
 
+/// The recency window as it stands: `poll.updated_within_days`, and the
+/// window picked on the dashboard in its place, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecencyWindow {
+    pub configured: Option<u32>,
+    pub choice: Option<WindowChoice>,
+}
+
+impl RecencyWindow {
+    /// The window in force, in days: `None` for no limit.
+    #[must_use]
+    pub fn days(self) -> Option<u32> {
+        match self.choice {
+            Some(choice) => choice.days(),
+            None => self.configured,
+        }
+    }
+}
+
 /// Days since 1970-01-01 of a proleptic Gregorian date, after Howard
 /// Hinnant's `days_from_civil`; `None` before 1970.
 fn days_from_civil(y: u64, m: u64, d: u64) -> Option<u64> {
@@ -196,6 +215,16 @@ mod tests {
         assert_eq!(WindowChoice::parse("soon"), None);
         assert_eq!(WindowChoice::Days(30).days(), Some(30));
         assert_eq!(WindowChoice::All.days(), None);
+        let window = RecencyWindow {
+            configured: Some(14),
+            choice: None,
+        };
+        assert_eq!(window.days(), Some(14));
+        let all = RecencyWindow {
+            choice: Some(WindowChoice::All),
+            ..window
+        };
+        assert_eq!(all.days(), None);
     }
 
     #[test]

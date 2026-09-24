@@ -21,7 +21,7 @@ use color_eyre::{
     eyre::{Result, WrapErr},
 };
 use sanic_core::{
-    clock::SystemClock,
+    clock::{RecencyWindow, SystemClock, WindowChoice},
     config::{Config, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
@@ -106,7 +106,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let (requests, requests_rx) = mpsc::unbounded_channel();
     let chatting = Arc::new(AtomicBool::new(false));
     let (due_tx, due) = watch::channel(DueTimes::new());
-    let live = Live::new(&config);
+    let live = Arc::new(Live::new(&config, store.window_choice()?));
     let control = DashboardControl {
         requests: requests.clone(),
         store: Arc::clone(&run_store),
@@ -114,6 +114,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         data_dir: data_dir.clone(),
         config_path: config_path.clone(),
         worker: Arc::clone(&worker),
+        live: Arc::clone(&live),
     };
     // Bound before the TUI starts, so it knows the address to open.
     let web = live
@@ -235,24 +236,49 @@ async fn cancel_running(worker: &Worker, tell_terminal: bool) {
 /// reloads, and the poller's progress.
 struct Live {
     skips: watch::Sender<SkipRules>,
-    /// `poll.updated_within_days`.
+    /// The recency window in force, in days, for the TUI.
     window: watch::Sender<Option<u32>>,
+    /// The same, with where it comes from, for the dashboard.
+    recency: watch::Sender<RecencyWindow>,
     /// The refresh batch under way; `None` when the queue is empty.
     progress: watch::Sender<Option<Progress>>,
 }
 
 impl Live {
-    fn new(config: &Config) -> Self {
+    /// With the window picked on the dashboard, if one is.
+    fn new(config: &Config, choice: Option<WindowChoice>) -> Self {
+        let recency = RecencyWindow {
+            configured: config.poll.updated_within_days,
+            choice,
+        };
         Self {
             skips: watch::Sender::new(config.skip_rules()),
-            window: watch::Sender::new(config.poll.updated_within_days),
+            window: watch::Sender::new(recency.days()),
+            recency: watch::Sender::new(recency),
             progress: watch::Sender::new(None),
         }
     }
 
     fn publish(&self, config: &Config) {
         self.skips.send_replace(config.skip_rules());
-        self.window.send_replace(config.poll.updated_within_days);
+        self.set_recency(|w| w.configured = config.poll.updated_within_days);
+    }
+
+    /// Picks a recency window, or with `None` goes back to the config's.
+    fn choose_window(&self, choice: Option<WindowChoice>) {
+        self.set_recency(|w| w.choice = choice);
+    }
+
+    /// Only a change is sent: the poller reconciles on each one.
+    fn set_recency(&self, change: impl FnOnce(&mut RecencyWindow)) {
+        let modified = self.recency.send_if_modified(|w| {
+            let before = *w;
+            change(w);
+            *w != before
+        });
+        if modified {
+            self.window.send_replace(self.recency.borrow().days());
+        }
     }
 
     /// The dashboard, on its own store connection, seeing what the TUI
@@ -276,7 +302,7 @@ impl Live {
             control: Arc::new(control),
             due: due.clone(),
             skips: self.skips.subscribe(),
-            window: self.window.subscribe(),
+            window: self.recency.subscribe(),
             clock: Arc::new(SystemClock),
         })
     }
@@ -296,6 +322,8 @@ struct DashboardControl {
     config_path: PathBuf,
     /// Holds the run settings as the config last loaded.
     worker: Arc<Worker>,
+    /// Where a recency window picked on the dashboard is published.
+    live: Arc<Live>,
 }
 
 impl sanic_web::Control for DashboardControl {
@@ -310,6 +338,16 @@ impl sanic_web::Control for DashboardControl {
 
     fn run_settings(&self, profile: &str) -> Result<RunSettings> {
         self.worker.run_settings(profile)
+    }
+
+    fn set_window(&self, choice: Option<WindowChoice>) -> Result<()> {
+        // Stored first: the reconcile it prompts reads it from there.
+        self.store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_window_choice(choice)?;
+        self.live.choose_window(choice);
+        Ok(())
     }
 
     fn regenerate(&self, run_id: i64, instruction: &str) -> Result<Result<i64, Refusal>> {
@@ -564,14 +602,23 @@ async fn poll_forever<G: GithubApi>(
     // PRs refreshed since startup; the first refresh of each checks for a
     // standing review request.
     let mut seen: HashSet<PrKey> = HashSet::new();
+    let mut window = live.recency.subscribe();
+    // Until when a rate limit pauses polling.
+    let mut paused_until = Instant::now();
 
     loop {
         tokio::select! {
             () = sleep_until(next_reconcile.min(next_notifications)) => {}
+            Ok(()) = window.changed() => {
+                // A wider window takes in PRs nothing has fetched yet,
+                // once any pause is over.
+                next_reconcile = Instant::now().max(paused_until);
+                continue;
+            }
             () = watcher.changed() => {
                 if reload(poller, config_path, worker, live) {
                     // New entries may cover PRs nothing has fetched yet.
-                    next_reconcile = Instant::now();
+                    next_reconcile = Instant::now().max(paused_until);
                 }
                 continue;
             }
@@ -628,6 +675,7 @@ async fn poll_forever<G: GithubApi>(
         };
         if let Some(wait) = backoff {
             let resume = Instant::now() + wait;
+            paused_until = resume;
             next_reconcile = next_reconcile.max(resume);
             next_notifications = next_notifications.max(resume);
         }
@@ -929,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_adds_skip_titles_to_the_config_file() {
+    fn the_dashboard_adds_skip_titles_and_picks_windows() {
         use sanic_web::Control as _;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -944,7 +992,8 @@ mod tests {
             started: mpsc::unbounded_channel().0,
             data_dir: dir.path().to_owned(),
             config_path: config_path.clone(),
-            worker: Arc::new(Worker::new(dir.path(), store, &config)),
+            worker: Arc::new(Worker::new(dir.path(), Arc::clone(&store), &config)),
+            live: Arc::new(Live::new(&config, None)),
         };
         assert!(control.add_skip_title("build(deps)*", None).unwrap());
         assert!(!control.add_skip_title("build(deps)*", None).unwrap());
@@ -955,6 +1004,29 @@ mod tests {
              skip_titles = [\"wip*\"]\n\n[review_requests]\nskip_titles = [\"build(deps)*\"]\n"
         );
         assert!(control.add_skip_title("x*", Some("nope")).is_err());
+
+        // A recency window picked there is stored, and followed by the
+        // lists and the poller, until it's reset; the config is untouched.
+        let before = std::fs::read_to_string(&config_path).unwrap();
+        let mut window = control.live.recency.subscribe();
+        control.set_window(Some(WindowChoice::Days(180))).unwrap();
+        assert!(window.has_changed().unwrap());
+        assert_eq!(window.borrow_and_update().days(), Some(180));
+        assert_eq!(*control.live.window.borrow(), Some(180));
+        assert_eq!(
+            store.lock().unwrap().window_choice().unwrap(),
+            Some(WindowChoice::Days(180))
+        );
+        control.set_window(None).unwrap();
+        assert_eq!(*control.live.window.borrow(), Some(14));
+        assert_eq!(store.lock().unwrap().window_choice().unwrap(), None);
+        // Only a change prompts a reconcile: not the same pick again, nor
+        // a config reload that leaves the window as it was.
+        window.mark_unchanged();
+        control.set_window(None).unwrap();
+        control.live.publish(&config);
+        assert!(!window.has_changed().unwrap());
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
     }
 
     #[test]

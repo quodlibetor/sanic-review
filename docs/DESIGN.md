@@ -524,16 +524,53 @@ embedded in the binary, so nothing is fetched at runtime.
     **Archived**.
 
   Within a group, PRs with a review you haven't looked at come first, marked
-  with a dot. Each row leads with its one next thing (`3 drafts`, `failed`,
-  `held`, `2 unanswered`, `mergeable`) and has the title; under the title a
-  dim line has the PR as `owner/name#N ↗`, linking to GitHub, its author, its
-  other statuses and PR state words, and the first line of a failed run's
-  error. A row's actions show on hover and on the selected row. It rereads
-  the lists, and the counts in the top bar, every few seconds; selection
-  follows the PR, so a refresh that reorders rows keeps it. PR state is the
-  TUI's: urgent words highlighted, approved and mergeable ones green, the
-  rest muted. The PR page's header shows it too, for an open PR whether or
-  not either list has it, and leaves out `—`.
+  with a dot. Each row has three cells, and says each fact once:
+  - **The lead**: its one next thing (`3 drafts`, `failed`, `held`,
+    `2 to answer`, `2 to post`, `submit review`, `posted`, `skipped`,
+    `mergeable`, `conflicts`). It's underlined dotted: hovering or
+    focusing it, or `d`, opens a popover with the latest run's status and
+    when, why it's skipped, the latest succeeded review's drafts by status
+    (pending, accepted but not posted, rejected, posted and when), and a
+    failed run's whole error.
+  - **The status cell**: who reviewed it, always, on both lists: `no
+    reviews`, `you`, `@alice`, `you and @alice`, `@alice and @bob`,
+    `@alice + 2 others`, `you and 2 others`. Each name has a mark, ✓
+    approved, ✗ changes requested or ○ commented, where each person
+    stands as GitHub's review decision counts it; `N others` is followed
+    by one mark per verdict among them. A review on a commit before the
+    head is dimmed, and after your own it says `N pushes since your
+    review`: heads the poller has seen since, so several pushes between
+    polls count as one. Hovering or focusing it, or `v`, opens a popover
+    with each person's latest review: login, verdict, when, and whether
+    it's on the latest push. Bots and dismissed reviews are left out. Under
+    it are what the PR asks of you or waits on, besides the lead:
+    `N to answer`, `N to post`, `submit review`, `N awaiting @author`
+    (your comments the PR's author hasn't answered with a comment, or a
+    reaction to yours; on your PRs, `N awaiting @reviewer`, whoever you
+    last answered), and on your PRs failing CI and what holds up an
+    approval.
+  - **The PR**: the title, and under it a dim line with the PR as
+    `owner/name#N ↗`, linking to GitHub, its author, its approval, on
+    reviews you owe its CI and what holds up an approval (`conflicts`,
+    `behind`, `blocked`, `ci failing`, `ci pending`), and `draft PR`.
+
+  Folded rows leave out the PR's dim line. On a narrower window the lead
+  and status share a line over the PR; on a phone they stack, and nothing
+  scrolls sideways. A row's actions show on hover and on the selected row.
+  It rereads the lists, and the counts in the top bar, every few seconds;
+  selection follows the PR, so a refresh that reorders rows keeps it, as
+  does a popover opened by key. PR state is the TUI's: urgent words
+  highlighted, approved and mergeable ones green, the rest muted. The PR
+  page's header shows it too, for an open PR whether or not either list
+  has it, and leaves out `—`.
+
+  Under each list a dim line says how many older PRs the recency window
+  hides, from a count-only search per list on each reconcile, and offers
+  wider windows. Picking one, a post behind the token and origin checks,
+  has `serve` keep it in `poll_state`, never the config file, in place of
+  `poll.updated_within_days` for the lists, the TUI and the poller, and
+  reconcile with it as soon as no rate limit pauses polling; "back to
+  default" goes back to the config's.
 - **Top bar.** Every page's: home, where the page is, and the queued,
   running and pending draft counts.
 - **PR page.** Drafts first. A header with the PR, its state and actions;
@@ -696,7 +733,9 @@ embedded in the binary, so nothing is fetched at runtime.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
   and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm, `x` archives or unarchives, `X` shows
-  archived PRs, `i` opens the ignore editor, `c` the chat commands.
+  archived PRs, `i` opens the ignore editor, `c` the chat commands, and
+  on the index `v` and `d` open the selected row's reviewers and lead
+  popovers, which `Esc` closes.
   `Enter` opens the selected PR, clicking a row selects it, and `j`/`k`
   skip a folded group. `q` closes the help, or else goes back to
   the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`
