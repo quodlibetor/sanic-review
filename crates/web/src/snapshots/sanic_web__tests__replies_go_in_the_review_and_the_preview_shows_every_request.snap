@@ -24,7 +24,7 @@ expression: "readable(&f, cols)"
 <div class="rv">
 <div class="thread">
 <div class="th">
-<span class="anc">src/lib.rs:3-4</span>
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3-R4" title="On GitHub, at the reviewed commit">src/lib.rs:3-4</a>
 <span class="dim">1 comment</span>
 <a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
 </div>
@@ -43,7 +43,7 @@ It looks dead.">Is `m` used anywhere? It looks dead.</span>
 </h2>
 <div class="rv">
 <div class="th">
-<span class="anc">src/lib.rs:3</span>
+<a class="anc" href="https://github.com/org/repo/pull/7/files#diff-b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759R3" title="On GitHub, at the reviewed commit">src/lib.rs:3</a>
 <span class="chip dim">outdated</span>
 <span class="dim">1 comment</span>
 <a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>

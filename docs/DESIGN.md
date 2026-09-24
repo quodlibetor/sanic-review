@@ -594,7 +594,15 @@ embedded in the binary, so nothing is fetched at runtime.
   run you pick). Each comment draft shows the lines around its anchor from
   the run's `pr.diff`; one that isn't on a line of the diff is flagged as
   going in the body, and one a regeneration kept links the draft it
-  revises.
+  revises. Each draft's `path:line`, and each thread's on the reviewed
+  head, links to those lines on GitHub. While the reviewed head is still the PR's, that's the
+  PR's Files changed (`#diff-<SHA-256 of the path>R10-R12`, `L` for the
+  old side; the format is GitHub's as far as known, not checked against
+  GitHub here), which isn't pinned: pinned to a commit, it would show
+  only that commit's changes. Once the PR has moved on, it's the lines in
+  the file at the reviewed head, for new lines only; old ones get no
+  link. A draft that isn't on a line of the diff links to its lines in
+  the file at that head.
 - **Existing threads.** Over the drafts, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, and how
   many are resolved; the threads no draft overlaps are folded under it.

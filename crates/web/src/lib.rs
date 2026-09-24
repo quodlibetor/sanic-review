@@ -15,6 +15,7 @@ mod diff;
 mod guard;
 mod ignore;
 mod index;
+mod links;
 mod page;
 mod pr;
 mod regenerate;

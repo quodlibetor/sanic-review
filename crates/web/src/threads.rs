@@ -4,10 +4,12 @@
 
 use maud::{Markup, html};
 use sanic_core::{
-    pr::{CONVERSATION_THREAD, Comment, Thread},
+    pr::{CONVERSATION_THREAD, Comment, PrKey, Thread},
     run::Side,
 };
 use sanic_store::DraftRow;
+
+use crate::links::At;
 
 /// How much of a comment's body an excerpt shows.
 const EXCERPT: usize = 160;
@@ -16,11 +18,23 @@ const EXCERPT: usize = 160;
 /// lines are compared on: the run's.
 #[derive(Debug, Clone, Copy)]
 pub struct Existing<'a> {
+    pub key: &'a PrKey,
     pub threads: &'a [Thread],
     pub head: &'a str,
+    /// The PR's head as last polled, for links to GitHub.
+    pub pr_head: &'a str,
 }
 
 impl<'a> Existing<'a> {
+    /// Where links to the threads' lines point.
+    pub fn at(self) -> At<'a> {
+        At {
+            key: self.key,
+            reviewed: self.head,
+            current: self.pr_head,
+        }
+    }
+
     /// The PR's inline review threads with comments; the conversation
     /// isn't on any lines.
     pub fn inline(self) -> impl Iterator<Item = &'a Thread> {
@@ -104,7 +118,7 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
                         (rest.len()) @if rest.len() == 1 { " thread doesn't" } @else { " threads don't" }
                         " overlap a draft"
                     }
-                    @for thread in rest { (thread_box(thread, existing.head)) }
+                    @for thread in rest { (thread_box(existing.at(), thread)) }
                 }
             }
         }
@@ -113,16 +127,16 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
 
 /// A thread in full: where it is, its state, a link, and an excerpt of
 /// each comment.
-pub fn thread_box(thread: &Thread, head: &str) -> Markup {
-    thread_box_with(thread, head, false, &html! {})
+pub fn thread_box(at: At<'_>, thread: &Thread) -> Markup {
+    thread_box_with(at, thread, false, &html! {})
 }
 
 /// [`thread_box`], marked `chosen` if a draft posts in it, with `actions`
 /// under its comments.
-pub fn thread_box_with(thread: &Thread, head: &str, chosen: bool, actions: &Markup) -> Markup {
+pub fn thread_box_with(at: At<'_>, thread: &Thread, chosen: bool, actions: &Markup) -> Markup {
     html! {
         div.thread.resolved[thread.resolved].chosen[chosen] {
-            (thread_head(thread, head))
+            (thread_head(at, thread))
             ul.said {
                 @for comment in &thread.comments { li { (said(comment)) } }
             }
@@ -132,8 +146,10 @@ pub fn thread_box_with(thread: &Thread, head: &str, chosen: bool, actions: &Mark
 }
 
 /// A thread's heading: where it is, whether it's resolved or outdated,
-/// and its link on GitHub.
-pub fn thread_head(thread: &Thread, head: &str) -> Markup {
+/// and its link on GitHub. Its lines on the reviewed head link to them
+/// there; see [`At::lines`].
+pub fn thread_head(at: At<'_>, thread: &Thread) -> Markup {
+    let head = at.reviewed;
     let path = thread.path.as_deref().unwrap_or("?");
     let place = &thread.place;
     let range = |side: Option<Side>, first: Option<u32>, last: u32| {
@@ -148,7 +164,8 @@ pub fn thread_head(thread: &Thread, head: &str) -> Markup {
         }
     };
     // GitHub's lines when they aren't the reviewed head's, flagged.
-    let (lines, elsewhere) = match place.lines_at(thread.line, head) {
+    let on_head = place.lines_at(thread.line, head);
+    let (lines, elsewhere) = match on_head {
         Some((side, first, last)) => (Some(range(Some(side), Some(first), last)), false),
         None => match (thread.line, place.original_line) {
             (Some(line), _) if !place.outdated => {
@@ -164,7 +181,17 @@ pub fn thread_head(thread: &Thread, head: &str) -> Markup {
     let count = thread.comments.len();
     html! {
         div.th {
-            span.anc { (path) @if let Some(lines) = &lines { (lines) } }
+            @if let Some(url) = on_head
+                .filter(|_| thread.path.is_some())
+                .and_then(|(side, first, last)| at.lines(path, side, (first, last)))
+            {
+                a.anc href=(url)
+                    title="On GitHub, at the reviewed commit" {
+                    (path) @if let Some(lines) = &lines { (lines) }
+                }
+            } @else {
+                span.anc { (path) @if let Some(lines) = &lines { (lines) } }
+            }
             @if elsewhere {
                 span.dim title="Lines of another commit than the one reviewed, so they aren't compared with the drafts'." {
                     "on another commit"
