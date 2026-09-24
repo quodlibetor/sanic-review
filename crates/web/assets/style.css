@@ -1577,15 +1577,30 @@ main:has(> .prh) {
   margin-top: 0.35rem;
 }
 
+/* A draft's box reads as the text it replaces: the same font, colours and
+   place, its border inside the body's padding so nothing moves. The
+   script grows it to fit, so it doesn't scroll. */
 .dc textarea {
-  width: 100%;
+  display: block;
   box-sizing: border-box;
-  font-size: 13px;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--accent);
+  width: calc(100% + 0.3rem);
+  margin: 0 0 0 -0.3rem;
+  padding: calc(0.15rem - 1px) calc(0.3rem - 1px);
+  font: inherit;
+  color: inherit;
+  background: var(--raise);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 0.3rem;
+}
+
+.dc textarea:focus,
+.cf textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.js .dc textarea {
+  resize: none;
 }
 
 /* Without the script, a draft's box shows with its Save; with it, the body

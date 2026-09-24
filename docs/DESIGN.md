@@ -617,7 +617,9 @@ embedded in the binary, so nothing is fetched at runtime.
   of the draft, or the draft as a reply in that thread; its Accept reads
   "Post separately", a comment of its own. Picking one accepts the draft,
   and the choice is stored with it (`drafts.thread_choice`); accepting,
-  rejecting or undoing clears it. For each draft: edit in place (click its text or `e`; htmx
+  rejecting or undoing clears it. For each draft: edit in place (click its text or `e`; the box
+  has the text's font, colours and place, starts as tall as the text and
+  grows to fit what you type, and only its border says it's a box; htmx
   saves on change, or a Save button without the script; a box you leave
   by clicking another draft folds, and its save swaps in, only after that
   click, so the drafts don't move under it), accept (`y`),

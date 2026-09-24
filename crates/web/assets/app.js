@@ -373,14 +373,34 @@
     e.preventDefault();
   }
 
-  // A draft's body turns into its box, which saves as you leave it.
+  // A draft's body turns into its box, which saves as you leave it. The box
+  // starts as tall as the text it replaces, and grows to fit what you type.
   function editDraft(card) {
     const box = card.querySelector(".edit textarea");
     if (!box) return false;
+    const body = card.querySelector(".body");
+    box.dataset.minHeight = body ? body.offsetHeight : 0;
     card.classList.add("editing");
+    fit(box);
     box.focus();
     return true;
   }
+
+  // Sizes a text box to its content, however long, so it never scrolls,
+  // but never shorter than it first was: for a draft's box, the text it
+  // replaced.
+  function fit(box) {
+    if (box.dataset.minHeight === undefined) box.dataset.minHeight = box.offsetHeight;
+    // Collapsing it to measure can shorten the page, which would scroll it.
+    const scroll = window.scrollY;
+    box.style.height = "0";
+    const border = box.offsetHeight - box.clientHeight;
+    box.style.height = Math.max(box.scrollHeight + border, Number(box.dataset.minHeight)) + "px";
+    if (window.scrollY !== scroll) window.scrollTo(window.scrollX, scroll);
+  }
+  document.addEventListener("input", function (e) {
+    if (e.target.matches(".dc textarea, .cf textarea")) fit(e.target);
+  });
 
   document.addEventListener("click", function (e) {
     const body = e.target.closest(".dc .body[data-edit]");
