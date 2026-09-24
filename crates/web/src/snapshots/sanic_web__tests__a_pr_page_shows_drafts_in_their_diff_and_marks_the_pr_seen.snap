@@ -78,6 +78,29 @@ expression: "readable(&f, &page.body)"
 </button>
 </span>
 </form>
+<div class="threads-bar" id="existing">
+<span class="lead">💬</span>
+<span>
+<b>1</b> existing review thread · <b>0</b> overlap your drafts</span>
+<details class="threads-rest">
+<summary>1 thread doesn't overlap a draft</summary>
+<div class="thread">
+<div class="th">
+<span class="anc">src/lib.rs:2</span>
+<span class="dim" title="Lines of another commit than the one reviewed, so they aren't compared with the drafts'.">on another commit</span>
+<span class="dim">2 comments</span>
+</div>
+<ul class="said">
+<li>
+<b>me</b>: <span class="excerpt" title="hm">hm</span>
+</li>
+<li>
+<b>alice</b>: <span class="excerpt" title="hm">hm</span>
+</li>
+</ul>
+</div>
+</details>
+</div>
 <section id="drafts">
 <article class="draft dc pending summary" id="draft-1">
 <div class="h">

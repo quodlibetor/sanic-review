@@ -1,0 +1,117 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, card_of_draft(body, f.drafts[1]))"
+---
+<article class="draft dc pending" id="draft-2">
+<div class="h">
+<span class="anc">src/lib.rs:3</span>
+<span class="sev major">major</span>
+<span class="dim conf">high conf.</span>
+<a class="tag-overlap" href="#draft-2-threads" title="An existing review thread is on these lines.">overlaps an existing thread</a>
+<span class="sp">
+<form class="decide" method="post" action="/drafts/2/status" hx-post="/drafts/2/status" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<button class="btn" name="status" value="accepted">Accept<span class="k">y</span>
+</button>
+<button class="btn" name="status" value="rejected">Reject<span class="k">n</span>
+</button>
+</form>
+</span>
+</div>
+<table class="diff">
+<tr class="ctx">
+<td class="num">1</td>
+<td class="num">1</td>
+<td class="code">
+<span class="sign"> </span>fn main() {</td>
+</tr>
+<tr class="del">
+<td class="num">2</td>
+<td class="num">
+</td>
+<td class="code">
+<span class="sign">-</span>    let n = 1;</td>
+</tr>
+<tr class="add">
+<td class="num">
+</td>
+<td class="num">2</td>
+<td class="code">
+<span class="sign">+</span>    let n = 2;</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>me</b>: <span class="excerpt" title="hm">hm</span>
+<span class="dim"> +1 more</span>
+</td>
+</tr>
+<tr class="add anchor">
+<td class="num">
+</td>
+<td class="num">3</td>
+<td class="code">
+<span class="sign">+</span>    let m = n + 1;</td>
+</tr>
+<tr class="thread-row resolved">
+<td colspan="3">💬 <b>carol</b>: <span class="excerpt" title="Name it?">Name it?</span> <span class="chip dim">resolved</span>
+</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="num">3</td>
+<td class="num">4</td>
+<td class="code">
+<span class="sign"> </span>    println!(&quot;{n}&quot;);</td>
+</tr>
+<tr class="thread-row">
+<td colspan="3">💬 <b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</td>
+</tr>
+<tr class="ctx">
+<td class="num">4</td>
+<td class="num">5</td>
+<td class="code">
+<span class="sign"> </span>}</td>
+</tr>
+</table>
+<div class="overlaps" id="draft-2-threads">
+<div class="dim">Already said on these lines:</div>
+<div class="thread">
+<div class="th">
+<span class="anc">src/lib.rs:3-4</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-range">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>bob</b>: <span class="excerpt" title="Is `m` used anywhere?
+
+It looks dead.">Is `m` used anywhere? It looks dead.</span>
+</li>
+</ul>
+</div>
+<div class="thread">
+<div class="th">
+<span class="anc">src/lib.rs:3</span>
+<span class="chip dim">outdated</span>
+<span class="dim">1 comment</span>
+<a class="gh" href="https://github.com/org/repo/pull/7#discussion_t-outdated">on GitHub ↗</a>
+</div>
+<ul class="said">
+<li>
+<b>dave</b>: <span class="excerpt" title="Why 2?">Why 2?</span>
+</li>
+</ul>
+</div>
+</div>
+<div class="body" data-edit title="click or e to edit">Why `m`?</div>
+<form class="edit" method="post" action="/drafts/2/edit" hx-post="/drafts/2/edit" hx-trigger="change" hx-target="closest article" hx-swap="outerHTML" hx-sync="closest article:queue all">
+<input type="hidden" name="csrf" value="<token>">
+<textarea name="body" rows="4">Why `m`?</textarea>
+<button class="btn save" type="submit">Save</button>
+</form>
+</article>

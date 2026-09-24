@@ -523,7 +523,24 @@ embedded in the binary, so nothing is fetched at runtime.
   run you pick). Each comment draft shows the lines around its anchor from
   the run's `pr.diff`; one that isn't on a line of the diff is flagged as
   going in the body, and one a regeneration kept links the draft it
-  revises. For each draft: edit in place (click its text or `e`; htmx
+  revises.
+- **Existing threads.** Over the drafts, a summary of the PR's review
+  threads says how many there are, how many overlap your drafts, and how
+  many are resolved; the threads no draft overlaps are folded under it.
+  A draft overlaps a thread on the same file and side when their lines
+  share one: a thread's lines run from its start line, when it has one,
+  to its line. Those are the thread's lines on the PR head it was
+  fetched at, so they count only when that's the run's head and the
+  thread isn't outdated; an outdated thread's lines where it was left
+  count only when that commit is the run's head. Otherwise the lines
+  might not be the same lines, so it overlaps nothing, and it's listed
+  with "on another commit". Resolved threads never overlap and are
+  dimmed. A draft that overlaps a thread says so, and the thread is
+  shown under the draft's diff lines. Each thread shows where it is,
+  whether it's resolved or outdated, its link on GitHub, and each
+  comment's author with an excerpt of its body; the diff shows each
+  thread on the reviewed head under the line it ends on, with its first
+  comment. The conversation isn't on lines, so it isn't listed. For each draft: edit in place (click its text or `e`; htmx
   saves on change, or a Save button without the script; a box you leave
   by clicking another draft folds, and its save swaps in, only after that
   click, so the drafts don't move under it), accept (`y`),
