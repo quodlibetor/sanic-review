@@ -45,6 +45,10 @@ is the main checkout; run it from the workspace root as
 `GIT_CEILING_DIRECTORIES="$(realpath ../..)" dist generate` so it writes
 there instead. `mise run check` fails while `release.yml` is stale.
 
+Releases are cut with `mise run release`, which sets the version and the tag
+together; don't tag by hand, except for the prereleases it doesn't cut (see
+`docs/DESIGN.md`).
+
 ## VCS
 
 This repo uses jj. Work in a workspace under `.workspaces/`, and run

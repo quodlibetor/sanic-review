@@ -1340,13 +1340,28 @@ a formula to the `quodlibetor/homebrew-tap` tap.
 - [dist](https://github.com/axodotdev/cargo-dist) generates the workflow from
   `dist-workspace.toml`. Don't edit `release.yml` by hand: change the config
   and run `dist generate`. `dist plan` shows what a release would build.
-- The version comes from `[workspace.package]` in `Cargo.toml`. Push only a
-  `vX.Y.Z` tag equal to it, on a commit that carries that version. The
-  trigger is dist's default and runs for anything that looks like a version
-  (`v0.1.0`, `0.1.0`, `sanic-review-v0.1.0`); a tag for any other version
-  fails the plan job and publishes nothing. A suffix such as `-rc.1` makes a
-  prerelease, so the workspace version needs the same suffix. On pull
-  requests the workflow runs only the plan job.
+- The version comes from `[workspace.package]` in `Cargo.toml`, and the tag
+  must equal it on a commit that carries that version. The trigger is dist's
+  default and runs for anything that looks like a version (`v0.1.0`,
+  `0.1.0`, `sanic-review-v0.1.0`); a tag for any other version fails the plan
+  job and publishes nothing. On pull requests the workflow runs only the plan
+  job.
+- `mise run release [X.Y.Z] [--push]` (`scripts/release.sh`) makes the tag
+  and the version from one number, so they can't disagree. Without a version
+  it bumps the patch. It refuses unless the working copy is an empty,
+  undescribed change on `main`, `main` is exactly the remote's, and the tag
+  exists neither locally nor on the remote. It then commits
+  `chore: release vX.Y.Z` on `main` with the new version in `Cargo.toml` and
+  the workspace members' `Cargo.lock` entries, runs `mise run check` on it,
+  tags it, and moves `main` to it, leaving an empty working copy on top. It
+  pushes only with `--push`, `main` first and then the tag, so a remote that
+  rejects `main` gets no tag and publishes nothing; otherwise it prints those
+  `jj git push` commands. If anything before the tag fails, the release
+  change stays for inspection and the script prints the `jj abandon` that
+  discards it. It works from the main checkout or a jj workspace, since jj
+  does the tagging and pushing and git is pointed at `jj git root`.
+  Only plain `X.Y.Z` is accepted, so prereleases (`-rc.1`) need a hand-made
+  tag and version.
 - `--version` adds the commit the binary was built from and that commit's
   time (not the build's, so builds stay reproducible), e.g.
   `0.1.0 (580b3cb1, 2026-09-24 18:31 UTC)`. The cli's `build.rs` asks git,

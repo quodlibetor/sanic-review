@@ -248,6 +248,22 @@ network or spend tokens; GitHub, `claude` and the clock sit behind fakes.
 - Nothing may post to GitHub or push except through an explicit user action.
   Don't add code paths that weaken that.
 
+### Releasing
+
+```sh
+mise run release            # bump the patch version
+mise run release 0.2.0      # or release a version you pick
+mise run release --push     # and push main and the tag
+```
+
+It commits the version on `main` as `chore: release vX.Y.Z`, runs the gate
+on that commit, tags it, and moves `main` to it. Pushing the tag is what
+publishes, so without `--push` it stops and prints the push commands. Start
+from an empty working copy on a `main` that matches `origin`'s (`jj git
+fetch`, `jj new main`). If the gate fails it prints the `jj abandon` that
+discards the release change. Details are in
+[docs/DESIGN.md](docs/DESIGN.md#releases).
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

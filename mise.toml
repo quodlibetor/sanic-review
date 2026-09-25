@@ -49,6 +49,12 @@ description = "Screenshot the demo dashboard for the README (needs Chrome; on Li
 tools = { node = "26.10.0" }
 run = "node scripts/screenshots.mjs"
 
+# Bumps the version, tags the release on main, and pushes only with --push;
+# see scripts/release.sh.
+[tasks.release]
+description = "Cut a release: mise run release [X.Y.Z] [--push]"
+run = "scripts/release.sh"
+
 [tasks.check]
 description = "The gate every change must pass"
 depends = ["fmt", "lint", "deny", "dist", "test"]
