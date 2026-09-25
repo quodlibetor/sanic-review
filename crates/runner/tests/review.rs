@@ -97,6 +97,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
         max_concurrent: 1,
         timeout,
         read_paths: vec![],
+        manual_reviews: false,
     };
     let runner = ReviewRunner::new(data.path());
     let git_url = remote.root.path().to_string_lossy().into_owned();

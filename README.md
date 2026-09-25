@@ -22,8 +22,9 @@ Nothing is posted until you click.
   review with a pile of opinions already written down. Some of them will be
   wrong, confidently. You're the one posting them.
 - **It isn't free.** Every review spends your Claude tokens, and polling
-  spends your GitHub rate limit. `serve --manual-reviews` holds every review
-  until you start it, if you'd rather look first.
+  spends your GitHub rate limit. So out of the box it holds every review
+  until you start it (manual reviews); turn that off, with `m` in the TUI or
+  the dashboard's settings, once you'd rather it just reviewed.
 - **It only drafts reviews of other people's PRs, for now.** Replies in
   threads you're in, and comments on your own PRs, show up as things to
   answer, but it doesn't draft answers or fixes for them yet.
@@ -116,11 +117,14 @@ dashboard, logging its URL on startup (`o` in the TUI opens it). Its options:
 --port <PORT>          dashboard port, bound on 127.0.0.1
 --config <CONFIG>      defaults to ~/.config/sanic-review/config.toml
 --data-dir <DATA_DIR>  defaults to ~/.local/share/sanic-review
---manual-reviews       queue reviews, but run only the ones you start
+--manual-reviews       turn manual reviews on in the config
 ```
 
-The first poll records what's already there without reacting to it, so it
-won't review your whole backlog at once. Standing review requests do count.
+The first poll records what's already there without reacting to it. Standing
+review requests do count, so manual reviews start on: they're queued and
+held, and nothing runs until you start one (`r` in the TUI, Review now on
+the dashboard, or `sanic-review review`). Turning them off starts the held
+ones, after saying how many, a few at a time (`runner.max_concurrent`).
 
 Other commands:
 
@@ -188,6 +192,7 @@ your PRs, activity and the log. Its keys:
 | `r` | start a failed, skipped, archived or held review, after confirming |
 | `x` / `X` | archive or unarchive / show archived |
 | `i` | ignore PRs by title |
+| `m` | turn manual reviews on or off; off asks first when that starts held reviews |
 | `c` | chat with the agent that reviewed the selected PR |
 | `z` / `Z` | cycle a pane through fit, full screen and collapsed / reset |
 | `?` | help |
@@ -205,6 +210,9 @@ fine too: `serve` reloads it when it changes and keeps comments and layout
 when it edits it. A minimal one:
 
 ```toml
+[runner]
+manual_reviews = false            # run queued reviews by themselves; on unless set
+
 [review_requests]
 skip_titles = ["build(deps)*"]    # never auto-review these
 

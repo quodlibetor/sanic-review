@@ -8,7 +8,7 @@ use crate::skip::Skip;
 pub enum Why {
     /// The latest run failed or crashed.
     Failed,
-    /// `--manual-reviews` is holding its queued review.
+    /// Manual reviews (`runner.manual_reviews`) are holding its queued review.
     Held,
     /// It isn't reviewed automatically, for this reason: archived, a draft,
     /// already reviewed by someone, or a skipped title.
@@ -46,7 +46,7 @@ mod tests {
             assert_eq!(Why::of(None, Some(status), false), Some(Why::Failed));
         }
         assert_eq!(Why::of(None, Some("queued"), true), Some(Why::Held));
-        // Without --manual-reviews a queued review runs by itself.
+        // Without manual reviews a queued review runs by itself.
         assert_eq!(Why::of(None, Some("queued"), false), None);
         for status in [None, Some("running"), Some("succeeded"), Some("superseded")] {
             assert_eq!(Why::of(None, status, true), None, "{status:?}");

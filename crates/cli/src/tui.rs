@@ -4,8 +4,8 @@
 //! It runs on its own thread with its own read-only store connection, and
 //! rereads the store on an interval. Its only actions are asking `serve`
 //! to rerun a review, to archive or unarchive a PR and to save the panes'
-//! layout, and opening the dashboard in a browser; nothing in it edits
-//! drafts.
+//! layout, editing the config's `skip_titles` and manual reviews, and
+//! opening the dashboard in a browser; nothing in it edits drafts.
 
 use std::{
     collections::HashMap,
@@ -35,6 +35,7 @@ use ratatui::{
 };
 use sanic_core::{
     clock::{Clock, window_start},
+    config::{CheckoutResolver, Unloadable},
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
     start::Why,
@@ -77,7 +78,7 @@ impl Tui {
         let thread = std::thread::Builder::new().name("tui".into()).spawn({
             let stop = Arc::clone(&stop);
             move || {
-                let mut app = App::new(shared.manual_reviews);
+                let mut app = App::new();
                 app.set_sizes(load_layout(&store));
                 let result = run(&mut terminal, &mut app, &store, &shared, &stop);
                 ratatui::restore();
@@ -182,8 +183,8 @@ impl Drop for Tui {
 pub struct Shared {
     /// The GitHub login everything is judged relative to.
     pub me: String,
-    /// `serve --manual-reviews`.
-    pub manual_reviews: bool,
+    /// `runner.manual_reviews`, as the config last loaded.
+    pub manual_reviews: watch::Receiver<bool>,
     pub logs: LogLines,
     /// When the scheduler will queue each debounced review.
     pub due: watch::Receiver<DueTimes>,
@@ -196,8 +197,11 @@ pub struct Shared {
     pub clock: Arc<dyn Clock>,
     /// What you ask `serve` to do.
     pub requests: mpsc::UnboundedSender<Request>,
-    /// The ignore editor adds `skip_titles` here; `serve` reloads it.
+    /// The ignore editor adds `skip_titles` here, and `m` switches manual
+    /// reviews; `serve` reloads it.
     pub config_path: PathBuf,
+    /// Resolves its checkouts, so `m` loads it as `serve` does.
+    pub resolver: Arc<dyn CheckoutResolver + Send + Sync>,
     /// Where `c`'s chats check worktrees out.
     pub data_dir: PathBuf,
     /// Runs `c`'s chats from the UI thread.
@@ -361,6 +365,18 @@ fn run(
                         profile.as_deref(),
                     ));
                 }
+                Flow::SwitchManualReviews => {
+                    let config: ConfigFile = (&shared.config_path, &*shared.resolver);
+                    if let Some(notice) = switch_manual_reviews(app, config, store) {
+                        app.set_notice(notice);
+                    }
+                }
+                Flow::TurnOffManualReviews(told) => {
+                    let config: ConfigFile = (&shared.config_path, &*shared.resolver);
+                    if let Some(notice) = turn_off_manual_reviews(app, config, store, told) {
+                        app.set_notice(notice);
+                    }
+                }
             }
         }
     }
@@ -384,6 +400,85 @@ fn add_skip_title(config: &Path, pattern: &str, profile: Option<&str>) -> String
     }
 }
 
+/// The config file, and what resolves its checkouts so it's loaded as
+/// `serve` loads it.
+type ConfigFile<'a> = (&'a Path, &'a dyn CheckoutResolver);
+
+/// `m`: switches manual reviews from what the config file says now, not
+/// what was last loaded, which lags a write by the reload and the next
+/// reread; so a second press right after the first undoes it, and an edit
+/// from the dashboard counts. It reads the file as `serve` would load it,
+/// so a file `serve` wouldn't load is left alone. What to tell you, if
+/// anything yet.
+fn switch_manual_reviews(app: &mut App, config: ConfigFile, store: &Store) -> Option<String> {
+    let (path, resolver) = config;
+    let on = match config_edit::manual_reviews_in_file(path, resolver) {
+        Ok(on) => on,
+        Err(why) => return Some(unloadable(&why)),
+    };
+    match if on { count_held(store) } else { Ok(0) } {
+        Ok(held) => app
+            .switch_manual_reviews(on, held)
+            .map(|on| set_manual_reviews(config, on)),
+        Err(err) => {
+            warn!("switching manual reviews failed: {err:?}");
+            Some(format!("couldn't switch manual reviews: {err}"))
+        }
+    }
+}
+
+/// `y` to turning manual reviews off, told `told` held reviews start: they
+/// are counted in the store again, as `m` counts them, since the panes lag
+/// it. What to tell you, if anything yet.
+fn turn_off_manual_reviews(
+    app: &mut App,
+    config: ConfigFile,
+    store: &Store,
+    told: u32,
+) -> Option<String> {
+    match count_held(store) {
+        Ok(held) => app
+            .turn_off_manual_reviews(held, told)
+            .then(|| set_manual_reviews(config, false)),
+        Err(err) => {
+            warn!("turning manual reviews off failed: {err:?}");
+            Some(format!("couldn't turn manual reviews off: {err}"))
+        }
+    }
+}
+
+/// The reviews manual reviews are holding, which turning them off starts.
+fn count_held(store: &Store) -> Result<u32> {
+    store
+        .queued_review_count()
+        .wrap_err("counting the held reviews")
+}
+
+/// Turns manual reviews on or off in the config file, and says how that
+/// went.
+fn set_manual_reviews(config: ConfigFile, on: bool) -> String {
+    let (path, resolver) = config;
+    match config_edit::set_manual_reviews_in_file(path, on, resolver) {
+        Ok(Ok(_)) if on => {
+            "manual reviews on: queued reviews are held until you start them (r)".into()
+        }
+        Ok(Ok(_)) => {
+            "manual reviews off: the held reviews start as serve reloads the config".into()
+        }
+        Ok(Err(why)) => unloadable(&why),
+        Err(err) => {
+            warn!("switching manual reviews failed: {err:?}");
+            format!("couldn't switch manual reviews: {err}")
+        }
+    }
+}
+
+/// Why manual reviews weren't switched in a config file that doesn't load.
+/// `serve` has already warned of it, as it failed to reload.
+fn unloadable(why: &Unloadable) -> String {
+    format!("couldn't switch manual reviews: the config doesn't load, so it's left as it is: {why}")
+}
+
 /// Everything the panes show from the store.
 #[derive(Debug, Default, Clone)]
 pub struct Overview {
@@ -402,6 +497,9 @@ pub struct Overview {
     pub skipped: HashMap<PrKey, Skip>,
     /// The config's profiles, in file order.
     pub profiles: Vec<String>,
+    /// `runner.manual_reviews`: queued reviews are held, not waiting their
+    /// turn.
+    pub manual_reviews: bool,
 }
 
 impl Overview {
@@ -435,6 +533,7 @@ impl Overview {
         // Not held through the queries below: it blocks a config reload.
         drop(skips);
         Ok(Self {
+            manual_reviews: *shared.manual_reviews.borrow(),
             owed,
             skipped,
             profiles,
@@ -535,8 +634,6 @@ pub struct App {
     logs: Vec<String>,
     /// Log lines dropped from the front of `logs` so far.
     logs_dropped: u64,
-    /// `serve --manual-reviews`: queued reviews are held, not waiting their turn.
-    manual_reviews: bool,
     focus: Pane,
     /// How much room each pane takes; `serve` saves it as it changes.
     sizes: Sizes,
@@ -562,6 +659,9 @@ enum Overlay {
     },
     /// Waiting for a yes before quitting, which cancels these reviews.
     ConfirmQuit(Vec<PrKey>),
+    /// Waiting for a yes before turning manual reviews off, which starts
+    /// this many held reviews.
+    ConfirmAutomatic(u32),
 }
 
 /// What the loop does after a key.
@@ -581,6 +681,10 @@ pub enum Flow {
         pattern: String,
         profile: Option<String>,
     },
+    /// Switch manual reviews from what the config file says now: `m`.
+    SwitchManualReviews,
+    /// Turn manual reviews off, told this many held reviews start: `y`.
+    TurnOffManualReviews(u32),
 }
 
 /// What the UI asks `serve` to do.
@@ -596,15 +700,20 @@ pub enum Request {
     SaveLayout(Sizes),
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     #[must_use]
-    pub fn new(manual_reviews: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             loaded: Overview::default(),
             overview: Overview::default(),
             logs: Vec::new(),
             logs_dropped: 0,
-            manual_reviews,
             focus: Pane::Owed,
             sizes: Sizes::default(),
             lists: Default::default(),
@@ -703,6 +812,15 @@ impl App {
                 _ => Flow::Continue,
             };
         }
+        if let Some(Overlay::ConfirmAutomatic(told)) = self.overlay {
+            self.overlay = None;
+            return match key.code {
+                KeyCode::Char('c') if ctrl => self.quit(),
+                KeyCode::Char('y') => Flow::TurnOffManualReviews(told),
+                // Anything else is a no, so a stray key can't spend tokens.
+                _ => Flow::Continue,
+            };
+        }
         if let Some(Overlay::ConfirmRerun { key: pr, .. }) = &self.overlay {
             let pr = pr.clone();
             self.overlay = None;
@@ -727,6 +845,7 @@ impl App {
             KeyCode::Char('r') => self.ask_rerun(),
             KeyCode::Char('x') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
+            KeyCode::Char('m') => return Flow::SwitchManualReviews,
             KeyCode::Char('c') => return self.open_chat(),
             KeyCode::Char('o') => return Flow::Open(self.selected_page()),
             KeyCode::Char(c) if let Some(pane) = Pane::with_key(c) => return self.jump(pane),
@@ -813,7 +932,7 @@ impl App {
             return;
         };
         let skip = self.overview.skipped.get(&pr.key);
-        let Some(why) = Why::of(skip, pr.latest_status(), self.manual_reviews) else {
+        let Some(why) = Why::of(skip, pr.latest_status(), self.overview.manual_reviews) else {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
@@ -821,6 +940,27 @@ impl App {
             key: pr.key.clone(),
             why,
         });
+    }
+
+    /// Turns manual reviews on if they're off (`on`), or off: that asks
+    /// first while reviews are held (`held`), since they all start. What to
+    /// set them to, unless it asked.
+    fn switch_manual_reviews(&mut self, on: bool, held: u32) -> Option<bool> {
+        if !on {
+            return Some(true);
+        }
+        self.turn_off_manual_reviews(held, 0).then_some(false)
+    }
+
+    /// Whether to turn manual reviews off with `held` reviews held, having
+    /// told you `told` start. More than that, say after a reconcile, and it
+    /// asks again with the count as it is.
+    fn turn_off_manual_reviews(&mut self, held: u32, told: u32) -> bool {
+        if held > told {
+            self.overlay = Some(Overlay::ConfirmAutomatic(held));
+            return false;
+        }
+        true
     }
 
     /// Quits, unless reviews are running: then it asks first, since
@@ -955,7 +1095,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let App {
         overview,
         logs,
-        manual_reviews,
         focus,
         sizes,
         lists,
@@ -978,7 +1117,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let owed: Vec<_> = overview
         .owed
         .iter()
-        .map(|pr| owed_row(pr, overview, *manual_reviews))
+        .map(|pr| owed_row(pr, overview))
         .collect();
     let archived = loaded.owed.iter().filter(|pr| pr.archived).count();
     let owed_title = counted(owed.len(), archived);
@@ -995,7 +1134,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             // Newest first: a held review is one nothing newer for its PR
             // has started or finished, so history from runs that went ahead
             // still reads "queued".
-            let held = *manual_reviews
+            let held = overview.manual_reviews
                 && !events[..i].iter().any(|newer| {
                     newer.key == a.key
                         && matches!(
@@ -1035,12 +1174,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_tabs(frame, bar, &tabs, *focus);
     }
 
-    render_status(frame, status, overview, *manual_reviews, notice.as_deref());
+    render_status(frame, status, overview, notice.as_deref());
     match overlay {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
         Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, why),
         Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
+        Some(Overlay::ConfirmAutomatic(held)) => render_confirm_automatic(frame, *held),
         None => {}
     }
 }
@@ -1160,7 +1300,7 @@ fn state_cell(state: PrState, width: usize) -> Span<'static> {
     Span::styled(format!("{text:<w$} ", w = width - 1), style)
 }
 
-fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -> ListItem<'a> {
+fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview) -> ListItem<'a> {
     let latest = pr.latest_run.as_ref();
     let waiting = overview.waiting.get(&pr.key).copied();
     // A skip says why nothing will happen; a review waiting out the quiet
@@ -1170,7 +1310,7 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview, manual_reviews: bool) -
         _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), Color::DarkGray),
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
         (None, None) => ("waiting".into(), Color::DarkGray),
-        (None, Some("queued")) if manual_reviews => ("held".into(), Color::Yellow),
+        (None, Some("queued")) if overview.manual_reviews => ("held".into(), Color::Yellow),
         (None, Some("queued")) => ("queued".into(), Color::Yellow),
         (None, Some("running")) => ("running".into(), Color::Cyan),
         (None, Some("succeeded")) => ("drafted".into(), Color::Green),
@@ -1255,7 +1395,7 @@ fn drafts(n: u32) -> Span<'static> {
     Span::styled(format!("{text:<3} "), Style::new().fg(Color::Magenta))
 }
 
-/// A `held` queued review (`--manual-reviews`) waits until you start it.
+/// A `held` queued review (manual reviews) waits until you start it.
 fn activity_row(activity: &Activity, held: bool) -> ListItem<'_> {
     let what = match &activity.kind {
         ActivityKind::Trigger(kind) => kind.replace('_', " "),
@@ -1286,13 +1426,7 @@ fn activity_row(activity: &Activity, held: bool) -> ListItem<'_> {
     ListItem::new(Line::from(spans))
 }
 
-fn render_status(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    overview: &Overview,
-    manual_reviews: bool,
-    notice: Option<&str>,
-) {
+fn render_status(frame: &mut Frame<'_>, area: Rect, overview: &Overview, notice: Option<&str>) {
     let counts = &overview.counts;
     // A notice takes the whole line, so it isn't cut off at 80 columns.
     if let Some(notice) = notice {
@@ -1311,7 +1445,7 @@ fn render_status(
         "{} queued · {} running · {pending} pending drafts ",
         counts.queued, counts.running
     );
-    if manual_reviews {
+    if overview.manual_reviews {
         right.insert_str(0, "manual reviews · ");
     }
     let [left_area, right_area] = Layout::horizontal([
@@ -1348,6 +1482,7 @@ const HELP: &[(&str, &str)] = &[
     ("x", "archive or unarchive the selected PR"),
     ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
+    ("m", "turn manual reviews on or off"),
     ("c", "chat with the agent that reviewed it"),
     ("o", "open it in the dashboard, or the index"),
     ("?, Esc", "close this help"),
@@ -1416,6 +1551,21 @@ fn render_confirm_quit(frame: &mut Frame<'_>, running: &[PrKey]) {
     render_popup(frame, " Exit? ", lines);
 }
 
+fn render_confirm_automatic(frame: &mut Frame<'_>, held: u32) {
+    let reviews = if held == 1 { "review" } else { "reviews" };
+    let lines = vec![
+        Line::raw(format!(" {held} held {reviews} will start. Continue?")),
+        Line::raw(" Turning manual reviews off runs what's queued by itself,"),
+        Line::raw(" runner.max_concurrent at a time. This spends tokens."),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw(" y").bold(),
+            Span::raw(" turn them off · any other key cancels"),
+        ]),
+    ];
+    render_popup(frame, " Manual reviews off? ", lines);
+}
+
 fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let area = frame
@@ -1436,6 +1586,7 @@ mod tests {
     use sanic_store::LatestRun;
 
     use super::*;
+    use crate::poll::tests::NoCheckouts;
 
     fn pr(repo: &str, number: u32) -> PrKey {
         PrKey {
@@ -1572,6 +1723,7 @@ mod tests {
             running: Vec::new(),
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
             profiles: vec!["default".into(), "ring".into()],
+            manual_reviews: false,
             skipped: HashMap::from([(
                 pr("org/api", 490),
                 Skip::Title {
@@ -1581,9 +1733,13 @@ mod tests {
         }
     }
 
+    /// With manual reviews on, "Fix login flake"'s queued review is held.
     fn app(manual_reviews: bool) -> App {
-        let mut app = App::new(manual_reviews);
-        app.set_overview(overview());
+        let mut app = App::new();
+        app.set_overview(Overview {
+            manual_reviews,
+            ..overview()
+        });
         app.set_logs(
             vec![
                 "16:33:00  INFO watching GitHub user=me".into(),
@@ -1623,7 +1779,7 @@ mod tests {
 
     #[test]
     fn empty_panes_say_so() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         insta::assert_snapshot!(draw(&mut app, 80, 16).backend());
     }
 
@@ -1719,7 +1875,7 @@ mod tests {
 
     #[test]
     fn skips_outrank_waiting_and_runs() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         let mut overview = Overview::default();
         overview.owed.push(OwedReview {
             is_draft: true,
@@ -1774,7 +1930,7 @@ mod tests {
         let (window_tx, window) = watch::channel(Some(14));
         let shared = Shared {
             me: "me".into(),
-            manual_reviews: false,
+            manual_reviews: watch::channel(false).1,
             logs: LogLines::default(),
             due: watch::channel(DueTimes::new()).1,
             skips: watch::channel(SkipRules::default()).1,
@@ -1783,6 +1939,7 @@ mod tests {
             clock: Arc::new(FixedClock),
             requests: mpsc::unbounded_channel().0,
             config_path: PathBuf::new(),
+            resolver: Arc::new(NoCheckouts),
             data_dir: PathBuf::new(),
             runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
             chatting: Arc::default(),
@@ -1816,7 +1973,7 @@ mod tests {
 
     #[test]
     fn the_status_bar_counts_the_drafts_the_panes_show() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         let mut overview = Overview::default();
         overview.owed.push(OwedReview {
             pending_drafts: 2,
@@ -1850,8 +2007,11 @@ mod tests {
     #[test]
     fn queued_reviews_read_as_held_under_manual_reviews() {
         let queued = |manual: bool| {
-            let mut app = App::new(manual);
-            let mut overview = Overview::default();
+            let mut app = App::new();
+            let mut overview = Overview {
+                manual_reviews: manual,
+                ..Overview::default()
+            };
             overview.activity.push(Activity {
                 at: "2026-09-23T16:36:00.000Z".into(),
                 key: pr("org/web", 79),
@@ -1868,8 +2028,11 @@ mod tests {
         );
 
         // One that has since started isn't held.
-        let mut app = App::new(true);
-        let mut overview = Overview::default();
+        let mut app = App::new();
+        let mut overview = Overview {
+            manual_reviews: true,
+            ..Overview::default()
+        };
         for (at, kind) in [
             ("2026-09-23T16:37:00.000Z", ActivityKind::RunStarted),
             ("2026-09-23T16:36:00.000Z", ActivityKind::RunQueued),
@@ -1888,7 +2051,7 @@ mod tests {
 
     #[test]
     fn a_reviewed_head_says_who_and_r_still_reviews_it() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         let mut overview = Overview::default();
         overview
             .owed
@@ -2064,6 +2227,161 @@ mod tests {
     }
 
     #[test]
+    fn m_switches_manual_reviews_asking_first_when_held_ones_would_start() {
+        // `m` leaves it to the config file, as it is when pressed.
+        let mut auto = app(false);
+        assert_eq!(
+            auto.handle_key(key(KeyCode::Char('m'))),
+            Flow::SwitchManualReviews
+        );
+        // Off, it turns them on without asking.
+        assert_eq!(auto.switch_manual_reviews(false, 0), Some(true));
+
+        // On with a review held, it asks, saying how many start, and only
+        // `y` goes ahead.
+        let mut manual = app(true);
+        assert_eq!(manual.switch_manual_reviews(true, 1), None);
+        assert_eq!(manual.overlay, Some(Overlay::ConfirmAutomatic(1)));
+        insta::assert_snapshot!(draw(&mut manual, 80, 24).backend());
+        press(&mut manual, KeyCode::Char('n'));
+        assert_eq!(manual.overlay, None);
+        let _ = manual.switch_manual_reviews(true, 1);
+        assert_eq!(
+            manual.handle_key(key(KeyCode::Char('y'))),
+            Flow::TurnOffManualReviews(1)
+        );
+        assert!(manual.turn_off_manual_reviews(1, 1));
+
+        // More held by the time you say yes: it asks again with the count.
+        assert!(!manual.turn_off_manual_reviews(2, 1));
+        assert_eq!(manual.overlay, Some(Overlay::ConfirmAutomatic(2)));
+        assert_eq!(
+            manual.handle_key(key(KeyCode::Char('y'))),
+            Flow::TurnOffManualReviews(2)
+        );
+
+        // With nothing held, there's nothing to ask about.
+        assert_eq!(App::new().switch_manual_reviews(true, 0), Some(false));
+    }
+
+    #[test]
+    fn a_quick_second_m_undoes_the_first_though_the_ui_hasnt_caught_up() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[profile.p]\nrepos = [{ github = \"org\" }]\n").unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        // What the panes last read: on, with nothing held. No key is
+        // reread before the next.
+        let mut app = App::new();
+        app.set_overview(Overview {
+            manual_reviews: true,
+            ..Overview::default()
+        });
+        let press_m = |app: &mut App, store: &Store| {
+            assert_eq!(
+                app.handle_key(key(KeyCode::Char('m'))),
+                Flow::SwitchManualReviews
+            );
+            switch_manual_reviews(app, (&path, &NoCheckouts), store)
+        };
+        let press_y = |app: &mut App, store: &Store| {
+            let Flow::TurnOffManualReviews(told) = app.handle_key(key(KeyCode::Char('y'))) else {
+                panic!("`y` didn't turn manual reviews off");
+            };
+            turn_off_manual_reviews(app, (&path, &NoCheckouts), store, told)
+        };
+        let manual = || config_edit::manual_reviews_in_file(&path, &NoCheckouts).unwrap();
+        let off = press_m(&mut app, &store).unwrap();
+        assert!(off.starts_with("manual reviews off"), "{off}");
+        assert!(!manual());
+        let on = press_m(&mut app, &store).unwrap();
+        assert!(on.starts_with("manual reviews on"), "{on}");
+        assert!(manual());
+
+        // Held reviews the panes haven't counted yet still get asked about,
+        // at `m` and again at `y`.
+        let hold = |store: &mut Store, number| {
+            let queued = pr("org/web", number);
+            let snapshot = crate::poll::tests::snapshot(&queued, "alice", &[]);
+            store.record(&snapshot, "me", "p", &[]).unwrap();
+            let request = store.review_request(&queued).unwrap().unwrap();
+            store.queue_review(&request).unwrap().unwrap();
+        };
+        hold(&mut store, 77);
+        assert_eq!(press_m(&mut app, &store), None);
+        assert_eq!(app.overlay, Some(Overlay::ConfirmAutomatic(1)));
+        hold(&mut store, 78);
+        assert_eq!(press_y(&mut app, &store), None);
+        assert_eq!(app.overlay, Some(Overlay::ConfirmAutomatic(2)));
+        assert!(manual());
+        let off = press_y(&mut app, &store).unwrap();
+        assert!(off.starts_with("manual reviews off"), "{off}");
+        assert!(!manual());
+    }
+
+    #[test]
+    fn m_leaves_a_config_that_doesnt_load_alone_and_says_why() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let config: ConfigFile = (&path, &NoCheckouts);
+        let good = "[profile.p]\nrepos = [{ github = \"org\" }]\n";
+        let mut store = Store::open_in_memory().unwrap();
+        let held = pr("org/web", 77);
+        let snapshot = crate::poll::tests::snapshot(&held, "alice", &[]);
+        store.record(&snapshot, "me", "p", &[]).unwrap();
+        let request = store.review_request(&held).unwrap().unwrap();
+        store.queue_review(&request).unwrap().unwrap();
+        for (broken, why) in [
+            // Read raw, "no" isn't a bool, so it would look unset: on.
+            ("[runner]\nmanual_reviews = \"no\"\n", "manual_reviews"),
+            ("[poll]\nreconcile_secs = 0\n", "reconcile_secs"),
+        ] {
+            let broken = format!("{broken}{good}");
+            std::fs::write(&path, &broken).unwrap();
+            let mut app = App::new();
+            assert_eq!(
+                app.handle_key(key(KeyCode::Char('m'))),
+                Flow::SwitchManualReviews
+            );
+            let notice = switch_manual_reviews(&mut app, config, &store).unwrap();
+            assert!(notice.contains("doesn't load"), "{notice}");
+            assert!(notice.contains(why), "{notice}");
+            // The status bar is one line.
+            assert!(!notice.contains('\n'), "{notice}");
+            assert_eq!(app.overlay, None);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+
+            // Broken between `m` and `y`, `y` leaves it alone too.
+            std::fs::write(&path, good).unwrap();
+            assert_eq!(switch_manual_reviews(&mut app, config, &store), None);
+            assert_eq!(app.overlay, Some(Overlay::ConfirmAutomatic(1)));
+            std::fs::write(&path, &broken).unwrap();
+            let notice = turn_off_manual_reviews(&mut app, config, &store, 1).unwrap();
+            assert!(notice.contains(why), "{notice}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        }
+    }
+
+    #[test]
+    fn switching_manual_reviews_edits_the_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[profile.p] # mine\nrepos = [{ github = \"org\" }]\n",
+        )
+        .unwrap();
+        let notice = set_manual_reviews((&path, &NoCheckouts), false);
+        assert!(notice.starts_with("manual reviews off"), "{notice}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[profile.p] # mine\nrepos = [{ github = \"org\" }]\n\n[runner]\nmanual_reviews = false\n"
+        );
+        let notice = set_manual_reviews((&dir.path().join("missing.toml"), &NoCheckouts), true);
+        assert!(notice.starts_with("couldn't switch"), "{notice}");
+    }
+
+    #[test]
     fn quitting_while_reviews_run_asks_first() {
         let mut app = app(false);
         let mut busy = overview();
@@ -2103,7 +2421,7 @@ mod tests {
 
     #[test]
     fn c_hands_a_pr_with_a_session_to_a_chat() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         let mut overview = Overview::default();
         overview.owed.push(OwedReview {
             chat_run: Some(4),
@@ -2184,7 +2502,7 @@ mod tests {
     #[test]
     fn o_opens_the_index_with_no_pr_selected() {
         let opener = Arc::new(Opened::default());
-        let mut empty = App::new(false);
+        let mut empty = App::new();
         assert_eq!(press_o(&mut empty, &opener), (vec![INDEX.to_owned()], None));
         // The log's lines aren't PRs.
         let mut app = app(false);
@@ -2198,7 +2516,7 @@ mod tests {
             fail: true,
             ..Opened::default()
         });
-        let (_, failure) = press_o(&mut App::new(false), &opener);
+        let (_, failure) = press_o(&mut App::new(), &opener);
         assert_eq!(
             failure.as_deref(),
             Some("couldn't open http://127.0.0.1:4000/: no browser")
@@ -2420,7 +2738,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits_from_a_collapsed_pane() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         resize(&mut app, KeyCode::Char('z'));
         resize(&mut app, KeyCode::Char('z'));
         assert!(!app.sizes.shown(app.focus));
@@ -2432,7 +2750,7 @@ mod tests {
 
     #[test]
     fn key_releases_are_ignored() {
-        let mut app = App::new(false);
+        let mut app = App::new();
         let mut release = key(KeyCode::Char('q'));
         release.kind = KeyEventKind::Release;
         assert_eq!(app.handle_key(release), Flow::Continue);

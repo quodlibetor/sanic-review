@@ -82,7 +82,7 @@ impl LeadPop<'_> {
                     Some("queued") => {
                         "queued" (time(times.map(|t| &t.queued_at)))
                         @if self.manual_reviews {
-                            "; --manual-reviews holds it until you start it (r)"
+                            "; manual reviews hold it until you start it (r)"
                         } @else {
                             "; it starts when a slot is free"
                         }

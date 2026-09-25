@@ -31,13 +31,34 @@ It runs these tasks in one process:
 Running it as a daemon means wrapping `serve` in a systemd user unit. There is
 no separate daemon mode.
 
-`serve --manual-reviews` watches, detects triggers and queues reviews, but
-holds them: nothing runs until you start it, so you can look before
-spending anything. You start one review at a time, with `r` in the TUI or
+**Manual reviews** (`runner.manual_reviews`, on unless the config turns it
+off) watch, detect triggers and queue reviews, but hold them: nothing runs
+until you start it, so turning `serve` on doesn't review every outstanding
+request at once, and you can look before spending anything. You start one
+review at a time, with `r` in the TUI, Review now on the dashboard or
 `sanic-review review <PR url>`, and just that one runs, now. Held reviews
-stay queued and run on the next start without the flag. Under the flag the
-log and the TUI's Activity pane say "review held" where they'd otherwise
-say "review queued", since nothing will run until you start it.
+stay queued in the store. While it's on, the log and the TUI's Activity pane
+say "review held" where they'd otherwise say "review queued", and the TUI's
+status bar and the dashboard's top bar say "manual reviews".
+
+It's a setting like any other: `m` in the TUI and the dashboard's Settings
+page write it to the config file, and `serve` follows it through the
+config reload, so the file is the one place it lives. Both read the
+file through the config loader, with the checks a reload makes, and
+switch only a file that loads: while it doesn't, `serve` stays on the
+config it last loaded, which is what the status bar and the dashboard
+show, so they refuse and say why rather than act on a file `serve`
+isn't following. A `runner.manual_reviews` that isn't a bool is such an
+error, not "unset". `serve
+--manual-reviews` writes it on at startup when the config turns it off;
+otherwise it leaves the file alone, so a config `serve` can't write still
+starts.
+Turning it off starts every held review, the worker running
+`runner.max_concurrent` at a time; the TUI and the dashboard first say how
+many will start and wait for a yes, while a hand edit of the file that
+turns it off releases them on reload without asking. Turning it on asks
+nothing: running reviews carry on, and queued ones are held from then on,
+including those already waiting for a free slot.
 
 `sanic-review chat <PR url | run id> [--allow-edits] [--print-command]`
 resumes the agent session of a PR's latest run that has one (or of that
@@ -74,7 +95,7 @@ starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
 Profiles, `[runner]` (including `read_paths`), `github.git_url` and the
 set of reference checkouts apply to runs that start after the reload. Lowering `runner.max_concurrent` takes effect as running runs
-finish.
+finish. `runner.manual_reviews` applies at once, as above.
 
 The poller has its own SQLite connection; the scheduler and runner share a
 second one, so polling never waits on them.
@@ -119,6 +140,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # timeout_secs = ...                   # kill a run that takes longer
 # read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
 # model = "auto"                       # default model; see Model below
+# manual_reviews = true                # hold queued reviews until you start them
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
@@ -326,9 +348,8 @@ Rules:
   one), a standing review request on someone else's PR that matches a
   profile goes to the scheduler like a new one. The idempotency rule then
   skips any head that already has a queued, running or succeeded run.
-  Such a head isn't debounced at all, so a review held by
-  `--manual-reviews` still shows as held after a restart rather than as
-  waiting. A
+  Such a head isn't debounced at all, so a review manual reviews hold
+  still shows as held after a restart rather than as waiting. A
   reloaded `quiet_secs` applies from the next trigger on.
 - **Skips.** These PRs are never reviewed automatically:
   - archived ones (see Archive);
@@ -479,7 +500,7 @@ Rules:
    is pending and records `based_on`, so the dashboard can say "revised
    from #N"; one that names nothing (or a draft it wasn't shown) is new and
    pending. The source run and its drafts stay as they were. It starts at once,
-   even under `--manual-reviews`, and within `runner.max_concurrent`.
+   even under manual reviews, and within `runner.max_concurrent`.
    It's refused when the run has no session, when the PR's head has moved
    since (regenerating reviews the old head, so start a fresh review), when
    a regeneration of it is already queued or running, and when its worktree
@@ -584,8 +605,8 @@ A run's summary is stored as a `summary` draft, so it can be edited like any
 other draft. When `serve` exits (Ctrl-C, or quitting the TUI), running
 reviews are cancelled rather than waited for: their agents are killed,
 their worktrees removed, and their runs queued again, which is logged with
-their PRs. The next start runs them, or holds them under
-`--manual-reviews`. A second Ctrl-C exits without waiting for that. Runs
+their PRs. The next start runs them, or holds them under manual
+reviews. A second Ctrl-C exits without waiting for that. Runs
 left `running` by a previous process are requeued at
 startup, unless the same PR also has a run queued after it: that one is for
 a newer head, so the older run is marked `superseded` instead.
@@ -606,7 +627,7 @@ image in a comment you click to load.
   - reviews you owe: **Needs you** (pending drafts, accepted drafts not
     yet posted, every draft rejected with no review of yours on that
     commit, a review you haven't looked at, comments to answer, or a run
-    that failed, crashed or is held by `--manual-reviews`), **In flight**
+    that failed, crashed or is held by manual reviews), **In flight**
     (waiting out the quiet period, queued or running) and **Nothing to do
     now**, folded (skipped, archived, posted, or reviewed with nothing
     left). Drafts count from the latest review or regeneration that
@@ -666,8 +687,9 @@ image in a comment you click to load.
   `poll.updated_within_days` for the lists, the TUI and the poller, and
   reconcile with it as soon as no rate limit pauses polling; "back to
   default" goes back to the config's.
-- **Top bar.** Every page's: home, where the page is, and the queued,
-  running and pending draft counts. Pending drafts are counted, here, in
+- **Top bar.** Every page's: home, where the page is, "manual reviews"
+  while they're on, the queued, running and pending draft counts, and a
+  link to Settings. Pending drafts are counted, here, in
   the lists and in the TUI, only from each PR's current run: its latest
   review or regeneration that succeeded, the one its page shows. A
   regeneration copies the drafts it keeps, so counting every run's would
@@ -799,7 +821,7 @@ image in a comment you click to load.
 - **Confirms.** Asking before acting, and saying how a submit went, use one
   card: what it is, the question or outcome, the PR by title with its
   `owner/name#N`, author and head, why (a failed run's whole error, who
-  already reviewed it, the `--manual-reviews` hold), what it costs, and
+  already reviewed it, the manual reviews hold), what it costs, and
   the buttons with their keys. A posted review's card is green and links
   to it on GitHub; a failed post's is red. Each is its own page, and from
   the index or a PR page, `r`, the Review now link or Agent… opens that
@@ -975,10 +997,19 @@ image in a comment you click to load.
   the index. A confirm, page or dialog, takes `y`, and `Esc` or `q`
   cancels; on a result page `Esc` takes its way back. Keys are
   ignored while you type in a draft; `Esc` leaves it.
-- **Settings.** The dashboard can edit settings such as
-  `review_requests.teams`. Edits are written back to the config file,
-  preserving its comments and layout, and take effect through the same
-  reload path as a hand edit.
+- **Settings.** A page of settings the dashboard edits, linked from the
+  top bar. Edits are written back to the config file, preserving its
+  comments and layout, and take effect through the same reload path as a
+  hand edit. Each is a post behind the token and origin checks. For now
+  it has manual reviews: on or off, and how many reviews they hold.
+  Turning them on is one post. Turning them off while reviews are held
+  goes through a confirm card, "N held reviews will start. Continue?",
+  whose post carries that count; a post told of fewer than are held by
+  then shows the card again with the new count instead of switching. A
+  post turning them off checks the count whether or not the last reload
+  had them on, since a page can be drawn before a switch elsewhere. A
+  config file that doesn't load isn't written: the post is refused, with
+  why.
 
 ## Terminal UI
 
@@ -988,14 +1019,14 @@ image in a comment you click to load.
   unanchored counts, and the first line of its summary.
 - `--ui tui`: a ratatui summary with four panes. No editing happens in the
   TUI. Its only actions are rerunning a review, archiving a PR, adding
-  a `skip_titles` pattern to the config, opening the dashboard and
-  saving its own layout.
+  a `skip_titles` pattern to the config, switching manual reviews in the
+  config, opening the dashboard and saving its own layout.
   - **Reviews you owe:** open PRs by others that you review: your review
     is requested, or you've left one in any state. Submitting a review
     clears GitHub's request and a push can dismiss the review, so a PR stays
     here through both. The push and ready-for-review triggers use the same
     rule (`PrSnapshot::is_reviewer`). Each row has its PR state (below),
-    then the latest run's status (queued, held by `--manual-reviews`,
+    then the latest run's status (queued, held by manual reviews,
     running, drafted, failed, crashed) and the pending draft count. A review still waiting
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
@@ -1095,13 +1126,25 @@ image in a comment you click to load.
   written atomically; `serve` picks the change up through its normal
   config reload.
   `r` on a review you owe whose latest run failed or crashed, that's
-  skipped or archived, or that `--manual-reviews` is holding, asks for
+  skipped or archived, or that manual reviews are holding, asks for
   confirmation, since it spends tokens, then starts it: the held run, or
   a full review of the PR's head as last polled. For a skipped or
   archived PR that's the way to review it anyway; it stays skipped or
   archived. It goes through the store like any queued review, so
   idempotency applies, and it's logged. It runs right away, even under
-  `--manual-reviews`.
+  manual reviews.
+  `m` turns manual reviews on, or off, going by what the config file says
+  when it's pressed rather than what the panes last read, which lags a
+  write until the reload and the next reread: so a second `m` right after
+  the first undoes it, and a switch on the dashboard counts. It counts the
+  held reviews in the store then too, and again on `y`. Off, while reviews
+  are held, first asks "N held reviews will start. Continue?" and goes
+  ahead only on `y`; if more are held by then, as the dashboard's post
+  does, it asks again with the new count. It edits `runner.manual_reviews`
+  in the config file the way `i` edits `skip_titles`, and the status bar
+  says so until the next key; `serve` applies it as it reloads. A config
+  file that doesn't load, at `m` or at `y`, is left alone, and the status
+  bar says why instead.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
   terminal alone and shows in the log pane instead.

@@ -40,7 +40,7 @@ fn not_tracked(key: &PrKey) -> color_eyre::Report {
 }
 
 /// Asks the running `serve` to review the PR now: its held review under
-/// `--manual-reviews`, or else a full review of its current head. `serve`
+/// manual reviews, or else a full review of its current head. `serve`
 /// picks the request up within a few seconds, or when it next starts.
 pub fn review(args: &PrArgs) -> Result<()> {
     let (key, store) = args.open()?;

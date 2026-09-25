@@ -201,7 +201,7 @@ async fn world() -> World {
         format!(
             "[github]\napi_url = \"{}\"\ngit_url = \"{}\"\n\n\
              [poll]\nquiet_secs = 0\n\n\
-             [runner]\nclaude = \"{}\"\n\n\
+             [runner]\nclaude = \"{}\"\nmanual_reviews = false\n\n\
              [profile.p]\nrepos = [{{ github = \"org\" }}]\n",
             server.uri(),
             remote.display(),
@@ -352,8 +352,9 @@ async fn a_request_debounced_across_a_restart_is_still_reviewed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn manual_reviews_hold_runs_until_a_normal_start() {
+async fn manual_reviews_hold_runs_until_turned_off() {
     let w = world().await;
+    // The flag turns the setting on in the config file.
     let line = w
         .serve_with_until(&["--manual-reviews"], "review held")
         .await;
@@ -365,10 +366,21 @@ async fn manual_reviews_hold_runs_until_a_normal_start() {
         !w.fake.join("env").exists(),
         "claude ran despite --manual-reviews"
     );
+    let text = std::fs::read_to_string(&w.config).unwrap();
+    assert!(text.contains("manual_reviews = true"), "{text}");
     let store = Store::open(&w.data.join("state.db")).unwrap();
     assert_eq!(store.run_counts().unwrap().queued, 1);
 
-    // Held runs are still queued, so a normal start runs them.
+    // Without the flag it's still on, from the config.
+    w.serve_until("review held").await;
+    assert!(!w.fake.join("env").exists());
+
+    // Held runs are still queued, so a start with it off runs them.
+    std::fs::write(
+        &w.config,
+        text.replace("manual_reviews = true", "manual_reviews = false"),
+    )
+    .unwrap();
     w.serve_until("drafted").await;
     assert!(w.fake.join("env").exists());
 }
@@ -385,7 +397,7 @@ async fn sanic_review_review_starts_a_held_review() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    // Still under --manual-reviews, serve picks the request up and runs
+    // Still under manual reviews, serve picks the request up and runs
     // just that review.
     let line = w.serve_with_until(&["--manual-reviews"], "drafted").await;
     assert!(

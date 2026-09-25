@@ -32,6 +32,8 @@ const DEFAULT_GIT_URL: &str = "https://github.com";
 const DEFAULT_CLAUDE: &str = "claude";
 const DEFAULT_MAX_RUNS: usize = 2;
 const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
+/// `runner.manual_reviews` when the config leaves it unset.
+const DEFAULT_MANUAL_REVIEWS: bool = true;
 /// The `model` value that leaves the choice to `claude`, which then uses your
 /// own default model at run time.
 /// Matched ignoring case; setup writes it lowercase.
@@ -64,6 +66,30 @@ pub struct Config {
     pub runner: RunnerSettings,
     /// In file order; earlier profiles win ties when matching.
     pub profiles: Vec<Profile>,
+}
+
+/// Why the config file doesn't load, as [`Config::load`] says: shown
+/// whole, every cause and not just the outermost, on one line so the TUI's
+/// status bar shows all of it. A TOML error's snippet keeps the line it
+/// quotes and drops its gutter and carets.
+#[derive(Debug)]
+pub struct Unloadable(pub color_eyre::Report);
+
+impl std::fmt::Display for Unloadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let whole = format!("{:#}", self.0);
+        let mut lines = whole.lines().map(str::trim).filter(|line| {
+            // `  |` and `  |    ^^^^` are only there to point at the line.
+            let marks = line.split_once('|').is_some_and(|(gutter, rest)| {
+                gutter.trim().is_empty() && rest.trim().chars().all(|c| c == '^')
+            });
+            !line.is_empty() && !marks
+        });
+        if let Some(first) = lines.next() {
+            f.write_str(first)?;
+        }
+        lines.try_for_each(|line| write!(f, ": {line}"))
+    }
 }
 
 #[derive(Debug)]
@@ -147,6 +173,10 @@ pub struct RunnerSettings {
     /// Extra directories the agent may read, besides the configured
     /// checkouts; see [`Config::reference_dirs`].
     pub read_paths: Vec<PathBuf>,
+    /// Queued reviews are held until you start one, so turning `serve` on
+    /// doesn't review every outstanding request at once. On unless the
+    /// config turns it off.
+    pub manual_reviews: bool,
 }
 
 #[derive(Debug)]
@@ -353,11 +383,19 @@ impl Config {
 
     /// Reads and resolves the config at `path`.
     pub fn load(path: &Path, resolver: &dyn CheckoutResolver) -> Result<Self> {
+        Self::load_with_text(path, resolver).map(|(config, _)| config)
+    }
+
+    /// [`Config::load`], with the text it loaded, so an edit of the file
+    /// can start from what was checked.
+    pub fn load_with_text(path: &Path, resolver: &dyn CheckoutResolver) -> Result<(Self, String)> {
         let text = std::fs::read_to_string(path)
             .wrap_err_with(|| format!("reading config {}", path.display()))
             .suggestion("create it; see docs/DESIGN.md for the format")?;
         let base = path.parent().unwrap_or(Path::new("."));
-        Self::parse(&text, base, resolver).wrap_err_with(|| format!("in config {}", path.display()))
+        let config = Self::parse(&text, base, resolver)
+            .wrap_err_with(|| format!("in config {}", path.display()))?;
+        Ok((config, text))
     }
 
     /// Parses config text. Relative paths resolve against `base`.
@@ -451,6 +489,7 @@ impl Config {
                     .timeout_secs
                     .map_or(DEFAULT_RUN_TIMEOUT, Duration::from_secs),
                 read_paths,
+                manual_reviews: raw.runner.manual_reviews.unwrap_or(DEFAULT_MANUAL_REVIEWS),
             },
             profiles,
         })
@@ -694,6 +733,7 @@ struct RawRunner {
     #[serde(default)]
     read_paths: Vec<String>,
     model: Option<String>,
+    manual_reviews: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -823,6 +863,26 @@ mod tests {
         );
         assert!(config.profiles[0].instructions[0].ends_with("general.md"));
         assert!(config.profiles[0].instructions[0].is_absolute());
+    }
+
+    #[test]
+    fn manual_reviews_are_on_unless_turned_off() {
+        assert!(parse(EXAMPLE).unwrap().runner.manual_reviews);
+        let off = format!("[runner]\nmanual_reviews = false\n{EXAMPLE}");
+        assert!(!parse(&off).unwrap().runner.manual_reviews);
+        // Only a bool: anything else is an error, not "unset".
+        let no = format!("[runner]\nmanual_reviews = \"no\"\n{EXAMPLE}");
+        let err = format!("{:#}", parse(&no).unwrap_err());
+        assert!(err.contains("manual_reviews"), "{err}");
+        // Said on one line, with the line it quotes but not its carets.
+        let why = Unloadable(parse(&no).unwrap_err()).to_string();
+        assert!(
+            why.ends_with(
+                "TOML parse error at line 2, column 18: 2 | manual_reviews = \"no\": \
+                 invalid type: string \"no\", expected a boolean"
+            ),
+            "{why}"
+        );
     }
 
     #[test]

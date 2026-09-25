@@ -177,10 +177,9 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
     let pr = h.pr;
     // `—` fills a column; in a sentence it says nothing.
     let state = h.state.filter(|state| !state.is_blank());
-    let status = h
-        .owed
-        .map(|o| owed_status(o, h.overview, app.manual_reviews));
-    let why = h.owed.and_then(|o| why(o, h.overview, app.manual_reviews));
+    let manual_reviews = app.manual_reviews();
+    let status = h.owed.map(|o| owed_status(o, h.overview, manual_reviews));
+    let why = h.owed.and_then(|o| why(o, h.overview, manual_reviews));
     let href = pr_href(&pr.key);
     html! {
         div.prh {
@@ -1080,7 +1079,7 @@ pub async fn confirm_review_now(
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
     let owed = overview.owed.iter().find(|pr| pr.key == key);
-    let why = owed.and_then(|pr| why(pr, &overview, app.manual_reviews));
+    let why = owed.and_then(|pr| why(pr, &overview, app.manual_reviews()));
     let pr = app
         .store()
         .pr_page(&key)
@@ -1089,7 +1088,7 @@ pub async fn confirm_review_now(
     let href = pr_href(&key);
     let meta = html! {
         (pr_ref(&key)) " · " (pr.author) " · head " code { (short(&pr.head_sha)) }
-        @if why == Some(Why::Held) { " · held by " code { "--manual-reviews" } }
+        @if why == Some(Why::Held) { " · held by " a href="/settings" { "manual reviews" } }
     };
     let error = owed
         .and_then(|pr| pr.latest_run.as_ref())
@@ -1111,8 +1110,8 @@ pub async fn confirm_review_now(
             html! {
                 p.note {
                     "Only a review you owe whose latest run failed or crashed, that's "
-                    "skipped or archived, or that " code { "--manual-reviews" }
-                    " is holding can be started by hand."
+                    "skipped or archived, or that manual reviews are holding, can be "
+                    "started by hand."
                 }
             },
             None,
@@ -1189,7 +1188,7 @@ pub async fn review_now(
             key.url()
         )));
     };
-    if why(owed, &overview, app.manual_reviews).is_none() {
+    if why(owed, &overview, app.manual_reviews()).is_none() {
         return Err(Error::Refused(format!(
             "there's nothing to start for {}: its review isn't failed, held or skipped",
             key.url()

@@ -173,19 +173,29 @@ impl Worker {
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs each queued run as it arrives. Returns when `runs` closes and
+    /// Runs each queued run as it arrives. Returns when `jobs` closes and
     /// every started run has finished. A run whose task panics is recorded
     /// as crashed, and the others carry on.
-    pub async fn work(self: Arc<Self>, runs: mpsc::UnboundedReceiver<QueuedRun>) {
+    pub async fn work(self: Arc<Self>, jobs: mpsc::UnboundedReceiver<Job>) {
         supervise(
-            runs,
-            |run| {
-                self.stop_older_review(&run);
-                Arc::clone(&self).execute(run)
+            jobs,
+            |job| {
+                self.stop_older_review(&job.run);
+                Arc::clone(&self).execute(job)
             },
             |run, panic| self.crashed(run, panic),
         )
         .await;
+    }
+
+    /// Whether `runner.manual_reviews` holds automatic runs, as the config
+    /// last loaded.
+    fn holds_reviews(&self) -> bool {
+        self.settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .runner
+            .manual_reviews
     }
 
     /// Stops the running review of `run`'s PR, if it's of another head.
@@ -230,12 +240,18 @@ impl Worker {
         }
     }
 
-    async fn execute(self: Arc<Self>, run: QueuedRun) {
+    async fn execute(self: Arc<Self>, Job { run, automatic }: Job) {
         let Ok(_permit) = self.limit.acquire().await else {
             return;
         };
         // Shutting down: it stays queued for the next start.
         if self.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        // Manual reviews were turned on while it waited: it stays queued,
+        // held like any other.
+        if automatic && self.holds_reviews() {
+            debug!("held: manual reviews were turned on before it started");
             return;
         }
         // Registered before claiming: a newer head queued after the claim
@@ -381,14 +397,21 @@ impl Worker {
     }
 }
 
+/// A queued run for [`Worker::work`]. An `automatic` one, queued by the
+/// scheduler or left from before, is held after all if
+/// `runner.manual_reviews` is on by the time it would start; one started
+/// by hand never is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub run: QueuedRun,
+    pub automatic: bool,
+}
+
 /// Spawns `execute` for each run as it arrives, and hands any run whose
 /// task panicked to `crashed`, in that run's span.
-async fn supervise<E, EF, C, CF>(
-    mut runs: mpsc::UnboundedReceiver<QueuedRun>,
-    execute: E,
-    crashed: C,
-) where
-    E: Fn(QueuedRun) -> EF,
+async fn supervise<E, EF, C, CF>(mut jobs: mpsc::UnboundedReceiver<Job>, execute: E, crashed: C)
+where
+    E: Fn(Job) -> EF,
     EF: Future<Output = ()> + Send + 'static,
     C: Fn(QueuedRun, String) -> CF,
     CF: Future<Output = ()>,
@@ -416,9 +439,11 @@ async fn supervise<E, EF, C, CF>(
     };
     loop {
         tokio::select! {
-            run = runs.recv() => match run {
-                Some(run) => {
-                    let task = tasks.spawn(execute(run.clone()).instrument(run_span(&run)));
+            job = jobs.recv() => match job {
+                Some(job) => {
+                    let span = run_span(&job.run);
+                    let run = job.run.clone();
+                    let task = tasks.spawn(execute(job).instrument(span));
                     started.insert(task.id(), run);
                 }
                 None => break,
@@ -518,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn runs_after_a_panicking_run_still_run() {
         let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(queued(1)).unwrap();
+        tx.send(by_hand(&queued(1))).unwrap();
         // Run 2 is only sent once run 1's crash is handled, and closing the
         // channel then lets `supervise` return.
         let tx = Mutex::new(Some(tx));
@@ -526,17 +551,17 @@ mod tests {
         let crashes = Mutex::new(Vec::new());
         supervise(
             rx,
-            |run| {
+            |job| {
                 let ran = Arc::clone(&ran);
                 async move {
-                    assert!(run.id != 1, "boom");
-                    ran.lock().unwrap().push(run.id);
+                    assert!(job.run.id != 1, "boom");
+                    ran.lock().unwrap().push(job.run.id);
                 }
             },
             |run, panic| {
                 crashes.lock().unwrap().push((run.id, panic));
                 if let Some(tx) = tx.lock().unwrap().take() {
-                    tx.send(queued(2)).unwrap();
+                    tx.send(by_hand(&queued(2))).unwrap();
                 }
                 async {}
             },
@@ -546,9 +571,16 @@ mod tests {
         assert_eq!(*crashes.lock().unwrap(), [(1, "boom".to_owned())]);
     }
 
-    #[tokio::test]
-    async fn a_crashed_run_is_recorded_as_crashed() {
-        let data = tempfile::TempDir::new().unwrap();
+    /// `run`, started by hand.
+    fn by_hand(run: &QueuedRun) -> Job {
+        Job {
+            run: run.clone(),
+            automatic: false,
+        }
+    }
+
+    /// A store tracking [`queued`]'s PR, with a review of it queued.
+    fn store_with_queued_review() -> (Store, QueuedRun) {
         let mut store = Store::open_in_memory().unwrap();
         let snapshot = PrSnapshot {
             key: queued(0).request.key,
@@ -572,6 +604,13 @@ mod tests {
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
+        (store, run)
+    }
+
+    #[tokio::test]
+    async fn a_crashed_run_is_recorded_as_crashed() {
+        let data = tempfile::TempDir::new().unwrap();
+        let (store, run) = store_with_queued_review();
         assert!(store.claim_run(run.id).unwrap());
         let store = Arc::new(Mutex::new(store));
         let worker = Worker::new(data.path(), Arc::clone(&store), &config(1, "p"), "me");
@@ -580,6 +619,30 @@ mod tests {
         let record = store.lock().unwrap().run(run.id).unwrap().unwrap();
         assert_eq!(record.status, "crashed");
         assert_eq!(record.error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn automatic_runs_stay_queued_while_manual_reviews_are_on() {
+        let data = tempfile::TempDir::new().unwrap();
+        let (store, run) = store_with_queued_review();
+        let store = Arc::new(Mutex::new(store));
+        // Unset in the config, so on.
+        let worker = Arc::new(Worker::new(
+            data.path(),
+            Arc::clone(&store),
+            &config(1, "p"),
+            "me",
+        ));
+        let (jobs, jobs_rx) = mpsc::unbounded_channel();
+        jobs.send(Job {
+            run: run.clone(),
+            automatic: true,
+        })
+        .unwrap();
+        drop(jobs);
+        worker.work(jobs_rx).await;
+        let record = store.lock().unwrap().run(run.id).unwrap().unwrap();
+        assert_eq!(record.status, "queued");
     }
 
     #[tokio::test]
@@ -728,7 +791,7 @@ mod tests {
             "me",
         ));
         let (runs, runs_rx) = mpsc::unbounded_channel();
-        runs.send((*run).clone()).unwrap();
+        runs.send(by_hand(&run)).unwrap();
         drop(runs);
         tokio::time::timeout(std::time::Duration::from_secs(20), worker.work(runs_rx))
             .await
@@ -862,13 +925,13 @@ mod tests {
         let working = tokio::spawn(Arc::clone(&worker).work(runs_rx));
         let old = queue(&first);
         for _ in 0..sends {
-            runs.send(old.clone()).unwrap();
+            runs.send(by_hand(&old)).unwrap();
         }
         while !fake.join("started").exists() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let new = queue(&second);
-        runs.send(new.clone()).unwrap();
+        runs.send(by_hand(&new)).unwrap();
         drop(runs);
         tokio::time::timeout(std::time::Duration::from_secs(20), working)
             .await

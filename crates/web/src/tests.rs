@@ -15,7 +15,7 @@ use axum::{
 use http_body_util::BodyExt;
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
-    config::{CheckoutResolver, Config, Vcs},
+    config::{CheckoutResolver, Config, Unloadable, Vcs},
     pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
@@ -54,6 +54,10 @@ struct FakeServe {
     revision: Mutex<Option<i64>>,
     /// The recency window, as `serve` publishes it.
     window: Mutex<Option<watch::Sender<RecencyWindow>>>,
+    /// Manual reviews, as `serve` publishes them once it reloads.
+    manual: Mutex<Option<watch::Sender<bool>>>,
+    /// Why the config file doesn't load, if it doesn't.
+    unloadable: Mutex<Option<String>>,
 }
 
 impl Control for FakeServe {
@@ -63,6 +67,16 @@ impl Control for FakeServe {
 
     fn refresh(&self, key: PrKey) {
         self.refreshed.lock().unwrap().push(key);
+    }
+
+    fn set_manual_reviews(&self, on: bool) -> color_eyre::Result<Result<bool, Unloadable>> {
+        if let Some(why) = &*self.unloadable.lock().unwrap() {
+            return Ok(Err(Unloadable(color_eyre::eyre::eyre!("{why}"))));
+        }
+        let manual = self.manual.lock().unwrap();
+        Ok(Ok(manual.as_ref().is_some_and(|manual| {
+            manual.send_if_modified(|was| std::mem::replace(was, on) != on)
+        })))
     }
 
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> color_eyre::Result<bool> {
@@ -348,11 +362,13 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         choice: None,
     });
     *serve.window.lock().unwrap() = Some(window);
+    let (manual, manual_rx) = watch::channel(manual_reviews);
+    *serve.manual.lock().unwrap() = Some(manual);
     let clock = Arc::new(FixedClock::default());
     let mirror = Arc::new(FakeMirror::default());
     let dashboard = Dashboard::new(Context {
         me: "me".into(),
-        manual_reviews,
+        manual_reviews: manual_rx,
         data_dir: data.path().to_owned(),
         config_path: "/config/sanic review.toml".into(),
         store,
@@ -574,7 +590,7 @@ async fn an_index_row_opens_the_page_its_title_links_to() {
 #[tokio::test]
 async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
     let f = fixture(true).await;
-    // PR 7's latest run goes back to queued, which --manual-reviews holds.
+    // PR 7's latest run goes back to queued, which manual reviews hold.
     {
         let mut store = f.dashboard.app.store();
         let run = store.queue_review(&ReviewRequest {
@@ -2131,6 +2147,123 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
     let index = f.get("/").await.body;
     assert!(index.contains("9 older PRs hidden"));
     assert!(!index.contains("back to default"));
+}
+
+#[tokio::test]
+async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
+    let f = fixture(true).await;
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(r#"<a class="held" href="/settings">manual reviews</a>"#),
+        "{index}"
+    );
+    // Nothing held yet: turning them off is one post.
+    let page = f.get("/settings").await.body;
+    assert!(page.contains("0 held reviews now"), "{page}");
+    assert!(page.contains(r#"<input type="hidden" name="held" value="0">"#));
+
+    // PR 7's latest run goes back to queued, which manual reviews hold.
+    f.dashboard
+        .app
+        .store()
+        .queue_review(&ReviewRequest {
+            key: key(7),
+            profile: "default".into(),
+            head_sha: "newer".into(),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Requested,
+        })
+        .unwrap()
+        .unwrap();
+    let page = f.get("/settings").await.body;
+    assert!(page.contains("1 held review now"), "{page}");
+    assert!(page.contains(r#"<a class="btn" href="/settings/manual-reviews">"#));
+    let confirm = f.get("/settings/manual-reviews").await.body;
+    assert!(
+        card_of(&confirm).contains("1 held review will start. Continue?"),
+        "{confirm}"
+    );
+    assert!(confirm.contains(r#"<input type="hidden" name="held" value="1">"#));
+
+    // Posting it needs the token, like every write.
+    let off = [("on", "false"), ("held", "1")];
+    let refused = f
+        .send(form("/settings/manual-reviews").body(encode(&off)).unwrap())
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    // Told of fewer than are held, it asks again rather than switching.
+    let stale = f
+        .post(
+            "/settings/manual-reviews",
+            &[("on", "false"), ("held", "0")],
+        )
+        .await
+        .body;
+    assert!(
+        card_of(&stale).contains("1 held review will start"),
+        "{stale}"
+    );
+    assert!(f.dashboard.app.manual_reviews());
+
+    let done = f.post("/settings/manual-reviews", &off).await;
+    assert_eq!(done.status, StatusCode::OK);
+    assert!(
+        card_of(&done.body).contains("Manual reviews off"),
+        "{}",
+        done.body
+    );
+    assert!(!f.dashboard.app.manual_reviews());
+    assert!(!f.get("/").await.body.contains(">manual reviews</a>"));
+    // Off as the reload last said, a post turning them off still asks
+    // about what's queued: its page may predate a switch the reload
+    // hasn't shown yet.
+    let stale = f
+        .post(
+            "/settings/manual-reviews",
+            &[("on", "false"), ("held", "0")],
+        )
+        .await
+        .body;
+    assert!(
+        card_of(&stale).contains("1 held review will start"),
+        "{stale}"
+    );
+
+    // Turning them on asks nothing.
+    let page = f.get("/settings").await.body;
+    assert!(page.contains(r#"<input type="hidden" name="on" value="true">"#));
+    let done = f.post("/settings/manual-reviews", &[("on", "true")]).await;
+    assert!(
+        card_of(&done.body).contains("Manual reviews on"),
+        "{}",
+        done.body
+    );
+    assert!(f.dashboard.app.manual_reviews());
+}
+
+#[tokio::test]
+async fn settings_leave_manual_reviews_alone_in_a_config_that_doesnt_load() {
+    let f = fixture(true).await;
+    for why in [
+        "invalid type: string \"no\", expected a boolean for key `runner.manual_reviews`",
+        "`poll.reconcile_secs` must be at least 1",
+    ] {
+        *f.serve.unloadable.lock().unwrap() = Some(why.into());
+        for on in ["true", "false"] {
+            let refused = f
+                .post("/settings/manual-reviews", &[("on", on), ("held", "0")])
+                .await;
+            assert_eq!(refused.status, StatusCode::CONFLICT);
+            let why = maud::html! { (why) }.into_string();
+            assert!(
+                refused.body.contains("config doesn't load"),
+                "{}",
+                refused.body
+            );
+            assert!(refused.body.contains(&why), "{}", refused.body);
+            assert!(f.dashboard.app.manual_reviews());
+        }
+    }
 }
 
 /// A confirm or result page's card, as the dashboard's dialog lifts it.

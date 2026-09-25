@@ -13,7 +13,7 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::SystemTime};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
-    config::{CheckoutResolver, Config, Vcs},
+    config::{CheckoutResolver, Config, Unloadable, Vcs},
     pr::PrKey,
     repo::RepoName,
 };
@@ -79,7 +79,7 @@ async fn demo(dir: &Path, port: u16) -> Result<Bound> {
     });
     let dashboard = Dashboard::new(Context {
         me: seed::ME.into(),
-        manual_reviews: false,
+        manual_reviews: watch::channel(false).1,
         data_dir: dir.to_owned(),
         config_path: "~/.config/sanic-review/config.toml".into(),
         store: Store::open(&db)?,
@@ -107,6 +107,10 @@ impl Control for DemoServe {
     fn refresh(&self, _: PrKey) {}
 
     fn add_skip_title(&self, _: &str, _: Option<&str>) -> Result<bool> {
+        Err(eyre!("the demo doesn't edit a config"))
+    }
+
+    fn set_manual_reviews(&self, _: bool) -> Result<Result<bool, Unloadable>> {
         Err(eyre!("the demo doesn't edit a config"))
     }
 

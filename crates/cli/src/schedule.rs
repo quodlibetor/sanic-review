@@ -173,16 +173,16 @@ impl Debouncer {
 
 /// Debounces `updates` and sends each run the store accepts to `runs`,
 /// publishing pending reviews' due times to `due`. A PR `skips` rules out
-/// when its review comes due is logged and not queued. With `manual`
-/// (`--manual-reviews`), what `runs` receives is held, and it says so
-/// itself. Returns when `updates` closes.
+/// when its review comes due is logged and not queued. While `manual`
+/// (`runner.manual_reviews`) is on, what `runs` receives is held, and it
+/// says so itself. Returns when `updates` closes.
 pub async fn schedule(
     mut updates: mpsc::UnboundedReceiver<Update>,
     store: Arc<Mutex<Store>>,
     runs: mpsc::UnboundedSender<QueuedRun>,
     due: watch::Sender<DueTimes>,
     skips: watch::Receiver<SkipRules>,
-    manual: bool,
+    manual: watch::Receiver<bool>,
     me: String,
 ) -> Result<()> {
     let mut debouncer = Debouncer::default();
@@ -223,7 +223,7 @@ pub async fn schedule(
                     let queued = store.queue_review(&request);
                     match queued {
                         Ok(Some(run)) => {
-                            if manual {
+                            if *manual.borrow() {
                                 debug!(url = %request.key.url(), run = run.id, "review queued");
                             } else {
                                 info!(url = %request.key.url(), run = run.id, "review queued");
@@ -486,7 +486,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
         let start = Instant::now();
@@ -538,7 +538,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
 
@@ -575,7 +575,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
 
@@ -613,7 +613,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
@@ -649,7 +649,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
 
@@ -697,7 +697,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
 
@@ -748,7 +748,7 @@ mod tests {
             runs_tx,
             due_tx,
             skips,
-            false,
+            watch::channel(false).1,
             "me".into(),
         ));
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();

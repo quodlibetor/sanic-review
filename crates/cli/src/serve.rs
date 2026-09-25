@@ -22,7 +22,7 @@ use color_eyre::{
 };
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
-    config::{Config, default_config_path, default_data_dir},
+    config::{Config, Unloadable, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
     skip::SkipRules,
@@ -44,7 +44,7 @@ use crate::{
     schedule::{DueTimes, Update, schedule, standing_request},
     tui::{self, Request, Shared, Sizes, SystemBrowser, Tui},
     watch::ConfigWatcher,
-    work::Worker,
+    work::{Job, Worker},
 };
 
 #[allow(
@@ -77,7 +77,16 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         None => default_config_path()?,
     })
     .wrap_err("resolving the config path")?;
-    let config = Config::load(&config_path, &VcsResolver)?;
+    let mut config = Config::load(&config_path, &VcsResolver)?;
+    // The flag only switches the setting on; from here the config decides.
+    // Only a config that turns it off is written, so one serve can't write,
+    // say in the Nix store, still starts with the flag.
+    if args.manual_reviews && !config.runner.manual_reviews {
+        config_edit::set_manual_reviews_in_file(&config_path, true, &VcsResolver)?
+            .map_err(|Unloadable(err)| err)?;
+        config.runner.manual_reviews = true;
+        info!(config = %config_path.display(), "--manual-reviews: turned `runner.manual_reviews` on");
+    }
     let db_path = data_dir.join("state.db");
     let store = Store::open(&db_path)?;
     // The scheduler and worker share a second connection, so the poller
@@ -93,14 +102,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let mut watcher = ConfigWatcher::new(&config_path)?;
     let (updates, updates_rx) = mpsc::unbounded_channel();
     let (runs, runs_rx) = mpsc::unbounded_channel();
-    // With `--manual-reviews`, reviews started by hand skip the hold.
-    let (started, started_rx) = if args.manual_reviews {
-        let (started, started_rx) = mpsc::unbounded_channel();
-        (started, Some(started_rx))
-    } else {
-        (runs.clone(), None)
-    };
-    resume_queued(&run_store, args.manual_reviews, &runs)?;
+    // Reviews started by hand, which skip any `runner.manual_reviews` hold.
+    let (started, started_rx) = mpsc::unbounded_channel();
+    resume_queued(&run_store, config.runner.manual_reviews, &runs)?;
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config, &me));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
@@ -120,7 +124,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     };
     // Bound before the TUI starts, so it knows the address to open.
     let web = live
-        .dashboard(&me, args.manual_reviews, &data_dir, &github, control, &due)?
+        .dashboard(&me, &data_dir, &github, control, &due)?
         .bind(args.port)
         .await?;
     let mut ui = match logs {
@@ -128,7 +132,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             &db_path,
             Shared {
                 me: me.clone(),
-                manual_reviews: args.manual_reviews,
+                manual_reviews: live.manual_reviews.subscribe(),
                 logs,
                 due,
                 skips: live.skips.subscribe(),
@@ -137,6 +141,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 clock: Arc::new(SystemClock),
                 requests,
                 config_path: config_path.clone(),
+                resolver: Arc::new(VcsResolver),
                 data_dir: data_dir.clone(),
                 runtime: tokio::runtime::Handle::current(),
                 chatting: Arc::clone(&chatting),
@@ -157,7 +162,15 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let mut poller = Poller::new(github, store, config, me);
     // Kept past the `select!`, so running reviews can wind down cleanly
     // rather than be dropped midway.
-    let reviews = run_reviews(Arc::clone(&worker), runs_rx, started_rx);
+    let reviews = run_reviews(
+        Arc::clone(&worker),
+        Inputs {
+            runs: runs_rx,
+            started: started_rx,
+            manual: live.manual_reviews.subscribe(),
+            store: Arc::clone(&run_store),
+        },
+    );
     tokio::pin!(reviews);
     let result = tokio::select! {
         result = quit => {
@@ -169,10 +182,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         ) => result,
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
-            args.manual_reviews, me_for_scheduler,
+            live.manual_reviews.subscribe(), me_for_scheduler,
         ) => result,
         () = handle_requests(requests_rx, run_store, Starter {
-            manual: args.manual_reviews,
+            manual: live.manual_reviews.subscribe(),
             start: started,
         }) => Ok(()),
         () = &mut reviews => Ok(()),
@@ -238,6 +251,9 @@ async fn cancel_running(worker: &Worker, tell_terminal: bool) {
 /// reloads, and the poller's progress.
 struct Live {
     skips: watch::Sender<SkipRules>,
+    /// `runner.manual_reviews`: queued reviews are held until you start
+    /// one. Sent only when it changes.
+    manual_reviews: watch::Sender<bool>,
     /// The recency window in force, in days, for the TUI.
     window: watch::Sender<Option<u32>>,
     /// The same, with where it comes from, for the dashboard.
@@ -255,6 +271,7 @@ impl Live {
         };
         Self {
             skips: watch::Sender::new(config.skip_rules()),
+            manual_reviews: watch::Sender::new(config.runner.manual_reviews),
             window: watch::Sender::new(recency.days()),
             recency: watch::Sender::new(recency),
             progress: watch::Sender::new(None),
@@ -263,6 +280,9 @@ impl Live {
 
     fn publish(&self, config: &Config) {
         self.skips.send_replace(config.skip_rules());
+        let manual = config.runner.manual_reviews;
+        self.manual_reviews
+            .send_if_modified(|was| std::mem::replace(was, manual) != manual);
         self.set_recency(|w| w.configured = config.poll.updated_within_days);
     }
 
@@ -288,7 +308,6 @@ impl Live {
     fn dashboard(
         &self,
         me: &str,
-        manual_reviews: bool,
         data_dir: &Path,
         github: &Client,
         control: DashboardControl,
@@ -296,7 +315,7 @@ impl Live {
     ) -> Result<Dashboard> {
         Dashboard::new(sanic_web::Context {
             me: me.to_owned(),
-            manual_reviews,
+            manual_reviews: self.manual_reviews.subscribe(),
             data_dir: data_dir.to_owned(),
             config_path: control.config_path.clone(),
             store: Store::open(&data_dir.join("state.db"))?,
@@ -312,15 +331,16 @@ impl Live {
 }
 
 /// The dashboard starts reviews the way the TUI's `r` does, adds
-/// `skip_titles` patterns the way its ignore editor does, and reads the
-/// run settings its chat commands are built from.
+/// `skip_titles` patterns the way its ignore editor does, switches manual
+/// reviews the way its `m` does, and reads the run settings its chat
+/// commands are built from.
 struct DashboardControl {
     requests: mpsc::UnboundedSender<Request>,
     /// PRs to refresh from GitHub now, for the poller.
     refreshes: mpsc::UnboundedSender<PrKey>,
     /// For regenerations, which start at once and return their run.
     store: Arc<Mutex<Store>>,
-    /// Straight to the worker, past any `--manual-reviews` hold.
+    /// Straight to the worker, past any `runner.manual_reviews` hold.
     started: mpsc::UnboundedSender<QueuedRun>,
     data_dir: PathBuf,
     /// Edited in place; the watcher reloads it.
@@ -345,6 +365,10 @@ impl sanic_web::Control for DashboardControl {
 
     fn add_skip_title(&self, pattern: &str, profile: Option<&str>) -> Result<bool> {
         config_edit::add_skip_title_to_file(&self.config_path, profile, pattern)
+    }
+
+    fn set_manual_reviews(&self, on: bool) -> Result<Result<bool, Unloadable>> {
+        config_edit::set_manual_reviews_in_file(&self.config_path, on, &VcsResolver)
     }
 
     fn run_settings(&self, profile: &str) -> Result<RunSettings> {
@@ -378,7 +402,7 @@ impl sanic_web::Control for DashboardControl {
 }
 
 /// Queues a regeneration of run `source`, or of just `draft` of it, and
-/// starts it, past any `--manual-reviews` hold, or says why not.
+/// starts it, past any `runner.manual_reviews` hold, or says why not.
 fn regenerate(
     store: &Mutex<Store>,
     data_dir: &Path,
@@ -449,7 +473,8 @@ impl ProgressLog {
     }
 }
 
-/// Sends the runs a previous process left queued or running to `runs`.
+/// Sends the runs a previous process left queued or running to `runs`,
+/// which holds them if `manual`.
 fn resume_queued(
     store: &Mutex<Store>,
     manual: bool,
@@ -463,7 +488,7 @@ fn resume_queued(
         if manual {
             info!(
                 runs = recovered.len(),
-                "queued runs held by --manual-reviews"
+                "queued runs held: manual reviews are on"
             );
         } else {
             info!(runs = recovered.len(), "resuming queued runs");
@@ -478,10 +503,12 @@ fn resume_queued(
 /// How often `serve` looks for `sanic-review review` requests.
 const START_POLL: Duration = Duration::from_secs(2);
 
-/// Where reviews started by hand go: straight to the worker, even with
-/// `--manual-reviews`. Without it, that's the queue every run goes to.
+/// Where reviews started by hand go: straight to the worker, past any
+/// `runner.manual_reviews` hold.
 struct Starter {
-    manual: bool,
+    /// `runner.manual_reviews` as the config last loaded: while it's on, a
+    /// PR's held review is the one to start.
+    manual: watch::Receiver<bool>,
     start: mpsc::UnboundedSender<QueuedRun>,
 }
 
@@ -543,7 +570,7 @@ fn save_layout(sizes: Sizes, store: &Mutex<Store>) {
     }
 }
 
-/// Starts a review of `key` now. With `--manual-reviews` that's its held
+/// Starts a review of `key` now. Under manual reviews that's its held
 /// review if it has one; otherwise a full review of its current head is
 /// queued, as the scheduler would, so a head that already has a queued,
 /// running or succeeded review is left alone.
@@ -551,7 +578,7 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
     let _span = info_span!("review_now", url = %key.url()).entered();
     let run = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        let held = if starter.manual {
+        let held = if *starter.manual.borrow() {
             store.queued_review(key)
         } else {
             Ok(None)
@@ -577,31 +604,101 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
     }
 }
 
-/// Runs queued reviews. With `--manual-reviews` they're only logged, and
-/// stay queued in the store, and just the ones started by hand run.
-async fn run_reviews(
-    worker: Arc<Worker>,
-    mut runs: mpsc::UnboundedReceiver<QueuedRun>,
-    started: Option<mpsc::UnboundedReceiver<QueuedRun>>,
-) {
-    let Some(started) = started else {
-        return worker.work(runs).await;
+/// What [`run_reviews`] takes runs from.
+struct Inputs {
+    /// Queued by the scheduler, or left queued before `serve` started.
+    runs: mpsc::UnboundedReceiver<QueuedRun>,
+    /// Started by hand, past any hold.
+    started: mpsc::UnboundedReceiver<QueuedRun>,
+    /// `runner.manual_reviews` as the config last loaded.
+    manual: watch::Receiver<bool>,
+    /// Where the held reviews are, when manual reviews are turned off.
+    store: Arc<Mutex<Store>>,
+}
+
+/// Runs queued reviews. While `runner.manual_reviews` is on, those from
+/// `runs` are only logged and stay queued in the store, and just the ones
+/// started by hand run.
+async fn run_reviews(worker: Arc<Worker>, inputs: Inputs) {
+    let (jobs, jobs_rx) = mpsc::unbounded_channel();
+    tokio::join!(hold(inputs, jobs), worker.work(jobs_rx));
+}
+
+const HOLDING: &str = "manual reviews are on: reviews are queued and held; start one with `r` \
+                       in the TUI, Review now on the dashboard or `sanic-review review <PR url>`";
+
+/// Hands runs to the worker as `jobs`, holding automatic ones while manual
+/// reviews are on. Turning them off starts every held review, which the
+/// worker runs `runner.max_concurrent` at a time; turning them on holds
+/// what's queued from then on, and the worker holds those that were
+/// waiting their turn. Returns once its inputs close.
+async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
+    let Inputs {
+        mut runs,
+        mut started,
+        mut manual,
+        store,
+    } = inputs;
+    let mut holding = *manual.borrow_and_update();
+    if holding {
+        info!("{HOLDING}");
+    }
+    // Only fails once the worker has stopped, which ends `serve` anyway.
+    let send = |run, automatic| {
+        let _ = jobs.send(Job { run, automatic });
     };
-    info!(
-        "--manual-reviews: reviews are queued and held; start one with `r` in the TUI \
-         or `sanic-review review <PR url>`"
-    );
-    let hold = async {
-        while let Some(run) = runs.recv().await {
-            info!(
-                url = %run.request.key.url(),
-                run = run.id,
-                head = %run.request.head_sha,
-                "review held (--manual-reviews)"
-            );
+    loop {
+        // A switch first, so runs after it are handled as it says.
+        tokio::select! {
+            biased;
+            Ok(()) = manual.changed() => {
+                let on = *manual.borrow_and_update();
+                if holding && !on {
+                    for run in held_reviews(&store) {
+                        send(run, true);
+                    }
+                } else if on && !holding {
+                    info!("{HOLDING}");
+                }
+                holding = on;
+            }
+            Some(run) = runs.recv() => {
+                if holding {
+                    info!(
+                        url = %run.request.key.url(),
+                        run = run.id,
+                        head = %run.request.head_sha,
+                        "review held: manual reviews are on"
+                    );
+                } else {
+                    send(run, true);
+                }
+            }
+            Some(run) = started.recv() => send(run, false),
+            else => return,
         }
-    };
-    tokio::join!(hold, worker.work(started));
+    }
+}
+
+/// The reviews manual reviews held, now that they're off.
+fn held_reviews(store: &Mutex<Store>) -> Vec<QueuedRun> {
+    let held = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .queued_reviews();
+    match held {
+        Ok(held) => {
+            info!(
+                reviews = held.len(),
+                "manual reviews are off: starting the held reviews"
+            );
+            held
+        }
+        Err(err) => {
+            warn!("reading the held reviews failed; they start when serve next does: {err:?}");
+            Vec::new()
+        }
+    }
 }
 
 async fn poll_forever<G: GithubApi>(
@@ -792,6 +889,8 @@ fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path, worker: &Worker, li
             if config.github.api_url != poller.config().github.api_url {
                 warn!("`github.api_url` changed; restart to use it");
             }
+            // The worker first: a review manual reviews held, and
+            // turning them off releases, asks it whether they still hold.
             worker.configure(&config);
             live.publish(&config);
             poller.set_config(config);
@@ -921,7 +1020,14 @@ mod tests {
         let (start, mut started) = mpsc::unbounded_channel();
         let handled = tokio::time::timeout(
             Duration::from_secs(1),
-            handle_requests(requests_rx, Arc::clone(store), Starter { manual, start }),
+            handle_requests(
+                requests_rx,
+                Arc::clone(store),
+                Starter {
+                    manual: watch::channel(manual).1,
+                    start,
+                },
+            ),
         );
         assert!(handled.await.is_err(), "handle_requests never returns");
         std::iter::from_fn(|| started.try_recv().ok()).collect()
@@ -990,6 +1096,54 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn manual_reviews_hold_until_turned_off_then_start_what_they_held() {
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let held = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        let (started, started_rx) = mpsc::unbounded_channel();
+        let (manual, manual_rx) = watch::channel(true);
+        let (jobs, mut jobs_rx) = mpsc::unbounded_channel();
+        let gate = tokio::spawn(hold(
+            Inputs {
+                runs: runs_rx,
+                started: started_rx,
+                manual: manual_rx,
+                store: Arc::new(Mutex::new(store)),
+            },
+            jobs,
+        ));
+        let job = |run: &QueuedRun, automatic| Job {
+            run: run.clone(),
+            automatic,
+        };
+        let other = |id| QueuedRun { id, ..held.clone() };
+
+        // The scheduler's run is only logged; one started by hand, taken
+        // after it, goes through.
+        runs.send(held.clone()).unwrap();
+        started.send(other(100)).unwrap();
+        assert_eq!(jobs_rx.recv().await, Some(job(&other(100), false)));
+
+        // Turning them off starts the held review, from the store, and
+        // what's queued after it.
+        manual.send_replace(false);
+        runs.send(other(101)).unwrap();
+        assert_eq!(jobs_rx.recv().await, Some(job(&held, true)));
+        assert_eq!(jobs_rx.recv().await, Some(job(&other(101), true)));
+
+        // Turned on again, what's queued is held once more.
+        manual.send_replace(true);
+        runs.send(other(102)).unwrap();
+        drop((runs, started, manual));
+        gate.await.unwrap();
+        assert_eq!(jobs_rx.recv().await, None);
     }
 
     #[test]
@@ -1133,6 +1287,45 @@ mod tests {
              skip_titles = [\"wip*\"]\n\n[review_requests]\nskip_titles = [\"build(deps)*\"]\n"
         );
         assert!(control.add_skip_title("x*", Some("nope")).is_err());
+
+        // Manual reviews are switched in `[runner]`, for the reload to
+        // pick up.
+        assert!(control.set_manual_reviews(false).unwrap().unwrap());
+        assert!(!control.set_manual_reviews(false).unwrap().unwrap());
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            text.ends_with("\n[runner]\nmanual_reviews = false\n"),
+            "{text}"
+        );
+        // A config that doesn't load, as the reload would find it, is left
+        // alone, with why.
+        for (from, to, why) in [
+            (
+                "manual_reviews = false",
+                "manual_reviews = \"no\"",
+                "manual_reviews",
+            ),
+            (
+                "[runner]",
+                "[poll]\nreconcile_secs = 0\n[runner]",
+                "reconcile_secs",
+            ),
+        ] {
+            let broken = text.replace(from, to);
+            std::fs::write(&config_path, &broken).unwrap();
+            let refused = control.set_manual_reviews(true).unwrap().unwrap_err();
+            assert!(refused.to_string().contains(why), "{refused}");
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), broken);
+        }
+        std::fs::write(&config_path, &text).unwrap();
+        let reloaded = Config::parse(&text, dir.path(), &VcsResolver).unwrap();
+        let mut manual = control.live.manual_reviews.subscribe();
+        control.live.publish(&reloaded);
+        assert!(manual.has_changed().unwrap());
+        assert!(!*manual.borrow_and_update());
+        // A reload that leaves it as it was doesn't say it changed.
+        control.live.publish(&reloaded);
+        assert!(!manual.has_changed().unwrap());
 
         // A recency window picked there is stored, and followed by the
         // lists and the poller, until it's reset; the config is untouched.

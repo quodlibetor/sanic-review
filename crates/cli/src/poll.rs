@@ -501,7 +501,7 @@ pub(crate) mod tests {
         }
     }
 
-    struct NoCheckouts;
+    pub struct NoCheckouts;
 
     impl CheckoutResolver for NoCheckouts {
         fn resolve(&self, path: &Path, _: Option<&str>) -> Result<(Vcs, RepoName)> {

@@ -276,7 +276,7 @@ fn approved_block(state: PrState, merge: Option<Merge>) -> Option<Block> {
 }
 
 /// Whether the status [`owed_status`] shows is a run to act on: one that
-/// failed or crashed, or one `--manual-reviews` holds. A skip or a wait
+/// failed or crashed, or one manual reviews hold. A skip or a wait
 /// out the quiet period, shown in the run's place, says there's nothing
 /// to act on yet.
 fn run_needs_you(label: &str, class: &str) -> bool {
@@ -410,7 +410,7 @@ fn owed_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
         .owed
         .iter()
         .filter(|pr| show_archived || !pr.archived)
-        .map(|pr| (OwedGroup::of(pr, overview, app.manual_reviews), pr))
+        .map(|pr| (OwedGroup::of(pr, overview, app.manual_reviews()), pr))
         .collect();
     let group = |group| -> Vec<&OwedReview> {
         let mut prs: Vec<_> = shown
@@ -589,9 +589,11 @@ fn unseen(overview: &Overview, key: &PrKey) -> Markup {
 }
 
 fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
-    let (label, class) = index_status(pr, overview, app.manual_reviews);
+    // Read once, so a reload midway can't split the row.
+    let manual_reviews = app.manual_reviews();
+    let (label, class) = index_status(pr, overview, manual_reviews);
     let lead = owed_lead(pr, overview, &label, class);
-    let why = why(pr, overview, app.manual_reviews);
+    let why = why(pr, overview, manual_reviews);
     let href = pr_href(&pr.key);
     let facts = overview.facts.get(&pr.key);
     let waiting = overview
@@ -609,7 +611,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
         error: pr.latest_run.as_ref().and_then(|run| run.error.as_deref()),
         skip: overview.skipped.get(&pr.key),
         waiting: waiting.as_deref(),
-        manual_reviews: app.manual_reviews,
+        manual_reviews,
         now: app.clock.now(),
     };
     let row = Row {
@@ -660,7 +662,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
         error: None,
         skip: None,
         waiting: None,
-        manual_reviews: app.manual_reviews,
+        manual_reviews: app.manual_reviews(),
         now: app.clock.now(),
     };
     let row = Row {

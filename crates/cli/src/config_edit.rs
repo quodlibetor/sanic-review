@@ -1,13 +1,14 @@
 //! Editing the config file in place, keeping its comments and layout.
-//! `setup` and the TUI's and the dashboard's ignore editors write through
-//! here.
+//! `setup`, the TUI's and the dashboard's ignore editors, their manual
+//! reviews switches and `serve --manual-reviews` write through here.
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use color_eyre::eyre::{Result, WrapErr, bail};
+use sanic_core::config::{CheckoutResolver, Config, Unloadable};
 use toml_edit::{Array, DocumentMut, Item, RawString, Table, Value};
 
 /// Sets `[table].key`, creating the table as needed. A replaced value keeps
@@ -228,27 +229,91 @@ pub fn add_skip_title(doc: &mut DocumentMut, profile: Option<&str>, pattern: &st
     Ok(true)
 }
 
-/// [`add_skip_title`] on the config file at `path`. The TUI and the
-/// dashboard's handlers call this concurrently, so edits take turns: each
-/// rereads the file, and none writes over another's temporary file.
+/// [`add_skip_title`] on the config file at `path`.
 pub fn add_skip_title_to_file(path: &Path, profile: Option<&str>, pattern: &str) -> Result<bool> {
-    static EDITING: Mutex<()> = Mutex::new(());
-    let _turn = EDITING.lock().unwrap_or_else(PoisonError::into_inner);
+    edit_file(path, |doc| add_skip_title(doc, profile, pattern))
+}
+
+/// Sets `runner.manual_reviews` to `on`, in a config that loads, so the
+/// key is a bool if it's there at all. `false` if the file already says
+/// so; left unset, it's on, but turning it on still writes it.
+fn set_manual_reviews(doc: &mut DocumentMut, on: bool) -> Result<bool> {
+    let now = doc
+        .get("runner")
+        .and_then(|runner| runner.get("manual_reviews"))
+        .and_then(Item::as_bool);
+    if now == Some(on) {
+        return Ok(false);
+    }
+    set_value(doc, "runner", "manual_reviews", on.into())?;
+    Ok(true)
+}
+
+/// Whether the config file at `path` has manual reviews on, as `serve`
+/// would load it now. A value that isn't a bool, or anything else that
+/// keeps the file from loading, is an error, not the default.
+pub fn manual_reviews_in_file(
+    path: &Path,
+    resolver: &dyn CheckoutResolver,
+) -> Result<bool, Unloadable> {
+    Config::load(path, resolver)
+        .map(|config| config.runner.manual_reviews)
+        .map_err(Unloadable)
+}
+
+/// [`set_manual_reviews`] on the config file at `path`, if it loads as
+/// `serve` would load it. If it doesn't, `serve` is still on the config it
+/// last loaded, so the file is left alone and the error says why.
+pub fn set_manual_reviews_in_file(
+    path: &Path,
+    on: bool,
+    resolver: &dyn CheckoutResolver,
+) -> Result<Result<bool, Unloadable>> {
+    let _turn = take_turn();
+    let text = match Config::load_with_text(path, resolver) {
+        Ok((_, text)) => text,
+        Err(err) => return Ok(Err(Unloadable(err))),
+    };
+    edit_text(path, &text, |doc| set_manual_reviews(doc, on)).map(Ok)
+}
+
+/// Applies `edit` to the config file at `path`, writing it back if `edit`
+/// says it changed anything.
+fn edit_file(path: &Path, edit: impl FnOnce(&mut DocumentMut) -> Result<bool>) -> Result<bool> {
+    let _turn = take_turn();
     let text = std::fs::read_to_string(path)
         .wrap_err_with(|| format!("reading config {}", path.display()))?;
+    edit_text(path, &text, edit)
+}
+
+/// [`edit_file`] on `text`, which was read from `path` during this turn.
+fn edit_text(
+    path: &Path,
+    text: &str,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<bool>,
+) -> Result<bool> {
     let mut doc: DocumentMut = text
         .parse()
         .wrap_err_with(|| format!("parsing config {}", path.display()))?;
-    if !add_skip_title(&mut doc, profile, pattern)? {
+    if !edit(&mut doc)? {
         return Ok(false);
     }
     write_atomically(path, &doc.to_string())?;
     Ok(true)
 }
 
+/// The TUI and the dashboard's handlers edit the config file concurrently,
+/// so edits take turns: each reads the file during its turn, and none
+/// writes over another's temporary file.
+fn take_turn() -> MutexGuard<'static, ()> {
+    static EDITING: Mutex<()> = Mutex::new(());
+    EDITING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poll::tests::NoCheckouts;
 
     const CONFIG: &str = r#"# My config.
 [review_requests]
@@ -455,6 +520,55 @@ skip_titles = ["wip*"]
         let looped = config_dir.join("loop.toml");
         symlink(&looped, &looped).unwrap();
         assert!(write_atomically(&looped, "").is_err());
+    }
+
+    #[test]
+    fn manual_reviews_are_switched_in_runner_keeping_comments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, CONFIG).unwrap();
+
+        // Unset is on, but turning it on says so in the file.
+        let switch = |on| set_manual_reviews_in_file(&path, on, &NoCheckouts).unwrap();
+        assert!(switch(true).unwrap());
+        assert!(!switch(true).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.ends_with("\n[runner]\nmanual_reviews = true\n"),
+            "{text}"
+        );
+
+        let mut doc: DocumentMut = "[runner]\nmanual_reviews = true # hold them\nclaude = \"c\"\n"
+            .parse()
+            .unwrap();
+        assert!(set_manual_reviews(&mut doc, false).unwrap());
+        assert_eq!(
+            doc.to_string(),
+            "[runner]\nmanual_reviews = false # hold them\nclaude = \"c\"\n"
+        );
+    }
+
+    #[test]
+    fn manual_reviews_are_left_alone_in_a_config_that_doesnt_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for (broken, why) in [
+            // Read raw, "no" isn't a bool, so it would look unset: on.
+            ("[runner]\nmanual_reviews = \"no\"\n", "manual_reviews"),
+            ("[poll]\nreconcile_secs = 0\n", "reconcile_secs"),
+        ] {
+            let text = format!("{broken}{CONFIG}");
+            std::fs::write(&path, &text).unwrap();
+            let err = manual_reviews_in_file(&path, &NoCheckouts).unwrap_err();
+            assert!(err.to_string().contains(why), "{err}");
+            for on in [true, false] {
+                let err = set_manual_reviews_in_file(&path, on, &NoCheckouts)
+                    .unwrap()
+                    .unwrap_err();
+                assert!(err.to_string().contains(why), "{err}");
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
     }
 
     #[test]

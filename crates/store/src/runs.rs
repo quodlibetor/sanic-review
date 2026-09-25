@@ -233,7 +233,7 @@ impl Store {
 
     /// Queues a `regenerate` run revising run `source` with `instruction`,
     /// or says why not. It's for `source`'s head, which must still be the
-    /// PR's, and it isn't held by `--manual-reviews`: it's started by hand.
+    /// PR's, and it isn't held by `runner.manual_reviews`: it's started by hand.
     ///
     /// Revising a regeneration resumes its session, but the new run's
     /// source is the original review: every revision's session lives in
@@ -697,6 +697,12 @@ impl Store {
             [],
         )?;
         tx.commit().wrap_err("recovering interrupted runs")?;
+        self.queued_reviews()
+    }
+
+    /// Every review queued but not started, oldest first: under
+    /// `runner.manual_reviews`, the held ones.
+    pub fn queued_reviews(&self) -> Result<Vec<QueuedRun>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
              FROM runs WHERE status = 'queued' AND kind = ?1 ORDER BY id",
@@ -705,6 +711,15 @@ impl Store {
             .query_map([REVIEW], queued_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter().map(queued_run).collect()
+    }
+
+    /// How many [`Store::queued_reviews`] there are.
+    pub fn queued_review_count(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM runs WHERE status = 'queued' AND kind = ?1",
+            [REVIEW],
+            |row| row.get(0),
+        )?)
     }
 
     /// `key`'s review that's queued but not started, if any.
@@ -2311,6 +2326,25 @@ mod tests {
         store.claim_run(run.id).unwrap();
         assert!(store.recover_runs().unwrap().is_empty());
         assert_eq!(status(&store, run.id), "failed");
+    }
+
+    #[test]
+    fn queued_reviews_leave_out_started_runs_and_regenerations() {
+        let mut store = store();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert_eq!(
+            store.queued_reviews().unwrap(),
+            std::slice::from_ref(&source)
+        );
+        assert_eq!(store.queued_review_count().unwrap(), 1);
+        store.claim_run(source.id).unwrap();
+        store.finish_review(source.id, &result()).unwrap();
+        let Regeneration::Queued(_) = store.queue_regeneration(source.id, "x", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        assert!(store.queued_reviews().unwrap().is_empty());
+        assert_eq!(store.queued_review_count().unwrap(), 0);
     }
 
     #[test]

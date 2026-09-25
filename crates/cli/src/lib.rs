@@ -35,8 +35,8 @@ enum Command {
     Archive(archive::PrArgs),
     /// Undo `archive`.
     Unarchive(archive::PrArgs),
-    /// Ask the running `serve` to review a PR now, e.g. one held by
-    /// `--manual-reviews`.
+    /// Ask the running `serve` to review a PR now, e.g. one manual reviews
+    /// hold.
     Review(archive::PrArgs),
     /// Chat with the agent that reviewed a PR, in a copy of its worktree
     /// that's thrown away when the chat ends.
@@ -61,9 +61,9 @@ pub struct ServeArgs {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
-    /// Queue reviews but only run the ones you start: `r` in the TUI, or
-    /// `sanic-review review <PR url>`. The rest stay queued and run on the
-    /// next start without this flag.
+    /// Turn `runner.manual_reviews` on in the config file: queue reviews
+    /// but only run the ones you start. It's on unless the config turns it
+    /// off; `m` in the TUI and the dashboard's settings switch it.
     #[arg(long)]
     manual_reviews: bool,
 }

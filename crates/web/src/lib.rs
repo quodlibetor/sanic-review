@@ -22,6 +22,7 @@ mod markdown;
 mod page;
 mod pr;
 mod regenerate;
+mod settings;
 mod submit;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ use axum::{
 use color_eyre::eyre::{self, Result, WrapErr};
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
+    config::Unloadable,
     pr::PrKey,
     repo::RepoName,
     skip::SkipRules,
@@ -65,6 +67,13 @@ pub trait Control: Send + Sync {
     /// head as last polled.
     fn review_now(&self, key: PrKey);
 
+    /// Turns `runner.manual_reviews` on or off in the config file, as the
+    /// TUI's `m` does; `serve` picks it up by reloading, and turning it
+    /// off starts the reviews it held. `false` if the file already says
+    /// so. A file that doesn't load as `serve` loads it is left alone, and
+    /// [`Unloadable`] says why.
+    fn set_manual_reviews(&self, on: bool) -> Result<Result<bool, Unloadable>>;
+
     /// Refreshes `key` from GitHub now, ahead of anything else queued,
     /// rather than at the next reconcile; a rate limit's pause still holds
     /// it back. Asked after a post, so the dashboard shows what GitHub has.
@@ -83,7 +92,7 @@ pub trait Control: Send + Sync {
     /// Revises run `run_id`'s review with `instruction`, or with `draft`
     /// only that draft of it: a new `regenerate` run resumes its agent
     /// session, and its drafts are the new run's own. It starts now, even
-    /// under `--manual-reviews`. Returns the new run's id, or why it
+    /// under manual reviews. Returns the new run's id, or why it
     /// can't; [`Refusal`] says why in words.
     fn regenerate(
         &self,
@@ -124,8 +133,9 @@ impl Sources for Mirrors {
 pub struct Context {
     /// The GitHub login everything is judged relative to.
     pub me: String,
-    /// `serve --manual-reviews`.
-    pub manual_reviews: bool,
+    /// `runner.manual_reviews`: queued reviews are held until you start
+    /// one. Follows config reloads.
+    pub manual_reviews: watch::Receiver<bool>,
     /// Where runs keep their files, under `runs/<id>/`.
     pub data_dir: PathBuf,
     /// `serve`'s config file, for the commands the dashboard shows.
@@ -148,7 +158,7 @@ pub struct Context {
 
 struct App {
     me: String,
-    manual_reviews: bool,
+    manual_reviews: watch::Receiver<bool>,
     data_dir: PathBuf,
     config_path: PathBuf,
     store: Mutex<Store>,
@@ -174,6 +184,11 @@ struct App {
 }
 
 impl App {
+    /// Whether manual reviews are on, as the config last loaded.
+    fn manual_reviews(&self) -> bool {
+        *self.manual_reviews.borrow()
+    }
+
     fn store(&self) -> MutexGuard<'_, Store> {
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -270,6 +285,11 @@ impl Dashboard {
                 get(regenerate::confirm).post(regenerate::regenerate),
             )
             .route("/window", post(index::set_window))
+            .route("/settings", get(settings::page))
+            .route(
+                "/settings/manual-reviews",
+                get(settings::confirm_manual_reviews).post(settings::set_manual_reviews),
+            )
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
             .route("/drafts/{id}/thread", post(pr::choose_thread))

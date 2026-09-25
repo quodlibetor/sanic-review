@@ -141,12 +141,15 @@ pub fn counts(app: &App, with_archived: bool) -> Markup {
     .ok();
     html! {
         span.counts #counts {
-            @if app.manual_reviews { span.held { "manual reviews" } " · " }
+            @if app.manual_reviews() {
+                a.held href="/settings" { "manual reviews" } " · "
+            }
             @if let Some((c, pending)) = counts {
                 b { (c.queued) } " queued · " b { (c.running) } " running · "
                 b.cnt { (pending) } " pending drafts"
                 " " span.muted-sep { "|" } " "
             }
+            a href="/settings" { "settings" } " · "
             (keycap("?")) " keys"
         }
     }
