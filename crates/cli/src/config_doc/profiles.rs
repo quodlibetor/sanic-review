@@ -39,10 +39,23 @@ pub fn add(doc: &mut DocumentMut, name: &str) -> Result<()> {
             profiles.insert(name, profile.into());
         }
         Item::Table(profiles) => {
-            let mut profile = new_table();
+            // Dotted keys when the others are, so it can be moved among them.
+            let dotted = !profiles.is_empty()
+                && profiles
+                    .iter()
+                    .all(|(_, item)| item.as_table().is_some_and(Table::is_dotted));
+            let mut profile = if dotted {
+                let mut table = Table::new();
+                table.set_dotted(true);
+                table
+            } else {
+                new_table()
+            };
             profile.insert("repos", Item::Value(Value::Array(Array::new())));
-            // Placed after every other table, where it's printed.
-            profile.set_position(Some(after));
+            if !dotted {
+                // Placed after every other table, where it's printed.
+                profile.set_position(Some(after));
+            }
             profiles.insert(name, Item::Table(profile));
         }
         _ => bail!("`profile` in the config is not a table"),
@@ -103,6 +116,9 @@ pub fn rename(doc: &mut DocumentMut, from: &str, to: &str) -> Result<()> {
         .map(|name| if name == from { to.to_owned() } else { name })
         .collect();
     let profiles = profiles_mut(doc)?;
+    if from == to && profiles.contains_key(from) {
+        return Ok(());
+    }
     if profiles.contains_key(to) {
         bail!("there's already a `[profile.{to}]`");
     }
@@ -131,6 +147,20 @@ pub fn move_to(doc: &mut DocumentMut, name: &str, to: usize) -> Result<()> {
             "`[profile.{other}]` has tables of its own, so the profiles can only be reordered \
              by hand"
         );
+    }
+    // Dotted profiles print in their parent's body and headers after it,
+    // so neither can be moved past the other.
+    if let Some(Item::Table(profiles)) = doc.get("profile") {
+        let dotted = profiles
+            .iter()
+            .filter(|(_, item)| item.as_table().is_some_and(Table::is_dotted))
+            .count();
+        if dotted != 0 && dotted != profiles.len() {
+            bail!(
+                "some profiles are written as dotted keys and some as `[profile.<name>]` \
+                 headers, so the profiles can only be reordered by hand"
+            );
+        }
     }
     let moved = order.remove(at);
     order.insert(to.min(order.len()), moved);
@@ -318,6 +348,7 @@ repos = [{ github = "a" }]
         assert_eq!(loaded(&moved), ["default", "ring"]);
         assert_eq!(edit(&moved, |doc| move_to(doc, "default", 1)), HEADERS);
 
+        assert_eq!(edit(HEADERS, |doc| rename(doc, "ring", "ring")), HEADERS);
         let renamed = edit(HEADERS, |doc| rename(doc, "ring", "security team"));
         assert!(
             renamed.contains("# The ring team's.\n[profile.\"security team\"]\n"),
@@ -355,6 +386,9 @@ repos = [{ github = "a" }]
         let renamed = edit(dotted, |doc| rename(doc, "a", "z"));
         assert_eq!(loaded(&renamed), ["z", "b"]);
         let added = edit(dotted, |doc| add(doc, "c"));
+        assert!(added.ends_with("profile.c.repos = []\n"), "{added}");
+        let moved = edit(&added, |doc| move_to(doc, "c", 0));
+        assert!(moved.starts_with("profile.c.repos = []\n"), "{moved}");
         assert_eq!(
             Config::parse(&added, Path::new("/"), &NoCheckouts)
                 .unwrap_err()
@@ -395,5 +429,12 @@ repos = [{ github = "a" }]
         // Moving another profile hands `p` a place too.
         let err = move_to(&mut doc, "q", 0).unwrap_err();
         assert!(err.to_string().contains("`[profile.p]`"), "{err}");
+
+        // Dotted profiles print before headers, whatever the order.
+        let mut doc: DocumentMut = "profile.a.repos = []\n\n[profile.b]\nrepos = []\n"
+            .parse()
+            .unwrap();
+        let err = move_to(&mut doc, "b", 0).unwrap_err();
+        assert!(err.to_string().contains("by hand"), "{err}");
     }
 }
