@@ -106,14 +106,15 @@ shows a diff of the config and writes it only if you say yes. You can run it
 again later; it keeps what it doesn't manage.
 
 ```sh
-sanic-review serve --ui tui
+sanic-review serve
 ```
 
 `serve` runs in the foreground: it polls GitHub, runs reviews and serves the
 dashboard, logging its URL on startup (`o` in the TUI opens it). Its options:
 
 ```
---ui <logs|tui>        log lines (the default), or a terminal UI
+--ui <logs|tui>        log lines, or a terminal UI (the default in a
+                       terminal, unless in the background)
 --port <PORT>          dashboard port, bound on 127.0.0.1
 --config <CONFIG>      defaults to ~/.config/sanic-review/config.toml
 --data-dir <DATA_DIR>  defaults to ~/.local/share/sanic-review

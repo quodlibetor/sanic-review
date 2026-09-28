@@ -31,6 +31,15 @@ It runs these tasks in one process:
 Running it as a daemon means wrapping `serve` in a systemd user unit. There is
 no separate daemon mode.
 
+Without `--ui`, `serve` runs the TUI when stdout is a terminal it has the
+foreground of, and logs otherwise, so the same command suits a shell, a
+unit and `serve &` in a shell with job control, where the TUI's raw mode
+would get it stopped. (A script without job control leaves its
+background jobs in the foreground group, so they still get the TUI.)
+`--ui` picks either explicitly, except that `--ui tui` without a
+terminal, or in the background, fails, suggesting `--ui logs`, rather
+than drawing into a pipe or stopping.
+
 **Manual reviews** (`runner.manual_reviews`, on unless the config turns it
 off) watch, detect triggers and queue reviews, but hold them: nothing runs
 until you start it, so turning `serve` on doesn't review every outstanding

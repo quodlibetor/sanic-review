@@ -33,6 +33,19 @@ fn unknown_ui_is_rejected() {
 }
 
 #[test]
+fn tui_without_a_terminal_is_refused() {
+    let output = sanic_review()
+        .args(["serve", "--ui", "tui"])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("needs a terminal"), "{stderr}");
+    assert!(stderr.contains("--ui logs"), "{stderr}");
+}
+
+#[test]
 fn pr_commands_update_the_store() {
     let dir = tempfile::TempDir::new().unwrap();
     let key = PrKey {

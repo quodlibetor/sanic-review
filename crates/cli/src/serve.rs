@@ -39,7 +39,7 @@ use tokio::{
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
-    ServeArgs, Ui, config_edit, logging,
+    ServeArgs, Stdout, Ui, config_edit, logging,
     poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
     tui::{self, Request, Shared, Sizes, SystemBrowser, Tui},
@@ -52,6 +52,7 @@ use crate::{
     reason = "it starts each of serve's tasks in turn; splitting it only scatters the wiring"
 )]
 pub async fn run(args: ServeArgs) -> Result<()> {
+    let ui_kind = Ui::resolve(args.ui, Stdout::detect())?;
     // Absolute, because runs hand these paths to `git -C <mirror>` and to
     // `claude` running in a worktree, where relative ones would resolve
     // somewhere else.
@@ -61,7 +62,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     })
     .wrap_err("resolving the data directory")?;
     // Before anything logs, so the TUI's log pane and file get it all.
-    let logs = match args.ui {
+    let logs = match ui_kind {
         Ui::Logs => {
             logging::init_stdout();
             None
@@ -198,7 +199,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     // Restores the terminal before anything is printed, however `serve`
     // stopped: the TUI only gives it back by itself when you quit it.
     drop(ui);
-    cancel_running(&worker, args.ui == Ui::Tui).await;
+    cancel_running(&worker, ui_kind == Ui::Tui).await;
     result
 }
 
