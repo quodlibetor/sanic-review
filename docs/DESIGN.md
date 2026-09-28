@@ -118,6 +118,11 @@ port forwarding.
 `~/.local/share/sanic-review/`: the SQLite DB, bare repo mirrors, run
 transcripts, and `serve.log` when the TUI is in use. Nothing lives under `/tmp`.
 
+`serve` needs the config file. When there's none, including when the path
+is a symlink to a file that doesn't exist, it stops before starting
+anything, naming the path (and the link's target) and suggesting
+`sanic-review setup` in a terminal to write one, or `--config PATH`.
+
 Each profile lists the targets it applies to in `repos`. An entry is one of:
 
 - a local checkout path, as a string

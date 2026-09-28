@@ -184,15 +184,22 @@ async fn serve_logs_a_review_request_and_reloads_config() {
 #[test]
 fn missing_config_explains_itself() {
     let dir = TempDir::new().unwrap();
+    let config = dir.path().join("nope.toml");
     let output = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
         .arg("serve")
         .arg("--config")
-        .arg(dir.path().join("nope.toml"))
+        .arg(&config)
+        .arg("--data-dir")
+        .arg(dir.path())
         .env("NO_COLOR", "1")
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("reading config"), "{stderr}");
-    assert!(stderr.contains("Suggestion"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("no config at {}", config.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("sanic-review setup"), "{stderr}");
+    assert!(stderr.contains("--config PATH"), "{stderr}");
 }

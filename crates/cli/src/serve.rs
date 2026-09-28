@@ -18,7 +18,7 @@ use std::{
 
 use color_eyre::{
     Section,
-    eyre::{Result, WrapErr},
+    eyre::{Result, WrapErr, eyre},
 };
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
@@ -47,6 +47,21 @@ use crate::{
     work::{Job, Worker},
 };
 
+/// Why `serve` can't start without a config file, and how to get one.
+fn missing_config(path: &Path) -> color_eyre::Report {
+    let what = match std::fs::read_link(path) {
+        Ok(target) => format!(
+            "no config at {}: it links to {}, which doesn't exist",
+            path.display(),
+            target.display()
+        ),
+        Err(_) => format!("no config at {}", path.display()),
+    };
+    eyre!(what)
+        .suggestion("run `sanic-review setup` in a terminal to write one")
+        .suggestion("or pass `--config PATH` to use another file")
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "it starts each of serve's tasks in turn; splitting it only scatters the wiring"
@@ -61,6 +76,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         None => default_data_dir()?,
     })
     .wrap_err("resolving the data directory")?;
+    let config_path = std::path::absolute(match args.config {
+        Some(path) => path,
+        None => default_config_path()?,
+    })
+    .wrap_err("resolving the config path")?;
+    let Some(config_text) = Config::read_text(&config_path)? else {
+        return Err(missing_config(&config_path));
+    };
     // Before anything logs, so the TUI's log pane and file get it all.
     let logs = match ui_kind {
         Ui::Logs => {
@@ -73,12 +96,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             Some(logging::init_tui(&data_dir.join("serve.log"))?)
         }
     };
-    let config_path = std::path::absolute(match args.config {
-        Some(path) => path,
-        None => default_config_path()?,
-    })
-    .wrap_err("resolving the config path")?;
-    let mut config = Config::load(&config_path, &VcsResolver)?;
+    let mut config = Config::parse_file(&config_text, &config_path, &VcsResolver)?;
     // The flag only switches the setting on; from here the config decides.
     // Only a config that turns it off is written, so one serve can't write,
     // say in the Nix store, still starts with the flag.
@@ -1145,6 +1163,21 @@ mod tests {
         drop((runs, started, manual));
         gate.await.unwrap();
         assert_eq!(jobs_rx.recv().await, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_config_behind_a_link_names_the_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let link = dir.path().join("config.toml");
+        let target = dir.path().join("dotfiles/sanic.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(Config::read_text(&link).unwrap(), None);
+        let err = missing_config(&link).to_string();
+        assert!(
+            err.contains(&format!("links to {}", target.display())),
+            "{err}"
+        );
     }
 
     #[test]

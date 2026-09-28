@@ -389,13 +389,29 @@ impl Config {
     /// [`Config::load`], with the text it loaded, so an edit of the file
     /// can start from what was checked.
     pub fn load_with_text(path: &Path, resolver: &dyn CheckoutResolver) -> Result<(Self, String)> {
-        let text = std::fs::read_to_string(path)
-            .wrap_err_with(|| format!("reading config {}", path.display()))
-            .suggestion("create it; see docs/DESIGN.md for the format")?;
-        let base = path.parent().unwrap_or(Path::new("."));
-        let config = Self::parse(&text, base, resolver)
-            .wrap_err_with(|| format!("in config {}", path.display()))?;
+        let text = Self::read_text(path)?
+            .ok_or_else(|| eyre!("config {} doesn't exist", path.display()))
+            .suggestion("run `sanic-review setup` to write one")?;
+        let config = Self::parse_file(&text, path, resolver)?;
         Ok((config, text))
+    }
+
+    /// The text of the config file at `path`, or `None` when there's no
+    /// such file, including when `path` is a symlink to one that doesn't
+    /// exist. Any other failure to read it is an error.
+    pub fn read_text(path: &Path) -> Result<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).wrap_err_with(|| format!("reading config {}", path.display())),
+        }
+    }
+
+    /// Parses `text` as the config file at `path`: relative paths resolve
+    /// against its directory, and errors name it.
+    pub fn parse_file(text: &str, path: &Path, resolver: &dyn CheckoutResolver) -> Result<Self> {
+        let base = path.parent().unwrap_or(Path::new("."));
+        Self::parse(text, base, resolver).wrap_err_with(|| format!("in config {}", path.display()))
     }
 
     /// Parses config text. Relative paths resolve against `base`.
@@ -1163,6 +1179,29 @@ mod tests {
             config.profiles[0].targets[0].scope,
             Scope::Repo(RepoName::new("fork", "services"))
         );
+    }
+
+    #[test]
+    fn a_missing_config_is_none_and_other_read_failures_are_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("config.toml");
+        assert_eq!(Config::read_text(&file).unwrap(), None);
+        let err = format!(
+            "{:?}",
+            Config::load(&file, &FakeResolver::new(&[])).unwrap_err()
+        );
+        assert!(err.contains("doesn't exist"), "{err}");
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.toml");
+            std::os::unix::fs::symlink(dir.path().join("dotfiles/sanic.toml"), &link).unwrap();
+            assert_eq!(Config::read_text(&link).unwrap(), None);
+        }
+
+        std::fs::write(&file, "x = 1").unwrap();
+        assert_eq!(Config::read_text(&file).unwrap().as_deref(), Some("x = 1"));
+        assert!(Config::read_text(dir.path()).is_err());
     }
 
     #[test]

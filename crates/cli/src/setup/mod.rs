@@ -57,10 +57,9 @@ pub async fn run(args: SetupArgs) -> Result<()> {
     let base = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let (original, header) = match std::fs::read_to_string(&path) {
-        Ok(text) => (text, ""),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (String::new(), NEW_FILE_HEADER),
-        Err(err) => return Err(err).wrap_err_with(|| format!("reading {}", path.display())),
+    let (original, header) = match Config::read_text(&path)? {
+        Some(text) => (text, ""),
+        None => (String::new(), NEW_FILE_HEADER),
     };
     let mut doc: DocumentMut = original
         .parse()
