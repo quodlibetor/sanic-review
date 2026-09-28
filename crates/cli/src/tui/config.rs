@@ -3,26 +3,22 @@
 //! written only once it loads and you've seen the diff.
 
 mod check;
+mod complete;
+mod render;
+mod rows;
 
-use std::{
-    fmt::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::Result;
-use ratatui::{
-    Frame,
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-    layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sanic_core::config::contract_path;
 
 pub use self::check::{Checked, Checker};
+use self::rows::{
+    EntryEdit, EntryRow, KINDS, Row, Shown, entries, items, rows, scalar_text, shown,
+};
 use crate::config_doc::{
-    ConfigDoc, Key, Op, Saved, Scalar, Setting, Table,
+    ConfigDoc, Key, Op, RepoEntry, Saved, Scalar, Setting, Table,
     schema::{Fallback, Kind},
 };
 
@@ -35,10 +31,11 @@ pub struct ConfigEditor {
     focus: Focus,
     /// Which table, by [`ConfigEditor::tables`].
     table: usize,
-    /// Which of its keys.
+    /// Which of its rows.
     row: usize,
-    /// What you're typing into the selected key.
-    input: Option<String>,
+    /// The repo entry open in place of its profile's keys.
+    entry: Option<EntryEdit>,
+    typing: Option<Typing>,
     check: Check,
     /// Counts the texts sent to be checked, so a late answer about an
     /// older one is ignored.
@@ -62,6 +59,25 @@ enum Focus {
     Keys,
 }
 
+/// What you're typing, and into what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Typing {
+    into: Input,
+    text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Input {
+    Scalar(Key),
+    Item(Key, usize),
+    NewItem(Key),
+    /// A new name for this profile.
+    Rename(String),
+    NewProfile,
+    /// A field of the open repo entry.
+    Entry(EntryRow),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Popup {
     Help,
@@ -75,6 +91,8 @@ enum Popup {
     /// Waiting for a yes before saving an edit that turns manual reviews
     /// off, which starts this many held reviews.
     Held(u32),
+    /// Waiting for a yes before removing this profile.
+    RemoveProfile(String),
 }
 
 /// What a key did to the editor.
@@ -109,7 +127,8 @@ impl ConfigEditor {
             focus: Focus::Tables,
             table: 0,
             row: 0,
-            input: None,
+            entry: None,
+            typing: None,
             check: Check::Checking,
             generation: 0,
             popup: None,
@@ -177,6 +196,18 @@ impl ConfigEditor {
                 return;
             }
         }
+        // Changes made to it meanwhile can drop the profile, or the entry
+        // that's open, from under the selection.
+        self.clamp();
+        let gone = self.entry.as_ref().is_some_and(|edit| {
+            edit.in_doc
+                && !entries(&self.doc, &edit.profile)
+                    .iter()
+                    .any(|e| e.as_ref() == Ok(&edit.entry))
+        });
+        if gone {
+            self.entry = None;
+        }
         let mut notice = format!("saved {}", contract_path(&self.path));
         if saved.replayed {
             notice.push_str(", on top of changes made to it meanwhile");
@@ -202,10 +233,40 @@ impl ConfigEditor {
         tables.swap_remove(at)
     }
 
+    /// The selected table's rows, with the one being added to a list.
+    fn rows(&self) -> Vec<Row> {
+        let adding = match &self.typing {
+            Some(Typing {
+                into: Input::NewItem(key),
+                ..
+            }) => Some(key),
+            _ => None,
+        };
+        rows(&self.doc, &self.current_table(), adding)
+    }
+
+    fn current_row(&self) -> Option<Row> {
+        let mut rows = self.rows();
+        (self.row < rows.len()).then(|| rows.swap_remove(self.row))
+    }
+
+    /// The key the help line is about.
     fn current_key(&self) -> Option<Key> {
-        let table = self.current_table();
-        let field = table.fields().get(self.row)?;
-        Key::new(table, field.name)
+        if self.focus == Focus::Tables {
+            return None;
+        }
+        self.current_row()?.key()
+    }
+
+    /// Whether a new glob is being typed into the open entry.
+    fn adding_glob(&self) -> bool {
+        matches!(
+            self.typing,
+            Some(Typing {
+                into: Input::Entry(EntryRow::NewGlob),
+                ..
+            })
+        )
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
@@ -217,12 +278,20 @@ impl ConfigEditor {
         if let Some(popup) = self.popup.take() {
             return self.popup_key(popup, key);
         }
-        if let Some(input) = self.input.take() {
-            return self.input_key(input, key);
+        if let Some(typing) = self.typing.take() {
+            return self.typing_key(typing, key);
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return self.leave(),
             KeyCode::Char('s') if ctrl => self.ask_save(),
+            KeyCode::Char('v') => {
+                self.popup = Some(Popup::Diff {
+                    scroll: 0,
+                    saving: false,
+                });
+            }
+            KeyCode::Char('?') => self.popup = Some(Popup::Help),
+            _ if self.entry.is_some() => return self.entry_key(key),
+            KeyCode::Esc | KeyCode::Char('q') => return self.leave(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Tables => Focus::Keys,
@@ -233,17 +302,14 @@ impl ConfigEditor {
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
             KeyCode::Char('g') | KeyCode::Home => self.move_to(0),
             KeyCode::Char('G') | KeyCode::End => self.move_to(usize::MAX),
-            KeyCode::Enter if self.focus == Focus::Tables => self.focus = Focus::Keys,
+            _ if self.focus == Focus::Tables => return self.tables_key(key),
             KeyCode::Enter => return self.edit(),
-            KeyCode::Char(' ') if self.focus == Focus::Keys => return self.toggle(),
-            KeyCode::Char('u') if self.focus == Focus::Keys => return self.unset(),
-            KeyCode::Char('v') => {
-                self.popup = Some(Popup::Diff {
-                    scroll: 0,
-                    saving: false,
-                });
-            }
-            KeyCode::Char('?') => self.popup = Some(Popup::Help),
+            KeyCode::Char(' ') => return self.toggle(),
+            KeyCode::Char('u') => return self.unset(),
+            KeyCode::Char('+') => self.add(),
+            KeyCode::Char('-') => return self.remove(),
+            KeyCode::Char('K') => return self.shift(-1),
+            KeyCode::Char('J') => return self.shift(1),
             _ => {}
         }
         Outcome::Open
@@ -268,6 +334,9 @@ impl ConfigEditor {
             }
             (Popup::Discard, KeyCode::Char('y')) => return Outcome::Close,
             (Popup::Held(held), KeyCode::Char('y')) => return Outcome::Save { told: held },
+            (Popup::RemoveProfile(name), KeyCode::Char('y')) => {
+                return self.apply(Op::RemoveProfile { name });
+            }
             // Anything else closes it; a stray key neither writes nor
             // throws edits away.
             _ => {}
@@ -275,53 +344,317 @@ impl ConfigEditor {
         Outcome::Open
     }
 
-    fn input_key(&mut self, mut input: String, key: KeyEvent) -> Outcome {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let number = self
-            .current_key()
-            .is_some_and(|k| k.field().kind == Kind::Number);
-        match key.code {
-            KeyCode::Esc => return Outcome::Open,
-            KeyCode::Enter => return self.commit(&input),
-            KeyCode::Char('u') if ctrl => input.clear(),
-            KeyCode::Char(c) if !ctrl && (!number || c.is_ascii_digit()) => input.push(c),
-            KeyCode::Backspace => {
-                input.pop();
+    /// Keys on the list of tables.
+    fn tables_key(&mut self, key: KeyEvent) -> Outcome {
+        let profile = match self.current_table() {
+            Table::Profile(name) => Some(name),
+            _ => None,
+        };
+        match (key.code, profile) {
+            (KeyCode::Enter, _) => self.focus = Focus::Keys,
+            (KeyCode::Char('+'), _) => self.start_typing(Input::NewProfile, String::new()),
+            (KeyCode::Char('-'), Some(name)) => self.popup = Some(Popup::RemoveProfile(name)),
+            (KeyCode::Char(c @ ('K' | 'J')), Some(name)) => {
+                let at = self.table - Table::SECTIONS.len();
+                let Some(to) = (if c == 'K' {
+                    at.checked_sub(1)
+                } else {
+                    Some(at + 1)
+                })
+                .filter(|to| *to < self.doc.profiles().len()) else {
+                    return Outcome::Open;
+                };
+                let applied = self.doc.ops().len();
+                let outcome = self.apply(Op::MoveProfile { name, to });
+                if self.doc.ops().len() > applied {
+                    self.table = Table::SECTIONS.len() + to;
+                }
+                return outcome;
+            }
+            (KeyCode::Char('-' | 'K' | 'J'), None) => {
+                self.notice = Some("only profiles are added, removed and moved".into());
             }
             _ => {}
         }
-        self.input = Some(input);
         Outcome::Open
     }
 
-    /// Enter on a key: starts typing a text or number, or toggles a bool.
+    fn start_typing(&mut self, into: Input, text: String) {
+        self.typing = Some(Typing { into, text });
+    }
+
+    fn typing_key(&mut self, mut typing: Typing, key: KeyEvent) -> Outcome {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let number = matches!(&typing.into, Input::Scalar(k) if k.field().kind == Kind::Number);
+        match key.code {
+            KeyCode::Esc => {
+                // The row being added goes, so step back onto the one before.
+                match typing.into {
+                    Input::NewItem(_) => self.row = self.row.saturating_sub(1),
+                    Input::Entry(EntryRow::NewGlob) => {
+                        self.with_entry(|edit| edit.row = edit.row.saturating_sub(1));
+                    }
+                    _ => {}
+                }
+                return Outcome::Open;
+            }
+            KeyCode::Enter => return self.commit(&typing.into, typing.text.trim()),
+            KeyCode::Char('u') if ctrl => typing.text.clear(),
+            KeyCode::Tab if self.completes_paths(&typing.into) => {
+                let base = self.path.parent().unwrap_or(Path::new("."));
+                let home = std::env::home_dir();
+                if let Some(done) = complete::complete_path(&typing.text, base, home.as_deref()) {
+                    typing.text = done;
+                }
+            }
+            KeyCode::Char(c) if !ctrl && (!number || c.is_ascii_digit()) => typing.text.push(c),
+            KeyCode::Backspace => {
+                typing.text.pop();
+            }
+            _ => {}
+        }
+        self.typing = Some(typing);
+        Outcome::Open
+    }
+
+    fn completes_paths(&self, into: &Input) -> bool {
+        match into {
+            Input::Scalar(key) | Input::Item(key, _) | Input::NewItem(key) => key.field().paths,
+            Input::Entry(EntryRow::Target) => self
+                .entry
+                .as_ref()
+                .is_some_and(|e| e.entry.kind() != crate::config_doc::EntryKind::Github),
+            _ => false,
+        }
+    }
+
+    /// Enter on a row: types into it, flips a bool, or opens a repo entry.
     fn edit(&mut self) -> Outcome {
-        let Some(key) = self.current_key() else {
-            return Outcome::Open;
-        };
-        match key.field().kind {
-            Kind::Bool => self.toggle(),
-            Kind::Text | Kind::Number => {
-                self.input = Some(match self.doc.scalar(&key) {
+        match self.current_row() {
+            Some(Row::Name(name)) => self.start_typing(Input::Rename(name.clone()), name),
+            Some(Row::Scalar(key)) if key.field().kind == Kind::Bool => return self.toggle(),
+            Some(Row::Scalar(key)) => {
+                let text = match self.doc.scalar(&key) {
                     Setting::Set(value) => scalar_text(&value),
                     Setting::Unset | Setting::Invalid(_) => String::new(),
+                };
+                self.start_typing(Input::Scalar(key), text);
+            }
+            Some(Row::Item(key, n)) => {
+                let text = items(&self.doc, &key).get(n).cloned().unwrap_or_default();
+                self.start_typing(Input::Item(key, n), text);
+            }
+            Some(Row::List(_) | Row::NewItem(_) | Row::NoEntries(_)) => self.add(),
+            Some(Row::Entry(profile, n)) => match entries(&self.doc, &profile).get(n) {
+                Some(Ok(entry)) => {
+                    self.entry = Some(EntryEdit {
+                        profile,
+                        entry: entry.clone(),
+                        in_doc: true,
+                        row: 0,
+                        set_aside: String::new(),
+                        globs_aside: Vec::new(),
+                    });
+                }
+                _ => {
+                    self.notice =
+                        Some("the editor doesn't know this entry's shape; edit it by hand".into());
+                }
+            },
+            None => {}
+        }
+        Outcome::Open
+    }
+
+    /// `+`: adds to the selected list, or a repo entry to the profile.
+    fn add(&mut self) {
+        match self.current_row() {
+            Some(Row::Item(key, _) | Row::List(key) | Row::NewItem(key)) => {
+                self.start_typing(Input::NewItem(key.clone()), String::new());
+                if let Some(at) = self
+                    .rows()
+                    .iter()
+                    .position(|r| *r == Row::NewItem(key.clone()))
+                {
+                    self.row = at;
+                }
+            }
+            Some(Row::Entry(profile, _) | Row::NoEntries(profile)) => {
+                self.entry = Some(EntryEdit {
+                    profile,
+                    entry: RepoEntry::Checkout {
+                        path: String::new(),
+                        remote: None,
+                    },
+                    in_doc: false,
+                    row: 1,
+                    set_aside: String::new(),
+                    globs_aside: Vec::new(),
                 });
+                self.start_typing(Input::Entry(EntryRow::Target), String::new());
+            }
+            _ => self.notice = Some("+ adds to a list, or a repo entry to a profile".into()),
+        }
+    }
+
+    /// `-`: removes the selected list item or repo entry.
+    fn remove(&mut self) -> Outcome {
+        match self.current_row() {
+            Some(Row::Item(key, n)) => {
+                let Some(value) = items(&self.doc, &key).get(n).cloned() else {
+                    return Outcome::Open;
+                };
+                self.remove_row(Op::Remove { key, value })
+            }
+            Some(Row::Entry(profile, n)) => {
+                if let Some(Ok(entry)) = entries(&self.doc, &profile).get(n) {
+                    let entry = entry.clone();
+                    return self.remove_row(Op::RemoveEntry { profile, entry });
+                }
+                self.notice =
+                    Some("the editor doesn't know this entry's shape; edit it by hand".into());
                 Outcome::Open
             }
-            Kind::List | Kind::Repos => {
-                self.notice = Some(format!("`{key}` is a list; edit it by hand for now"));
+            _ => {
+                self.notice = Some("- removes a list item or a repo entry".into());
                 Outcome::Open
             }
         }
     }
 
-    /// Sets the key being typed in; blank unsets it.
-    fn commit(&mut self, input: &str) -> Outcome {
-        let Some(key) = self.current_key() else {
-            return Outcome::Open;
+    /// Applies `op`, which removes the selected row, and stays on its key:
+    /// on the row that took its place, or the one before when it was last.
+    fn remove_row(&mut self, op: Op) -> Outcome {
+        let first = self.row - self.row_in_key();
+        let key = self.current_row().and_then(|row| row.key());
+        let outcome = self.apply(op);
+        let left = self
+            .rows()
+            .iter()
+            .rposition(|row| row.key().is_some() && row.key() == key);
+        if let Some(last) = left {
+            self.row = self.row.min(last).max(first);
+        }
+        outcome
+    }
+
+    /// K and J: moves the selected list item or repo entry up or down,
+    /// since order matters: the last team glob to match wins, and the
+    /// first of equally specific entries.
+    fn shift(&mut self, by: isize) -> Outcome {
+        let (op, at) = match self.current_row() {
+            Some(Row::Item(key, n)) => {
+                let list = items(&self.doc, &key);
+                let Some(to) = n.checked_add_signed(by).filter(|to| *to < list.len()) else {
+                    return Outcome::Open;
+                };
+                let value = list[n].clone();
+                (Op::Move { key, value, to }, to)
+            }
+            Some(Row::Entry(profile, n)) => {
+                let all = entries(&self.doc, &profile);
+                let Some(to) = n.checked_add_signed(by).filter(|to| *to < all.len()) else {
+                    return Outcome::Open;
+                };
+                let Some(Ok(entry)) = all.get(n).cloned() else {
+                    return Outcome::Open;
+                };
+                (Op::MoveEntry { profile, entry, to }, to)
+            }
+            _ => {
+                self.notice = Some("K and J move a list item or a repo entry".into());
+                return Outcome::Open;
+            }
         };
-        let input = input.trim();
-        let op = if input.is_empty() {
+        let first = self.row - self.row_in_key();
+        let applied = self.doc.ops().len();
+        let outcome = self.apply(op);
+        if self.doc.ops().len() > applied {
+            self.row = first + at;
+        }
+        outcome
+    }
+
+    /// Where the selected row is among its key's rows.
+    fn row_in_key(&self) -> usize {
+        match self.current_row() {
+            Some(Row::Item(_, n) | Row::Entry(_, n)) => n,
+            _ => 0,
+        }
+    }
+
+    /// Makes what was typed.
+    fn commit(&mut self, into: &Input, text: &str) -> Outcome {
+        let op = match into.clone() {
+            Input::Scalar(key) => return self.commit_scalar(key, text),
+            Input::Item(key, n) => {
+                let Some(old) = items(&self.doc, &key).get(n).cloned() else {
+                    return Outcome::Open;
+                };
+                match text {
+                    "" => return self.remove_row(Op::Remove { key, value: old }),
+                    _ if text == old => return Outcome::Open,
+                    _ => Op::Replace {
+                        key,
+                        old,
+                        new: text.to_owned(),
+                    },
+                }
+            }
+            Input::NewItem(key) => {
+                // Back on the list's last row, then on what was added.
+                self.row = self.row.saturating_sub(1);
+                if text.is_empty() {
+                    return Outcome::Open;
+                }
+                let outcome = self.apply(Op::Push {
+                    key: key.clone(),
+                    value: text.to_owned(),
+                });
+                let last = items(&self.doc, &key).len().saturating_sub(1);
+                if let Some(at) = self
+                    .rows()
+                    .iter()
+                    .position(|r| *r == Row::Item(key.clone(), last))
+                {
+                    self.row = at;
+                }
+                return outcome;
+            }
+            Input::Rename(from) => {
+                if text.is_empty() || text == from {
+                    return Outcome::Open;
+                }
+                Op::RenameProfile {
+                    from,
+                    to: text.to_owned(),
+                }
+            }
+            Input::NewProfile => {
+                if text.is_empty() {
+                    return Outcome::Open;
+                }
+                let outcome = self.apply(Op::AddProfile {
+                    name: text.to_owned(),
+                });
+                if let Some(at) = self
+                    .tables()
+                    .iter()
+                    .position(|t| *t == Table::Profile(text.to_owned()))
+                {
+                    self.table = at;
+                    self.row = 0;
+                }
+                return outcome;
+            }
+            Input::Entry(row) => return self.commit_entry(row, text),
+        };
+        self.apply(op)
+    }
+
+    /// Sets a text or number key; blank unsets it.
+    fn commit_scalar(&mut self, key: Key, text: &str) -> Outcome {
+        let op = if text.is_empty() {
             if self.doc.scalar(&key) == Setting::Unset {
                 return Outcome::Open;
             }
@@ -329,14 +662,14 @@ impl ConfigEditor {
         } else {
             let value = match key.field().kind {
                 Kind::Number => {
-                    let Ok(n) = input.parse() else {
-                        self.notice = Some(format!("{input} is too big for `{key}`"));
-                        self.input = Some(input.to_owned());
+                    let Ok(n) = text.parse() else {
+                        self.notice = Some(format!("{text} is too big for `{key}`"));
+                        self.start_typing(Input::Scalar(key), text.to_owned());
                         return Outcome::Open;
                     };
                     Scalar::Number(n)
                 }
-                _ => Scalar::Text(input.to_owned()),
+                _ => Scalar::Text(text.to_owned()),
             };
             if self.doc.scalar(&key) == Setting::Set(value.clone()) {
                 return Outcome::Open;
@@ -348,13 +681,13 @@ impl ConfigEditor {
 
     /// Space on a bool: flips what it means now, set or not.
     fn toggle(&mut self) -> Outcome {
-        let Some(key) = self.current_key() else {
+        let Some(Row::Scalar(key)) = self.current_row() else {
             return Outcome::Open;
         };
         if key.field().kind != Kind::Bool {
             return Outcome::Open;
         }
-        let now = match self.shown(&key) {
+        let now = match shown(&self.doc, &key) {
             Shown::Set(value) | Shown::Default(value) => value == "true",
             Shown::Invalid(_) | Shown::Required => false,
         };
@@ -364,8 +697,9 @@ impl ConfigEditor {
         })
     }
 
+    /// `u`: unsets the selected key, a whole list at once.
     fn unset(&mut self) -> Outcome {
-        let Some(key) = self.current_key() else {
+        let Some(key) = self.current_row().and_then(|row| row.key()) else {
             return Outcome::Open;
         };
         if matches!(key.field().fallback, Fallback::Required) {
@@ -381,17 +715,232 @@ impl ConfigEditor {
             self.notice = Some(format!("`{key}` isn't set"));
             return Outcome::Open;
         }
-        self.apply(Op::Unset { key })
+        let first = self.row - self.row_in_key();
+        let outcome = self.apply(Op::Unset { key });
+        self.row = first;
+        outcome
+    }
+
+    /// Keys while a repo entry is open.
+    fn entry_key(&mut self, key: KeyEvent) -> Outcome {
+        let Some(edit) = self.entry.clone() else {
+            return Outcome::Open;
+        };
+        let rows = edit.rows(false);
+        let current = edit.current(false);
+        let step = |edit: &mut EntryEdit, to: usize| edit.row = to.min(rows.len() - 1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.close_entry(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.with_entry(|edit| step(edit, edit.row + 1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.with_entry(|edit| step(edit, edit.row.saturating_sub(1)));
+            }
+            KeyCode::Char('g') | KeyCode::Home => self.with_entry(|edit| step(edit, 0)),
+            KeyCode::Char('G') | KeyCode::End => self.with_entry(|edit| step(edit, usize::MAX)),
+            KeyCode::Char(' ' | 'l') | KeyCode::Right | KeyCode::Enter
+                if current == EntryRow::Kind =>
+            {
+                return self.step_kind(&edit, 1);
+            }
+            KeyCode::Char('h') | KeyCode::Left if current == EntryRow::Kind => {
+                return self.step_kind(&edit, KINDS.len() - 1);
+            }
+            KeyCode::Enter => match current {
+                EntryRow::Target => {
+                    self.start_typing(Input::Entry(current), edit.target().to_owned());
+                }
+                EntryRow::Remote => self.start_typing(
+                    Input::Entry(current),
+                    edit.remote().unwrap_or_default().to_owned(),
+                ),
+                EntryRow::Glob(n) => self.start_typing(
+                    Input::Entry(current),
+                    edit.globs().get(n).cloned().unwrap_or_default(),
+                ),
+                EntryRow::NoGlobs | EntryRow::NewGlob => self.add_glob(&edit),
+                EntryRow::Kind => {}
+            },
+            KeyCode::Char('+') => self.add_glob(&edit),
+            KeyCode::Char('-') => match current {
+                EntryRow::Glob(n) => {
+                    let new = edit.changed(|_, _, globs| {
+                        globs.remove(n);
+                    });
+                    return self.update_entry(new);
+                }
+                _ => self.notice = Some("- removes a glob".into()),
+            },
+            KeyCode::Char('u') if current == EntryRow::Remote && edit.remote().is_some() => {
+                let new = edit.changed(|_, remote, _| *remote = None);
+                return self.update_entry(new);
+            }
+            _ => {}
+        }
+        Outcome::Open
+    }
+
+    fn with_entry(&mut self, change: impl FnOnce(&mut EntryEdit)) {
+        if let Some(edit) = &mut self.entry {
+            change(edit);
+        }
+    }
+
+    fn add_glob(&mut self, edit: &EntryEdit) {
+        if edit.entry.kind() == crate::config_doc::EntryKind::Checkout {
+            self.notice =
+                Some("a plain checkout has no globs: switch it to checkout + paths".into());
+            return;
+        }
+        self.start_typing(Input::Entry(EntryRow::NewGlob), String::new());
+        let rows = edit.rows(true);
+        self.with_entry(|edit| edit.row = rows.len() - 1);
+    }
+
+    /// Switches the open entry `by` kinds along [`KINDS`].
+    fn step_kind(&mut self, edit: &EntryEdit, by: usize) -> Outcome {
+        let at = KINDS
+            .iter()
+            .position(|k| *k == edit.entry.kind())
+            .unwrap_or(0);
+        let kind = KINDS[(at + by) % KINDS.len()];
+        let github = |kind| kind == crate::config_doc::EntryKind::Github;
+        let crossing = github(kind) != github(edit.entry.kind());
+        let switched = EntryEdit {
+            entry: edit.entry.clone().with_kind(kind, None),
+            ..edit.clone()
+        };
+        // What the new kind drops is set aside, and what it takes back
+        // comes back.
+        let new = switched.changed(|target, _, globs| {
+            if crossing {
+                edit.set_aside.clone_into(target);
+            }
+            if globs.is_empty() {
+                globs.clone_from(&edit.globs_aside);
+            }
+        });
+        let outcome = self.update_entry(new.clone());
+        self.with_entry(|e| {
+            if e.entry == new {
+                if crossing {
+                    edit.target().clone_into(&mut e.set_aside);
+                }
+                if !edit.globs().is_empty() {
+                    e.globs_aside = edit.globs().to_vec();
+                }
+            }
+        });
+        outcome
+    }
+
+    fn close_entry(&mut self) {
+        let Some(edit) = self.entry.take() else {
+            return;
+        };
+        if !edit.in_doc {
+            self.notice = Some("nothing added: the entry names no checkout or repo".into());
+        }
+        let found = entries(&self.doc, &edit.profile)
+            .iter()
+            .position(|e| e.as_ref() == Ok(&edit.entry));
+        if let Some(at) = found.and_then(|n| {
+            self.rows()
+                .iter()
+                .position(|r| *r == Row::Entry(edit.profile.clone(), n))
+        }) {
+            self.row = at;
+        }
+    }
+
+    /// Makes what was typed into the open entry.
+    fn commit_entry(&mut self, row: EntryRow, text: &str) -> Outcome {
+        let Some(edit) = self.entry.clone() else {
+            return Outcome::Open;
+        };
+        let new = match row {
+            EntryRow::Target => edit.changed(|target, _, _| text.clone_into(target)),
+            EntryRow::Remote => {
+                edit.changed(|_, remote, _| *remote = (!text.is_empty()).then(|| text.to_owned()))
+            }
+            EntryRow::Glob(n) => edit.changed(|_, _, globs| {
+                if text.is_empty() {
+                    globs.remove(n);
+                } else if let Some(glob) = globs.get_mut(n) {
+                    text.clone_into(glob);
+                }
+            }),
+            EntryRow::NewGlob => {
+                if text.is_empty() {
+                    self.with_entry(|edit| edit.row = edit.row.saturating_sub(1));
+                    return Outcome::Open;
+                }
+                edit.changed(|_, _, globs| globs.push(text.to_owned()))
+            }
+            EntryRow::Kind | EntryRow::NoGlobs => return Outcome::Open,
+        };
+        self.update_entry(new)
+    }
+
+    /// Replaces the open entry with `new`: in the file once it's there,
+    /// or put there once it names a checkout or a repo.
+    fn update_entry(&mut self, new: RepoEntry) -> Outcome {
+        let Some(edit) = self.entry.clone() else {
+            return Outcome::Open;
+        };
+        if new == edit.entry {
+            return Outcome::Open;
+        }
+        let named = |entry: &RepoEntry| match entry {
+            RepoEntry::Checkout { path, .. } | RepoEntry::Scoped { path, .. } => !path.is_empty(),
+            RepoEntry::Github { name, .. } => !name.is_empty(),
+        };
+        let op = if edit.in_doc {
+            Op::ReplaceEntry {
+                profile: edit.profile.clone(),
+                old: edit.entry.clone(),
+                new: new.clone(),
+            }
+        } else if named(&new) {
+            Op::PushEntry {
+                profile: edit.profile.clone(),
+                entry: new.clone(),
+            }
+        } else {
+            self.with_entry(|e| e.entry = new);
+            return Outcome::Open;
+        };
+        let applied = self.doc.ops().len();
+        let outcome = self.apply(op);
+        if self.doc.ops().len() > applied {
+            self.with_entry(|e| {
+                e.entry = new;
+                e.in_doc = true;
+            });
+        }
+        let rows = self.entry.as_ref().map_or(0, |e| e.rows(false).len());
+        self.with_entry(|e| e.row = e.row.min(rows.saturating_sub(1)));
+        outcome
     }
 
     fn apply(&mut self, op: Op) -> Outcome {
         match self.doc.apply(op) {
-            Ok(()) => self.check_now(),
+            Ok(()) => {
+                self.clamp();
+                self.check_now()
+            }
             Err(err) => {
                 self.notice = Some(format!("{err:#}"));
                 Outcome::Open
             }
         }
+    }
+
+    /// Keeps the selection on a table and row that exist.
+    fn clamp(&mut self) {
+        self.table = self.table.min(self.tables().len() - 1);
+        self.row = self.row.min(self.rows().len().saturating_sub(1));
     }
 
     /// Ctrl-S: shows the diff to confirm, once the edits load.
@@ -425,6 +974,7 @@ impl ConfigEditor {
         if let Some(at) = named.and_then(|t| self.tables().iter().position(|x| *x == t)) {
             self.table = at;
             self.row = 0;
+            self.entry = None;
             self.focus = Focus::Keys;
         }
     }
@@ -449,624 +999,16 @@ impl ConfigEditor {
     fn move_to(&mut self, target: usize) {
         match self.focus {
             Focus::Tables => {
-                let last = self.tables().len() - 1;
-                let target = target.min(last);
+                let target = target.min(self.tables().len() - 1);
                 if target != self.table {
                     self.table = target;
                     self.row = 0;
                 }
             }
-            Focus::Keys => {
-                let last = self.current_table().fields().len() - 1;
-                self.row = target.min(last);
-            }
+            Focus::Keys => self.row = target.min(self.rows().len().saturating_sub(1)),
         }
     }
-
-    /// What `key` shows: its value, or what it means unset.
-    fn shown(&self, key: &Key) -> Shown {
-        let field = key.field();
-        let written = match field.kind {
-            Kind::List => match self.doc.list(key) {
-                Setting::Set(items) => Setting::Set(list_text(&items)),
-                Setting::Unset => Setting::Unset,
-                Setting::Invalid(raw) => Setting::Invalid(raw),
-            },
-            Kind::Repos => match &key.table {
-                Table::Profile(name) => match self.doc.repos(name) {
-                    Setting::Set(repos) => Setting::Set(
-                        repos
-                            .entries
-                            .iter()
-                            .map(|entry| match entry {
-                                Ok(entry) => entry_text(entry),
-                                Err(raw) => raw.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    ),
-                    Setting::Unset => Setting::Unset,
-                    Setting::Invalid(raw) => Setting::Invalid(raw),
-                },
-                _ => Setting::Unset,
-            },
-            Kind::Text | Kind::Number | Kind::Bool => match self.doc.scalar(key) {
-                Setting::Set(value) => Setting::Set(scalar_text(&value)),
-                Setting::Unset => Setting::Unset,
-                Setting::Invalid(raw) => Setting::Invalid(raw),
-            },
-        };
-        match written {
-            Setting::Set(value) => Shown::Set(value),
-            Setting::Invalid(raw) => Shown::Invalid(raw),
-            Setting::Unset => match &field.fallback {
-                Fallback::Value(value) => Shown::Default(value()),
-                Fallback::Nothing if field.kind == Kind::Bool => Shown::Default("false".into()),
-                Fallback::Nothing => Shown::Default("none".into()),
-                Fallback::Inherits(table, name) => {
-                    Key::new(table.clone(), name).map_or(Shown::Required, |inherited| {
-                        match self.shown(&inherited) {
-                            Shown::Set(value) | Shown::Default(value) => Shown::Default(value),
-                            other => other,
-                        }
-                    })
-                }
-                Fallback::Required => Shown::Required,
-            },
-        }
-    }
-
-    pub fn render(&self, frame: &mut Frame<'_>) {
-        let area = frame.area();
-        frame.render_widget(Clear, area);
-        let changes = self.doc.ops().len();
-        let mut title = format!(" Config {}", contract_path(&self.path));
-        if let Some(target) = &self.target {
-            let _ = write!(title, " → {}", contract_path(target));
-        }
-        title.push(' ');
-        let mut outer = Block::bordered().title(title);
-        if self.doc.is_changed() {
-            let s = if changes == 1 { "" } else { "s" };
-            outer = outer.title_top(Line::from(format!(" {changes} change{s} ")).right_aligned());
-        }
-        let inner = outer.inner(area);
-        frame.render_widget(outer, area);
-        let [body, help, status] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
-        let [tables, keys] =
-            Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)]).areas(body);
-        self.render_tables(frame, tables);
-        self.render_keys(frame, keys);
-        self.render_footer(frame, help, status);
-        match &self.popup {
-            Some(Popup::Help) => render_help(frame),
-            Some(Popup::Diff { scroll, saving }) => self.render_diff(frame, *scroll, *saving),
-            Some(Popup::Discard) => render_question(
-                frame,
-                " Discard? ",
-                &format!(
-                    " Discard {changes} unsaved change{}?",
-                    if changes == 1 { "" } else { "s" }
-                ),
-                " y discard · any other key keeps editing",
-            ),
-            Some(Popup::Held(starting)) => render_question(
-                frame,
-                " Manual reviews off? ",
-                &format!(
-                    " This turns manual reviews off: {starting} held review{} will start.",
-                    if *starting == 1 { "" } else { "s" }
-                ),
-                " y save · any other key cancels",
-            ),
-            None => {}
-        }
-    }
-
-    fn render_tables(&self, frame: &mut Frame<'_>, area: Rect) {
-        let mut items = Vec::new();
-        let mut selected = None;
-        for (i, table) in self.tables().iter().enumerate() {
-            if i == Table::SECTIONS.len() {
-                items.push(ListItem::new(" profiles").dim());
-            }
-            if i == self.table {
-                selected = Some(items.len());
-            }
-            items.push(ListItem::new(match table {
-                Table::Profile(name) => format!("   {name}"),
-                section => format!(" {section}"),
-            }));
-        }
-        if self.doc.profiles().is_empty() {
-            items.push(ListItem::new(" profiles").dim());
-            items.push(ListItem::new("   none yet").dim());
-        }
-        let mut state = ListState::default().with_selected(selected);
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::new().borders(Borders::RIGHT))
-                .highlight_style(highlight(self.focus == Focus::Tables)),
-            area,
-            &mut state,
-        );
-    }
-
-    fn render_keys(&self, frame: &mut Frame<'_>, area: Rect) {
-        let table = self.current_table();
-        let fields = table.fields();
-        let width = fields.iter().map(|f| f.name.len()).max().unwrap_or(0) + 2;
-        let mut items = vec![
-            ListItem::new(Line::from(format!(" [{table}]").bold())),
-            ListItem::new(""),
-        ];
-        for (i, field) in fields.iter().enumerate() {
-            let Some(key) = Key::new(table.clone(), field.name) else {
-                continue;
-            };
-            let value = match (&self.input, i == self.row) {
-                (Some(input), true) => Line::from(vec![Span::raw(input.clone()), "▏".slow_blink()]),
-                _ => match self.shown(&key) {
-                    Shown::Set(value) => Line::raw(value),
-                    Shown::Default(value) => {
-                        let from = match &field.fallback {
-                            Fallback::Inherits(table, name) => format!("{table}.{name}"),
-                            _ => "default".into(),
-                        };
-                        Line::from(format!("‹{from}: {value}›").dim())
-                    }
-                    Shown::Invalid(raw) => Line::from(Span::styled(
-                        format!("{raw}  (not a {})", kind_name(field.kind)),
-                        Style::new().fg(Color::Red),
-                    )),
-                    Shown::Required => {
-                        Line::from(Span::styled("required", Style::new().fg(Color::Red)))
-                    }
-                },
-            };
-            let mut spans = vec![Span::raw(format!(" {:<width$}", field.name))];
-            spans.extend(value.spans);
-            items.push(ListItem::new(Line::from(spans)));
-        }
-        let mut state = ListState::default().with_selected(Some(self.row + 2));
-        frame.render_stateful_widget(
-            List::new(items).highlight_style(highlight(self.focus == Focus::Keys)),
-            area.inner(Margin::new(1, 0)),
-            &mut state,
-        );
-    }
-
-    fn render_footer(&self, frame: &mut Frame<'_>, help: Rect, status: Rect) {
-        let about = match &self.check {
-            Check::Fails(why) => {
-                Line::from(Span::styled(format!(" {why}"), Style::new().fg(Color::Red)))
-            }
-            _ => match self.current_key() {
-                Some(key) if self.focus == Focus::Keys => {
-                    Line::from(format!(" {}", key.field().help).dim())
-                }
-                _ => Line::raw(""),
-            },
-        };
-        frame.render_widget(Paragraph::new(about), help);
-        if let Some(notice) = &self.notice {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!(" {notice}"),
-                    Style::new().fg(Color::Yellow),
-                )),
-                status,
-            );
-            return;
-        }
-        let state = match &self.check {
-            Check::Checking => Span::raw(" … checking").dim(),
-            Check::Loads => Span::styled(" ✓ loads", Style::new().fg(Color::Green)),
-            Check::Fails(_) => Span::styled(" ✗ doesn't load", Style::new().fg(Color::Red)),
-        };
-        let hint = if self.input.is_some() {
-            "Enter set · blank unsets · Esc cancel · Ctrl-U clear "
-        } else {
-            "^S save · u unset · v diff · Esc leave · ? help "
-        };
-        let [left, right] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Length(u16::try_from(hint.chars().count()).unwrap_or(u16::MAX)),
-        ])
-        .areas(status);
-        frame.render_widget(Paragraph::new(state), left);
-        frame.render_widget(Paragraph::new(hint.dim()), right);
-    }
-
-    fn render_diff(&self, frame: &mut Frame<'_>, scroll: u16, saving: bool) {
-        let area = frame.area().inner(Margin::new(3, 2));
-        frame.render_widget(Clear, area);
-        let name = contract_path(&self.path);
-        let text = self.doc.text();
-        let diff = similar::TextDiff::from_lines(self.doc.original(), &text);
-        let mut lines: Vec<Line<'_>> = diff
-            .unified_diff()
-            .header(&name, &name)
-            .to_string()
-            .lines()
-            .map(|line| {
-                let color = match line.chars().next() {
-                    Some('+') if !line.starts_with("+++") => Some(Color::Green),
-                    Some('-') if !line.starts_with("---") => Some(Color::Red),
-                    Some('@') => Some(Color::Cyan),
-                    _ => None,
-                };
-                let line = format!(" {line}");
-                match color {
-                    Some(color) => Line::from(Span::styled(line, Style::new().fg(color))),
-                    None => Line::raw(line),
-                }
-            })
-            .collect();
-        if lines.is_empty() {
-            lines.push(Line::raw(" No changes.").dim());
-        }
-        let block = Block::bordered().title(if saving { " Save? " } else { " Changes " });
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let [body, footer] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
-        let hint = if saving {
-            " y write it · j/k scroll · any other key keeps editing"
-        } else {
-            " j/k scroll · any other key closes"
-        };
-        frame.render_widget(Paragraph::new(hint.dim()), footer);
-    }
-}
-
-/// What a key shows in the editor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Shown {
-    Set(String),
-    /// Unset: what it means then, from its default or the key it inherits.
-    Default(String),
-    Invalid(String),
-    Required,
-}
-
-fn scalar_text(value: &Scalar) -> String {
-    match value {
-        Scalar::Text(text) => text.clone(),
-        Scalar::Number(n) => n.to_string(),
-        Scalar::Bool(b) => b.to_string(),
-    }
-}
-
-fn list_text(items: &[String]) -> String {
-    if items.is_empty() {
-        "[]".into()
-    } else {
-        items.join(", ")
-    }
-}
-
-fn entry_text(entry: &crate::config_doc::RepoEntry) -> String {
-    let mut value = entry.to_value();
-    value.decor_mut().clear();
-    value.to_string()
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Text => "string",
-        Kind::Number => "number",
-        Kind::Bool => "true or false",
-        Kind::List => "list of strings",
-        Kind::Repos => "list of repos",
-    }
-}
-
-/// The selected row stands out more in the focused pane.
-fn highlight(focused: bool) -> Style {
-    if focused {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::new().add_modifier(Modifier::BOLD)
-    }
-}
-
-const HELP: &[(&str, &str)] = &[
-    ("Tab, Shift-Tab", "switch between tables and keys"),
-    ("j/k, Down/Up", "move"),
-    ("g/G, Home/End", "first, last"),
-    ("Enter", "edit the key, or toggle true/false"),
-    ("Space", "toggle true/false"),
-    ("u", "unset the key, back to its default"),
-    ("v", "show the changes"),
-    ("Ctrl-S", "save, after showing the changes"),
-    ("Esc, q", "leave, asking about unsaved changes"),
-    ("Ctrl-C", "quit"),
-    ("?", "close this help"),
-];
-
-fn render_help(frame: &mut Frame<'_>) {
-    let mut lines: Vec<Line<'_>> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::raw(format!(" {keys:<16}")).bold(),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(" Typing: Enter sets, a blank unsets, Esc cancels,").dim());
-    lines.push(Line::raw(" Ctrl-U clears.").dim());
-    render_popup(frame, " Config editor keys ", lines);
-}
-
-fn render_question(frame: &mut Frame<'_>, title: &str, question: &str, keys: &str) {
-    render_popup(
-        frame,
-        title,
-        vec![
-            Line::raw(question.to_owned()),
-            Line::raw(""),
-            Line::raw(keys.to_owned()).dim(),
-        ],
-    );
-}
-
-fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
-    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let area = frame
-        .area()
-        .centered(Constraint::Length(66), Constraint::Length(height));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
-        area,
-    );
 }
 
 #[cfg(test)]
-mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
-
-    use super::*;
-    use crate::poll::tests::NoCheckouts;
-
-    const CONFIG: &str = r#"# Mine.
-[poll]
-quiet_secs = 30 # short
-
-[runner]
-manual_reviews = true
-
-[profile.ring]
-repos = [{ github = "org" }]
-"#;
-
-    fn editor(text: &str) -> ConfigEditor {
-        let doc = ConfigDoc::parse(Some(text)).unwrap();
-        let mut editor = ConfigEditor::new(
-            Path::new("/home/u/.config/sanic-review/config.toml"),
-            Some(PathBuf::from("/home/u/dotfiles/sanic.toml")),
-            doc,
-        );
-        settle(&mut editor);
-        editor
-    }
-
-    /// Answers the pending check as the loader would.
-    fn settle(editor: &mut ConfigEditor) {
-        let Outcome::Check { generation, text } = editor.check_now() else {
-            unreachable!();
-        };
-        let path = Path::new("/c/config.toml");
-        editor.checked(generation, check::check(&text, path, &NoCheckouts));
-    }
-
-    fn press(editor: &mut ConfigEditor, code: KeyCode) -> Outcome {
-        editor.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-
-    fn ctrl(editor: &mut ConfigEditor, c: char) -> Outcome {
-        editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
-    }
-
-    fn typed(editor: &mut ConfigEditor, text: &str) {
-        for c in text.chars() {
-            assert_eq!(press(editor, KeyCode::Char(c)), Outcome::Open);
-        }
-    }
-
-    fn draw(editor: &ConfigEditor) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|frame| editor.render(frame)).unwrap();
-        terminal
-    }
-
-    /// Selects `table`'s `row`th key.
-    fn select(editor: &mut ConfigEditor, table: usize, row: usize) {
-        editor.focus = Focus::Tables;
-        let _ = press(editor, KeyCode::Char('g'));
-        for _ in 0..table {
-            let _ = press(editor, KeyCode::Char('j'));
-        }
-        let _ = press(editor, KeyCode::Enter);
-        for _ in 0..row {
-            let _ = press(editor, KeyCode::Char('j'));
-        }
-    }
-
-    #[test]
-    fn shows_every_key_with_defaults_for_the_unset_ones() {
-        let mut editor = editor(CONFIG);
-        select(&mut editor, 1, 2);
-        insta::assert_snapshot!(draw(&editor).backend());
-        // A profile's unset keys show what they inherit.
-        select(&mut editor, 4, 2);
-        insta::assert_snapshot!("profile", draw(&editor).backend());
-    }
-
-    #[test]
-    fn numbers_are_typed_set_and_unset_then_checked() {
-        let mut editor = editor(CONFIG);
-        select(&mut editor, 1, 2);
-        assert_eq!(press(&mut editor, KeyCode::Enter), Outcome::Open);
-        assert_eq!(editor.input.as_deref(), Some("30"));
-        let _ = ctrl(&mut editor, 'u');
-        typed(&mut editor, "4x5");
-        assert_eq!(editor.input.as_deref(), Some("45"), "only digits");
-        let Outcome::Check { text, .. } = press(&mut editor, KeyCode::Enter) else {
-            panic!("no check");
-        };
-        assert!(text.contains("quiet_secs = 45 # short"), "{text}");
-        assert_eq!(editor.check, Check::Checking);
-        settle(&mut editor);
-        assert_eq!(editor.check, Check::Loads);
-
-        // A blank unsets it.
-        let _ = press(&mut editor, KeyCode::Enter);
-        let _ = ctrl(&mut editor, 'u');
-        let Outcome::Check { text, .. } = press(&mut editor, KeyCode::Enter) else {
-            panic!("no check");
-        };
-        assert!(!text.contains("quiet_secs"), "{text}");
-        assert_eq!(editor.doc.ops().len(), 2);
-
-        // Esc drops what was typed.
-        let _ = press(&mut editor, KeyCode::Enter);
-        typed(&mut editor, "9");
-        assert_eq!(press(&mut editor, KeyCode::Esc), Outcome::Open);
-        assert_eq!(editor.doc.ops().len(), 2);
-    }
-
-    #[test]
-    fn bools_toggle_from_what_they_mean_unset_too() {
-        let mut editor = editor(CONFIG);
-        // review_requests.skip_drafts, unset: true by default.
-        select(&mut editor, 2, 2);
-        let Outcome::Check { text, .. } = press(&mut editor, KeyCode::Char(' ')) else {
-            panic!("no check");
-        };
-        assert!(
-            text.contains("[review_requests]\nskip_drafts = false\n"),
-            "{text}"
-        );
-        let _ = press(&mut editor, KeyCode::Enter);
-        assert!(editor.doc.text().contains("skip_drafts = true"));
-        let _ = press(&mut editor, KeyCode::Char('u'));
-        assert!(!editor.doc.text().contains("review_requests"));
-    }
-
-    #[test]
-    fn saving_needs_a_config_that_loads_and_a_yes() {
-        let mut editor = editor(CONFIG);
-        assert_eq!(ctrl(&mut editor, 's'), Outcome::Open);
-        assert_eq!(editor.notice.as_deref(), Some("nothing to save"));
-
-        // poll.reconcile_secs = 0 doesn't load.
-        select(&mut editor, 1, 0);
-        let _ = press(&mut editor, KeyCode::Enter);
-        typed(&mut editor, "0");
-        let _ = press(&mut editor, KeyCode::Enter);
-        settle(&mut editor);
-        assert!(matches!(&editor.check, Check::Fails(why) if why.contains("reconcile_secs")));
-        assert_eq!(ctrl(&mut editor, 's'), Outcome::Open);
-        assert!(editor.popup.is_none());
-        insta::assert_snapshot!("doesnt_load", draw(&editor).backend());
-
-        let _ = press(&mut editor, KeyCode::Enter);
-        typed(&mut editor, "600");
-        let _ = press(&mut editor, KeyCode::Enter);
-        settle(&mut editor);
-        assert_eq!(ctrl(&mut editor, 's'), Outcome::Open);
-        insta::assert_snapshot!("save_diff", draw(&editor).backend());
-        // Any other key keeps editing; y writes.
-        assert_eq!(press(&mut editor, KeyCode::Char('n')), Outcome::Open);
-        assert_eq!(ctrl(&mut editor, 's'), Outcome::Open);
-        assert_eq!(
-            press(&mut editor, KeyCode::Char('y')),
-            Outcome::Save { told: 0 }
-        );
-    }
-
-    #[test]
-    fn a_save_carries_on_from_what_was_written() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, CONFIG).unwrap();
-        let mut editor = editor(CONFIG);
-        editor.path.clone_from(&path);
-        // github.api_url, which serve reads only at startup.
-        select(&mut editor, 0, 0);
-        let _ = press(&mut editor, KeyCode::Enter);
-        typed(&mut editor, "http://localhost:1");
-        let _ = press(&mut editor, KeyCode::Enter);
-        settle(&mut editor);
-        editor.saved(crate::config_doc::save(&path, &editor.doc, &NoCheckouts));
-        let notice = editor.notice.clone().unwrap();
-        assert!(notice.contains("applies when serve restarts"), "{notice}");
-        assert!(!editor.doc.is_changed());
-        assert_eq!(
-            editor.doc.source(),
-            Some(std::fs::read_to_string(&path).unwrap().as_str())
-        );
-        assert_eq!(press(&mut editor, KeyCode::Esc), Outcome::Close);
-    }
-
-    #[test]
-    fn leaving_with_unsaved_edits_asks_first() {
-        let mut editor = editor(CONFIG);
-        select(&mut editor, 3, 5);
-        let _ = press(&mut editor, KeyCode::Char(' '));
-        assert!(editor.turns_manual_reviews_off(true));
-        assert!(!editor.turns_manual_reviews_off(false));
-        assert_eq!(press(&mut editor, KeyCode::Char('q')), Outcome::Open);
-        insta::assert_snapshot!("discard", draw(&editor).backend());
-        assert_eq!(press(&mut editor, KeyCode::Char('n')), Outcome::Open);
-        assert_eq!(press(&mut editor, KeyCode::Esc), Outcome::Open);
-        assert_eq!(press(&mut editor, KeyCode::Char('y')), Outcome::Close);
-        assert_eq!(ctrl(&mut editor, 'c'), Outcome::Quit);
-    }
-
-    #[test]
-    fn saving_that_starts_held_reviews_asks_with_the_count() {
-        let mut editor = editor(CONFIG);
-        editor.ask_held(3);
-        insta::assert_snapshot!("held", draw(&editor).backend());
-        assert_eq!(
-            press(&mut editor, KeyCode::Char('y')),
-            Outcome::Save { told: 3 }
-        );
-        editor.ask_held(3);
-        assert_eq!(press(&mut editor, KeyCode::Enter), Outcome::Open);
-    }
-
-    #[test]
-    fn a_late_check_of_older_text_is_ignored() {
-        let mut editor = editor(CONFIG);
-        let Outcome::Check { generation, .. } = editor.check_now() else {
-            unreachable!();
-        };
-        let _ = editor.check_now();
-        editor.checked(generation, Err("old".into()));
-        assert_eq!(editor.check, Check::Checking);
-    }
-
-    #[test]
-    fn a_failure_in_a_profile_selects_it_on_save() {
-        let mut editor = editor(&CONFIG.replace("{ github = \"org\" }", "\"~/github/sanic-cli\""));
-        // The checkout can't be resolved without a real repo.
-        assert!(matches!(&editor.check, Check::Fails(why) if why.contains("in profile `ring`")));
-        select(&mut editor, 1, 2);
-        let _ = press(&mut editor, KeyCode::Char('u'));
-        settle(&mut editor);
-        let _ = ctrl(&mut editor, 's');
-        assert_eq!(editor.current_table(), Table::Profile("ring".into()));
-    }
-}
+mod tests;

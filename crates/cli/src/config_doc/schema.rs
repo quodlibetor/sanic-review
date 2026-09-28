@@ -40,6 +40,8 @@ pub struct Field {
     pub kind: Kind,
     pub fallback: Fallback,
     pub help: &'static str,
+    /// Holds paths, which typing completes.
+    pub paths: bool,
 }
 
 impl Field {
@@ -49,7 +51,13 @@ impl Field {
             kind,
             fallback,
             help,
+            paths: false,
         }
+    }
+
+    const fn paths(mut self) -> Self {
+        self.paths = true;
+        self
     }
 }
 
@@ -122,7 +130,8 @@ pub const RUNNER: &[Field] = &[
         Kind::Text,
         Fallback::Value(|| DEFAULT_CLAUDE.into()),
         "the `claude` executable; a bare name is looked up on PATH",
-    ),
+    )
+    .paths(),
     Field::new(
         "max_concurrent",
         Kind::Number,
@@ -140,7 +149,8 @@ pub const RUNNER: &[Field] = &[
         Kind::List,
         Fallback::Nothing,
         "more directories the agent may read",
-    ),
+    )
+    .paths(),
     Field::new(
         "model",
         Kind::Text,
@@ -161,13 +171,15 @@ pub const PROFILE: &[Field] = &[
         Kind::List,
         Fallback::Nothing,
         "files whose text goes in the agent's system prompt",
-    ),
+    )
+    .paths(),
     Field::new(
         "skills",
         Kind::List,
         Fallback::Nothing,
         "skill directories the agent may read",
-    ),
+    )
+    .paths(),
     Field::new(
         "model",
         Kind::Text,

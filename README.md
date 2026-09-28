@@ -195,7 +195,7 @@ activity and the log, plus a config editor. Its keys:
 | `i` | ignore PRs by title |
 | `m` | turn manual reviews on or off; off asks first when that starts held reviews |
 | `c` | chat with the agent that reviewed the selected PR |
-| `e` | edit the config: every key, checked as you go, saved after showing the diff |
+| `e` | edit the config: every key, list, repo entry and profile, checked as you go, saved after showing the diff |
 | `z` / `Z` | cycle a pane through fit, full screen and collapsed / reset |
 | `?` | help |
 | `q` | quit `serve`, after listing any running reviews it would cancel |

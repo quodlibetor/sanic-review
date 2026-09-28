@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: draw(&editor).backend()
+---
+"┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/ 1 change ┐"
+"│ github            │  [poll]                                                  │"
+"│ poll              │                                                          │"
+"│ review_requests   │  reconcile_secs         0                                │"
+"│ runner            │  min_notification_secs  ‹default: 60›                    │"
+"│ profiles          │  quiet_secs             30                               │"
+"│   ring            │  updated_within_days    ‹default: 14›                    │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│ `poll.reconcile_secs` must be at least 1                                     │"
+"│ fix what's above before saving: it doesn't load                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

@@ -1,5 +1,5 @@
 ---
-source: crates/cli/src/tui/config.rs
+source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml┐"
@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│ seconds a PR must go quiet before its review starts                          │"
-"│ ✓ loads                      ^S save · u unset · v diff · Esc leave · ? help │"
+"│ ✓ loads                        + add · - remove · u unset · ^S save · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

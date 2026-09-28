@@ -1,14 +1,15 @@
 ---
-source: crates/cli/src/tui/config.rs
+source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml┐"
 "│ github            │  [profile.ring]                                          │"
 "│ poll              │                                                          │"
-"│ review_requests   │  instructions  ‹default: none›                           │"
-"│ runner            │  skills        ‹default: none›                           │"
-"│ profiles          │  model         ‹runner.model: auto›                      │"
-"│   ring            │  skip_titles   ‹default: none›                           │"
+"│ review_requests   │  name          ring                                      │"
+"│ runner            │  instructions  ‹default: none›                           │"
+"│ profiles          │  skills        ‹default: none›                           │"
+"│   ring            │  model         ‹runner.model: auto›                      │"
+"│                   │  skip_titles   ‹default: none›                           │"
 "│                   │  skip_drafts   ‹review_requests.skip_drafts: true›       │"
 "│                   │  auto_fix      ‹default: false›                          │"
 "│                   │  repos         { github = "org" }                        │"
@@ -22,7 +23,6 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│                   │                                                          │"
-"│                   │                                                          │"
-"│ the review model for this profile's PRs                                      │"
-"│ ✓ loads                      ^S save · u unset · v diff · Esc leave · ? help │"
+"│ skill directories the agent may read                                         │"
+"│ ✓ loads                        + add · - remove · u unset · ^S save · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

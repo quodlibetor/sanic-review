@@ -1187,7 +1187,25 @@ fonttools (run through `uv`, which only this task needs) to
   switches sides, `j`/`k` and `g`/`G` move, Enter edits a text or number
   (Enter sets it, a blank unsets it, Esc cancels, Ctrl-U clears; a number
   takes only digits), Space or Enter flips a bool from what it means now,
-  set or not, and `u` unsets a key. Lists are shown, and edited by hand.
+  set or not, and `u` unsets a key (a whole list at once). A list takes
+  a row per item: Enter edits one (a blank removes it), `+` adds one after
+  the rest, `-` removes one, and `K`/`J` move one up or down, since order
+  matters for `teams`, where the last glob to match wins. A profile's
+  first row is its name, which Enter renames in place. Its `repos` get
+  a row per entry, as the file writes it; Enter opens one in place of the
+  profile's keys: its kind (checkout, checkout + paths, github), which
+  Space or the arrows switch, keeping the path, remote and globs that
+  carry over and setting aside what doesn't, until it's switched back; its path or `github` name; a checkout's `remote`, blank
+  meaning discovered; and the globs of a path-scoped or `github` entry,
+  edited like a list. `+` on the list opens a new entry, which goes in
+  the file once it names a checkout or a repo, and `-` and `K`/`J`
+  remove and move entries, since the first of equally specific ones
+  wins. An entry in a shape the editor doesn't know, and repos written
+  as `[[profile.<name>.repos]]` tables, are shown to edit by hand. On the
+  list of tables, `+` adds a profile after the others, `-` removes one
+  after a yes, and `K`/`J` move one. Tab completes a path as it's typed
+  (skills, instructions, `read_paths`, `runner.claude`, a checkout), as
+  far as the matches agree.
   Each edit goes into the file's document in place, keeping its comments
   and layout, and is kept in order. After each one the text is checked
   with the loader off the UI thread, with what remote discovery finds for

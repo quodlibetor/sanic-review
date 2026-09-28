@@ -1,5 +1,5 @@
 ---
-source: crates/cli/src/tui/config.rs
+source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml┐"
@@ -9,7 +9,7 @@ expression: draw(&editor).backend()
 "│ runner            │  git_url  ‹default: https://github.com›                  │"
 "│ profiles          │                                                          │"
 "│   ring            │                                                          │"
-"│                   │                                                          │"
+"│   + profile       │                                                          │"
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│      ┌ Manual reviews off? ───────────────────────────────────────────┐      │"
@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│                                                                              │"
-"│ ✓ loads                      ^S save · u unset · v diff · Esc leave · ? help │"
+"│ ✓ loads                   + profile · - remove · K/J move · ^S save · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

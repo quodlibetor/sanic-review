@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: draw(&editor).backend()
+---
+"┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles 3 changes ┐"
+"│ github            │  [profile.first]                                         │"
+"│ poll              │                                                          │"
+"│ review_requests   │  name          first                                     │"
+"│ runner            │  instructions  ‹default: none›                           │"
+"│ profiles          │  skills        ‹default: none›                           │"
+"│   first           │  model         ‹runner.model: auto›                      │"
+"│   ring            │  skip_titles   ‹default: none›                           │"
+"│   + profile       │  skip_drafts   ‹review_requests.skip_drafts: true›       │"
+"│                   │  auto_fix      ‹default: false›                          │"
+"│      ┌ Remove profile? ───────────────────────────────────────────────┐      │"
+"│      │ Remove [profile.first] and everything in it?                   │      │"
+"│      │                                                                │      │"
+"│      │ y remove · any other key keeps it                              │      │"
+"│      └────────────────────────────────────────────────────────────────┘      │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                   │                                                          │"
+"│                                                                              │"
+"│ … checking                + profile · - remove · K/J move · ^S save · ? help │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
