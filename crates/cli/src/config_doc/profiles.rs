@@ -227,7 +227,7 @@ fn reorder(doc: &mut DocumentMut, order: &[String]) {
 
 /// A header table's prefix split into what's above its own comments, and
 /// its own comments: the comment lines right above it, and its indent.
-fn split_prefix(table: &Table) -> (&str, &str) {
+pub(super) fn split_prefix(table: &Table) -> (&str, &str) {
     let prefix = table
         .decor()
         .prefix()

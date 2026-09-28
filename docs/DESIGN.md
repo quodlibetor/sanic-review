@@ -1210,32 +1210,56 @@ fonttools (run through `uv`, which only this task needs) to
   says so until the next key; `serve` applies it as it reloads. A config
   file that doesn't load, at `m` or at `y`, is left alone, and the status
   bar says why instead.
-  `e` opens the config editor over the whole screen. On the left are the
-  tables, `github`, `poll`, `review_requests`, `runner` and each profile;
-  on the right, every key the selected one takes, from a schema of the
-  config beside the loader's. A key the file doesn't set shows dimmed with
-  its default, or with the key it inherits and that key's value
-  (`‹runner.model: auto›`); one of the wrong type shows in red. Tab
-  switches sides, `j`/`k` and `g`/`G` move, Enter edits a text or number
-  (Enter sets it, a blank unsets it, Esc cancels, Ctrl-U clears; a number
-  takes only digits), Space or Enter flips a bool from what it means now,
-  set or not, and `u` unsets a key (a whole list at once). A list takes
-  a row per item: Enter edits one (a blank removes it), `+` adds one after
-  the rest, `-` removes one, and `K`/`J` move one up or down, since order
-  matters for `teams`, where the last glob to match wins. A profile's
-  first row is its name, which Enter renames in place. Its `repos` get
-  a row per entry, as the file writes it; Enter opens one in place of the
-  profile's keys: its kind (checkout, checkout + paths, github), which
-  Space or the arrows switch, keeping the path, remote and globs that
-  carry over and setting aside what doesn't, until it's switched back; its path or `github` name; a checkout's `remote`, blank
-  meaning discovered; and the globs of a path-scoped or `github` entry,
-  edited like a list. `+` on the list opens a new entry, which goes in
-  the file once it names a checkout or a repo, and `-` and `K`/`J`
-  remove and move entries, since the first of equally specific ones
-  wins. An entry in a shape the editor doesn't know, and repos written
-  as `[[profile.<name>.repos]]` tables, are shown to edit by hand. On the
-  list of tables, `+` adds a profile after the others, `-` removes one
-  after a yes, and `K`/`J` move one. `f` finds what the selected key
+  `e` opens the config editor over the whole screen. It reads as the
+  config file, commented: every table under its `[header]`, `github`,
+  `poll`, `review_requests`, `runner` and each profile, and under each
+  every key it takes, from a schema of the config beside the loader's.
+  Above each key is a line of what it does, from the schema, in a dimmer,
+  slanted comment than the file's own comments, every one of which shows
+  once, where the file has it: above a table's header, a key, a list item
+  or a `[[profile.<name>.repos]]` entry; after a header, a value or an
+  item on its line; after a list's `[` or before its `]`, empty or not;
+  with the first profile, for an explicit `[profile]` header; and what
+  the file opens with, set apart from its first table by a blank line, at
+  the top. Comments set apart by a blank line after a table's keys close
+  that table, however the editor orders the tables, so they show at the
+  end of it, set apart the same way; what the file ends with closes its
+  last table. A list with comments inside it is an item a line. Keys a
+  table has that the config doesn't take show after its own, and tables
+  and keys it doesn't take at all at the end, each as the file writes
+  it, comments and all, in red, to fix by hand. A test renders configs in
+  every shape these take, before and after edits, and checks that each
+  comment the file has shows exactly once. A key the
+  file doesn't set shows commented out with what it means unset,
+  `# model = "auto"`, and where that comes from, `(default)` or
+  `(from runner.model)`; one of the wrong type shows in red. A list is on one line when it fits, with the selected item
+  marked, and an item a line when it doesn't, or while one's typed into
+  it; a profile's `repos` are always an entry a line. `j`/`k` and `g`/`G`
+  move by row, a header, a key or a list item each a row, and Tab or `]`
+  and Shift-Tab or `[` step from table to table. Enter edits a text or
+  number (Enter sets it, a blank unsets it, Esc cancels, Ctrl-U clears; a
+  number takes only digits), Space or Enter flips a bool from what it
+  means now, set or not, and `u` unsets a key (a whole list at once).
+  While a field's typed into, what it's for in full, what it is unset and
+  how it's typed replace what the config does, below. On a list item,
+  Enter edits it (a blank removes it), `+` adds one after the rest, `-`
+  removes it, and `K`/`J` move it up or down, since order matters for
+  `teams`, where the last glob to match wins. On a profile's header,
+  Enter renames it in place. On a repo entry, Enter opens it over the
+  file: its kind (checkout, checkout + paths, github), which Space or the
+  arrows switch, keeping the path, remote and globs that carry over and
+  setting aside what doesn't, until it's switched back; its path or
+  `github` name; a checkout's `remote`, blank meaning discovered; and the
+  globs of a path-scoped or `github` entry, edited like a list. `+` on
+  `repos` opens a new entry, which goes in the file once it names a
+  checkout or a repo, and `-` and `K`/`J` remove and move entries, since
+  the first of equally specific ones wins. An entry in a shape the editor
+  doesn't know, and repos written as `[[profile.<name>.repos]]` tables,
+  are shown to edit by hand. On a profile's header, or the row after the
+  last table, `+` adds a profile after the others; on a header, `-`
+  removes the profile after a yes, and `K`/`J` move it. The footer says
+  whether the config loads and lists the main keys; `?` lists them all.
+  `f` finds what the selected key
   could hold, in a list to pick from:
   - on `review_requests.teams`, your teams, ticked where the filter lets
     their requests count; writing it makes the filter `*` then `!org/slug`
@@ -1279,32 +1303,36 @@ fonttools (run through `uv`, which only this task needs) to
   TOML can't be opened; one that is but doesn't load can, since fixing
   it is what the editor is for, and one that doesn't exist opens empty,
   written with a line saying where the format is described.
-  A line over the footer counts what the config watches, as it last
-  loaded: its repos, the PRs you owe a review and how many repos they're
-  in, and your own PRs, within `poll.updated_within_days`, saying when
-  `serve` is showing another window (one picked on the dashboard, or the
-  config's before a save). While the text doesn't load the counts stay,
-  dimmed. Repos are each repo entries name, plus each watched org's
-  repos (a repository search with forks and without archived ones) less
-  those entries claim. PRs are the dashboard's lists' searches, kept to
-  the watched orgs and repos in as many searches as fit, added up; you
-  owe `review-requested:@me -author:@me`, which counts team requests
-  too, and yours `author:@me`. The repos you owe reviews in are those of
-  the PRs that search returns, read a few pages at most, so past that,
-  or past GitHub's thousand results, it's `≥`. Path globs, and a team
-  filter that leaves out one of your teams, can't be searched, so counts
-  they'd cut are `≤`, and a line says why. A selected profile's entries
-  each show their repos and PRs on both lists, an org's without the repos
-  entries claim: left out of its search, or, when that doesn't fit in
-  one, counted in searches of their own, as many as fit, and taken off
-  the org's. Counts go with the entry they're for, found by what it
-  covers (its checkout or org or repo, and its globs), so they follow it
-  as it moves, and an entry the config didn't have when it last loaded
-  shows none. A failed search shows `—` where the counts it's part of
-  would be, and nowhere else;
-  `review_requests` lists your teams with the requests to each and
-  whether the filter leaves them out, and
-  `updated_within_days` shows how many PRs the window hides, as the
+  Under the file, "What this config does" says, in sentences, what it
+  watches, as it last loaded: its repos, how many in orgs and how many
+  named directly, the reviews you're asked for and how many repos
+  they're in, and your own open PRs, within `poll.updated_within_days`,
+  saying when `serve` is showing another window (one picked on the
+  dashboard, or the config's before a save). While the text doesn't
+  load, it says why, and the counts stay, dimmed. Repos are each repo
+  entries name, plus each watched org's repos (a repository search with
+  forks and without archived ones) less those entries claim. PRs are the
+  dashboard's lists' searches, kept to the watched orgs and repos in as
+  many searches as fit, added up; you're asked for
+  `review-requested:@me -author:@me`, which counts team requests too, and
+  yours are `author:@me`. The repos you're asked in are those of the PRs
+  that search returns, read a few pages at most, so past that, or past
+  GitHub's thousand results, it's "at least". Path globs, and a team
+  filter that leaves out one of your teams, can't be searched, so where
+  they'd cut a count it says "maybe fewer" and which. Each of a selected
+  profile's entries says its repos and PRs on both lists at the right of
+  its row, as "1 repo · 3 PRs", or "up to 12 PRs" where its globs can't
+  be searched; an org's leave out the repos entries claim: left out of
+  its search, or, when that doesn't fit in one, counted in searches of
+  their own, as many as fit, and taken off the org's. Counts go with the
+  entry they're for, found by what it covers (its checkout or org or
+  repo, and its globs), so they follow it as it moves, and an entry the
+  config didn't have when it last loaded shows none. A failed search
+  shows as "count failed", or "couldn't count" in the sentence it's part
+  of, and nowhere else. Under `teams`, while `review_requests` is
+  selected, your teams show as comments with their requests and whether
+  the filter counts them, and `updated_within_days` says how many PRs
+  the window hides, as the
   dashboard's hidden counts. Counting runs on `serve`'s runtime: the
   editor says what it wants, most wanted first, and counting starts once
   edits have settled for a moment, one search at a time, asking only what
@@ -1315,9 +1343,8 @@ fonttools (run through `uv`, which only this task needs) to
   While `serve`'s poller is paused by a rate limit, counting waits for
   it. A rate limit on the counts stops them, saying for how long, until
   the next edit, which waits it out; a rejected token says to `gh auth
-  login`; any other failure is shown on the counts line, and as `—` in
-  what it counts for, until that search is counted again, while the
-  other searches go on. A failed search is asked again only when the set
+  login`; any other failure is said under the file, and where it counts,
+  until that search is counted again, while the other searches go on. A failed search is asked again only when the set
   of searches the editor needs changes, as when an edit changes what's
   counted or another table is selected, not on every edit.
   The terminal is restored on exit, and on a panic on the main or TUI

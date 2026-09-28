@@ -25,7 +25,7 @@ use sanic_core::config::contract_path;
 pub use self::check::{Checked, Checker};
 use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
 use self::rows::{
-    EntryEdit, EntryRow, KINDS, Row, Shown, entries, items, rows, scalar_text, shown,
+    EntryEdit, EntryRow, KINDS, Row, Shown, all_rows, entries, items, scalar_text, shown,
 };
 use self::suggest::{Apply, Suggest, Suggestion, What};
 pub use self::suggest::{Find, Found};
@@ -40,11 +40,11 @@ pub struct ConfigEditor {
     /// The file `path` links to, when it's a symlink.
     target: Option<PathBuf>,
     doc: ConfigDoc,
-    focus: Focus,
-    /// Which table, by [`ConfigEditor::tables`].
-    table: usize,
-    /// Which of its rows.
+    /// Which row, of every table's in turn.
     row: usize,
+    /// The first line of the file view shown, kept between draws so it
+    /// scrolls only as far as the selection needs.
+    top: std::cell::Cell<usize>,
     /// The repo entry open in place of its profile's keys.
     entry: Option<EntryEdit>,
     typing: Option<Typing>,
@@ -88,12 +88,6 @@ pub enum Check {
     Checking,
     Loads,
     Fails(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    Tables,
-    Keys,
 }
 
 /// What you're typing, and into what.
@@ -167,9 +161,8 @@ impl ConfigEditor {
             path: path.to_owned(),
             target,
             doc,
-            focus: Focus::Tables,
-            table: 0,
             row: 0,
+            top: std::cell::Cell::new(0),
             entry: None,
             typing: None,
             check: Check::Checking,
@@ -604,13 +597,20 @@ impl ConfigEditor {
             .collect()
     }
 
+    /// The table the selected row is in; the last for the row after them.
     fn current_table(&self) -> Table {
-        let mut tables = self.tables();
-        let at = self.table.min(tables.len() - 1);
-        tables.swap_remove(at)
+        let rows = self.rows();
+        rows[..=self.row.min(rows.len() - 1)]
+            .iter()
+            .rev()
+            .find_map(|row| match row {
+                Row::Header(table) => Some(table.clone()),
+                _ => None,
+            })
+            .unwrap_or(Table::Runner)
     }
 
-    /// The selected table's rows, with the one being added to a list.
+    /// The whole config's rows, with the one being added to a list.
     fn rows(&self) -> Vec<Row> {
         let adding = match &self.typing {
             Some(Typing {
@@ -619,7 +619,7 @@ impl ConfigEditor {
             }) => Some(key),
             _ => None,
         };
-        rows(&self.doc, &self.current_table(), adding)
+        all_rows(&self.doc, &self.tables(), adding)
     }
 
     fn current_row(&self) -> Option<Row> {
@@ -627,12 +627,29 @@ impl ConfigEditor {
         (self.row < rows.len()).then(|| rows.swap_remove(self.row))
     }
 
-    /// The key the help line is about.
-    fn current_key(&self) -> Option<Key> {
-        if self.focus == Focus::Tables {
-            return None;
+    /// Selects `row`, if it's there.
+    fn select(&mut self, row: &Row) {
+        if let Some(at) = self.rows().iter().position(|r| r == row) {
+            self.row = at;
         }
-        self.current_row()?.key()
+    }
+
+    /// Selects the next table's header, or the one before's.
+    fn step_table(&mut self, forward: bool) {
+        let rows = self.rows();
+        let headers = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, Row::Header(_) | Row::NewProfile))
+            .map(|(at, _)| at);
+        let target = if forward {
+            headers.filter(|at| *at > self.row).min()
+        } else {
+            headers.filter(|at| *at < self.row).max()
+        };
+        if let Some(at) = target {
+            self.row = at;
+        }
     }
 
     /// Whether a new glob is being typed into the open entry.
@@ -677,17 +694,12 @@ impl ConfigEditor {
             KeyCode::Char('?') => self.popup = Some(Popup::Help),
             _ if self.entry.is_some() => return self.entry_key(key),
             KeyCode::Esc | KeyCode::Char('q') => return self.leave(),
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = match self.focus {
-                    Focus::Tables => Focus::Keys,
-                    Focus::Keys => Focus::Tables,
-                };
-            }
+            KeyCode::Tab | KeyCode::Char(']') => self.step_table(true),
+            KeyCode::BackTab | KeyCode::Char('[') => self.step_table(false),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
             KeyCode::Char('g') | KeyCode::Home => self.move_to(0),
             KeyCode::Char('G') | KeyCode::End => self.move_to(usize::MAX),
-            _ if self.focus == Focus::Tables => return self.tables_key(key),
             KeyCode::Enter => return self.edit(),
             KeyCode::Char(' ') => return self.toggle(),
             KeyCode::Char('u') => return self.unset(),
@@ -726,41 +738,6 @@ impl ConfigEditor {
             }
             // Anything else closes it; a stray key neither writes nor
             // throws edits away.
-            _ => {}
-        }
-        Outcome::Open
-    }
-
-    /// Keys on the list of tables.
-    fn tables_key(&mut self, key: KeyEvent) -> Outcome {
-        let profile = match self.current_table() {
-            Table::Profile(name) => Some(name),
-            _ => None,
-        };
-        match (key.code, profile) {
-            (KeyCode::Enter, _) => self.focus = Focus::Keys,
-            (KeyCode::Char('+'), _) => self.start_typing(Input::NewProfile, String::new()),
-            (KeyCode::Char('-'), Some(name)) => self.popup = Some(Popup::RemoveProfile(name)),
-            (KeyCode::Char(c @ ('K' | 'J')), Some(name)) => {
-                let at = self.table - Table::SECTIONS.len();
-                let Some(to) = (if c == 'K' {
-                    at.checked_sub(1)
-                } else {
-                    Some(at + 1)
-                })
-                .filter(|to| *to < self.doc.profiles().len()) else {
-                    return Outcome::Open;
-                };
-                let applied = self.doc.ops().len();
-                let outcome = self.apply(Op::MoveProfile { name, to });
-                if self.doc.ops().len() > applied {
-                    self.table = Table::SECTIONS.len() + to;
-                }
-                return outcome;
-            }
-            (KeyCode::Char('-' | 'K' | 'J'), None) => {
-                self.notice = Some("only profiles are added, removed and moved".into());
-            }
             _ => {}
         }
         Outcome::Open
@@ -833,7 +810,11 @@ impl ConfigEditor {
     /// Enter on a row: types into it, flips a bool, or opens a repo entry.
     fn edit(&mut self) -> Outcome {
         match self.current_row() {
-            Some(Row::Name(name)) => self.start_typing(Input::Rename(name.clone()), name),
+            Some(Row::Header(Table::Profile(name))) => {
+                self.start_typing(Input::Rename(name.clone()), name);
+            }
+            Some(Row::Header(_)) => self.move_by(1),
+            Some(Row::NewProfile) => self.start_typing(Input::NewProfile, String::new()),
             Some(Row::Scalar(key)) if key.field().kind == Kind::Bool => return self.toggle(),
             Some(Row::Scalar(key)) => {
                 let text = match self.doc.scalar(&key) {
@@ -895,7 +876,14 @@ impl ConfigEditor {
                 });
                 self.start_typing(Input::Entry(EntryRow::Target), String::new());
             }
-            _ => self.notice = Some("+ adds to a list, or a repo entry to a profile".into()),
+            Some(Row::Header(Table::Profile(_)) | Row::NewProfile) => {
+                self.start_typing(Input::NewProfile, String::new());
+                self.select(&Row::NewProfile);
+            }
+            _ => {
+                self.notice =
+                    Some("+ adds to a list, a repo entry to a profile, or a profile".into());
+            }
         }
     }
 
@@ -917,8 +905,12 @@ impl ConfigEditor {
                     Some("the editor doesn't know this entry's shape; edit it by hand".into());
                 Outcome::Open
             }
+            Some(Row::Header(Table::Profile(name))) => {
+                self.popup = Some(Popup::RemoveProfile(name));
+                Outcome::Open
+            }
             _ => {
-                self.notice = Some("- removes a list item or a repo entry".into());
+                self.notice = Some("- removes a list item, a repo entry or a profile".into());
                 Outcome::Open
             }
         }
@@ -963,8 +955,9 @@ impl ConfigEditor {
                 };
                 (Op::MoveEntry { profile, entry, to }, to)
             }
+            Some(Row::Header(Table::Profile(name))) => return self.shift_profile(name, by),
             _ => {
-                self.notice = Some("K and J move a list item or a repo entry".into());
+                self.notice = Some("K and J move a list item, a repo entry or a profile".into());
                 return Outcome::Open;
             }
         };
@@ -974,6 +967,25 @@ impl ConfigEditor {
         if self.doc.ops().len() > applied {
             self.row = first + at;
         }
+        outcome
+    }
+
+    /// Moves a profile up or down among the profiles, keeping it selected.
+    fn shift_profile(&mut self, name: String, by: isize) -> Outcome {
+        let profiles = self.doc.profiles();
+        let Some(to) = profiles
+            .iter()
+            .position(|p| *p == name)
+            .and_then(|at| at.checked_add_signed(by))
+            .filter(|to| *to < profiles.len())
+        else {
+            return Outcome::Open;
+        };
+        let outcome = self.apply(Op::MoveProfile {
+            name: name.clone(),
+            to,
+        });
+        self.select(&Row::Header(Table::Profile(name)));
         outcome
     }
 
@@ -1027,10 +1039,17 @@ impl ConfigEditor {
                 if text.is_empty() || text == from {
                     return Outcome::Open;
                 }
-                Op::RenameProfile {
+                // A refused rename, as to a name another profile has,
+                // stays on the profile being renamed.
+                let applied = self.doc.ops().len();
+                let outcome = self.apply(Op::RenameProfile {
                     from,
                     to: text.to_owned(),
+                });
+                if self.doc.ops().len() > applied {
+                    self.select(&Row::Header(Table::Profile(text.to_owned())));
                 }
+                return outcome;
             }
             Input::NewProfile => {
                 if text.is_empty() {
@@ -1039,14 +1058,7 @@ impl ConfigEditor {
                 let outcome = self.apply(Op::AddProfile {
                     name: text.to_owned(),
                 });
-                if let Some(at) = self
-                    .tables()
-                    .iter()
-                    .position(|t| *t == Table::Profile(text.to_owned()))
-                {
-                    self.table = at;
-                    self.row = 0;
-                }
+                self.select(&Row::Header(Table::Profile(text.to_owned())));
                 return outcome;
             }
             Input::Entry(row) => return self.commit_entry(row, text),
@@ -1351,7 +1363,6 @@ impl ConfigEditor {
 
     /// Keeps the selection on a table and row that exist.
     fn clamp(&mut self) {
-        self.table = self.table.min(self.tables().len() - 1);
         self.row = self.row.min(self.rows().len().saturating_sub(1));
     }
 
@@ -1372,7 +1383,7 @@ impl ConfigEditor {
             Check::Fails(why) => {
                 let why = why.clone();
                 self.show_where(&why);
-                self.notice = Some("fix what's above before saving: it doesn't load".into());
+                self.notice = Some("it doesn't load: fix what it says below, then save".into());
             }
         }
     }
@@ -1383,11 +1394,9 @@ impl ConfigEditor {
             .split_once("in profile `")
             .and_then(|(_, rest)| rest.split_once('`'))
             .map(|(name, _)| Table::Profile(name.to_owned()));
-        if let Some(at) = named.and_then(|t| self.tables().iter().position(|x| *x == t)) {
-            self.table = at;
-            self.row = 0;
+        if let Some(table) = named {
+            self.select(&Row::Header(table));
             self.entry = None;
-            self.focus = Focus::Keys;
         }
     }
 
@@ -1401,24 +1410,11 @@ impl ConfigEditor {
     }
 
     fn move_by(&mut self, delta: isize) {
-        let now = match self.focus {
-            Focus::Tables => self.table,
-            Focus::Keys => self.row,
-        };
-        self.move_to(now.saturating_add_signed(delta));
+        self.move_to(self.row.saturating_add_signed(delta));
     }
 
     fn move_to(&mut self, target: usize) {
-        match self.focus {
-            Focus::Tables => {
-                let target = target.min(self.tables().len() - 1);
-                if target != self.table {
-                    self.table = target;
-                    self.row = 0;
-                }
-            }
-            Focus::Keys => self.row = target.min(self.rows().len().saturating_sub(1)),
-        }
+        self.row = target.min(self.rows().len().saturating_sub(1));
     }
 }
 

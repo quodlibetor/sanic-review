@@ -340,19 +340,23 @@ impl Figure {
         }
     }
 
-    /// `≤41`, `≥12`, `7`, `—` when a search failed, or `…` while it's
-    /// being counted.
+    /// `3 PRs`, `up to 12 PRs`, `at least 2 repos`, `count failed`, or
+    /// `counting…` while it's being counted, of `what`.
     #[must_use]
-    pub fn text(&self) -> String {
-        let mark = match self.bound {
-            Bound::Exact => "",
-            Bound::AtMost => "≤",
-            Bound::AtLeast => "≥",
+    pub fn words(&self, what: &str) -> String {
+        let counted = |n: u32| {
+            if n == 1 {
+                format!("1 {what}")
+            } else {
+                format!("{n} {what}s")
+            }
         };
-        match self.value {
-            _ if self.failed => "—".into(),
-            Some(n) => format!("{mark}{n}"),
-            None => "…".into(),
+        match (self.value, self.bound) {
+            _ if self.failed => "count failed".into(),
+            (None, _) => "counting…".into(),
+            (Some(n), Bound::AtMost) => format!("up to {}", counted(n)),
+            (Some(n), Bound::AtLeast) => format!("at least {}", counted(n)),
+            (Some(n), Bound::Exact) => counted(n),
         }
     }
 }
@@ -1164,7 +1168,7 @@ mod tests {
 
         let mut answers = HashMap::new();
         let tally = Tally(&answers);
-        assert_eq!(tally.owed(&plan).text(), "…");
+        assert_eq!(tally.owed(&plan).words("x"), "counting…");
         answers.insert(Query::Prs(plan.owed[0].clone()), Answer::Count(41));
         answers.insert(Query::Prs(plan.yours[0].clone()), Answer::Count(7));
         answers.insert(
@@ -1180,13 +1184,13 @@ mod tests {
         );
         let tally = Tally(&answers);
         // Globs make the PR counts upper bounds.
-        assert_eq!(tally.owed(&plan).text(), "≤41");
-        assert_eq!(tally.yours(&plan).text(), "≤7");
+        assert_eq!(tally.owed(&plan).words("x"), "up to 41 xs");
+        assert_eq!(tally.yours(&plan).words("x"), "up to 7 xs");
         // The org's ten, less the one an entry claims, and two named.
-        assert_eq!(tally.repos(&plan).text(), "11");
-        assert_eq!(tally.asked_in(&plan).text(), "≥1");
-        assert_eq!(tally.entry(&plan.entries[0]).0.text(), "9");
-        assert_eq!(tally.entry(&plan.entries[2]).0.text(), "1");
+        assert_eq!(tally.repos(&plan).words("x"), "11 xs");
+        assert_eq!(tally.asked_in(&plan).words("x"), "at least 1 x");
+        assert_eq!(tally.entry(&plan.entries[0]).0.words("x"), "9 xs");
+        assert_eq!(tally.entry(&plan.entries[2]).0.words("x"), "1 x");
     }
 
     #[test]
@@ -1231,25 +1235,31 @@ mod tests {
             .collect();
         let parts = u32::try_from(claimed.len()).unwrap();
         let (_, prs) = Tally(&answers).entry(&plan.entries[0]);
-        assert_eq!(prs.text(), (2 * (50 - 5 * parts)).to_string());
+        assert_eq!(prs.words("x"), format!("{} xs", 2 * (50 - 5 * parts)));
         // A failed search shows in the headline figure it's part of.
         let mut failed_headline = answers.clone();
         failed_headline.insert(
             Query::Prs(plan.owed[0].clone()),
             Answer::Failed("422".into()),
         );
-        assert_eq!(Tally(&failed_headline).owed(&plan).text(), "—");
+        assert_eq!(
+            Tally(&failed_headline).owed(&plan).words("x"),
+            "count failed"
+        );
         // A failed part blanks the row, and only it.
         answers.insert(Query::Prs(claimed[0].clone()), Answer::Failed("422".into()));
         let tally = Tally(&answers);
-        assert_eq!(tally.entry(&plan.entries[0]).1.text(), "—");
-        assert_eq!(tally.entry(&plan.entries[1]).1.text(), "10");
+        assert_eq!(tally.entry(&plan.entries[0]).1.words("x"), "count failed");
+        assert_eq!(tally.entry(&plan.entries[1]).1.words("x"), "10 xs");
         // So does a failed count of the org's repos, in its repos column.
         answers.insert(
             Query::Repos(Watched::org_repos("org")),
             Answer::Failed("422".into()),
         );
-        assert_eq!(Tally(&answers).entry(&plan.entries[0]).0.text(), "—");
+        assert_eq!(
+            Tally(&answers).entry(&plan.entries[0]).0.words("x"),
+            "count failed"
+        );
     }
 
     #[test]
@@ -1272,11 +1282,11 @@ mod tests {
         // Other answers coming in don't clear it.
         answers.insert(Query::Prs(plan.yours[0].clone()), Answer::Count(3));
         let tally = Tally(&answers);
-        assert_eq!(tally.owed(&plan).text(), "—");
+        assert_eq!(tally.owed(&plan).words("x"), "count failed");
         assert_eq!(tally.failure(&wanted), Some("422"));
         answers.insert(owed, Answer::Count(4));
         let tally = Tally(&answers);
-        assert_eq!(tally.owed(&plan).text(), "4");
+        assert_eq!(tally.owed(&plan).words("x"), "4 xs");
         assert_eq!(tally.failure(&wanted), None);
     }
 
@@ -1389,8 +1399,8 @@ mod tests {
                 .starts_with("team-review-requested:org/x updated:>=")
         );
         let mut answers = HashMap::from([(Query::Prs(plan.owed[0].clone()), Answer::Count(3))]);
-        assert_eq!(Tally(&answers).owed(&plan).text(), "3");
+        assert_eq!(Tally(&answers).owed(&plan).words("x"), "3 xs");
         answers.insert(Query::Teams, Answer::Teams(teams.to_vec()));
-        assert_eq!(Tally(&answers).owed(&plan).text(), "≤3");
+        assert_eq!(Tally(&answers).owed(&plan).words("x"), "up to 3 xs");
     }
 }

@@ -1,4 +1,4 @@
-//! The rows the editor lists for a table, or for a repo entry it has
+//! The rows the editor lists for the config, or for a repo entry it has
 //! open, and what each shows.
 
 use crate::config_doc::{
@@ -6,12 +6,12 @@ use crate::config_doc::{
     schema::{Fallback, Kind},
 };
 
-/// A row of a table's keys: a key on one row, or a list over one row per
-/// item.
+/// A row of the config, as a file lists it: a table's header, then its
+/// keys, a key on one row or a list over one row per item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
-    /// A profile's name, which Enter renames.
-    Name(String),
+    /// `[github]`, or `[profile.x]`, which Enter renames.
+    Header(Table),
     Scalar(Key),
     /// A list's `n`th item.
     Item(Key, usize),
@@ -23,6 +23,8 @@ pub enum Row {
     Entry(String, usize),
     /// A profile's `repos` with no entries, or one that isn't a list.
     NoEntries(String),
+    /// After the last table, where `+` adds a profile.
+    NewProfile,
 }
 
 impl Row {
@@ -35,25 +37,26 @@ impl Row {
             Self::Entry(profile, _) | Self::NoEntries(profile) => {
                 Key::new(Table::Profile(profile.clone()), "repos")
             }
-            Self::Name(_) => None,
+            Self::Header(_) | Self::NewProfile => None,
         }
     }
+}
 
-    /// Whether it's the first of its key's rows, which is labelled.
-    pub fn labelled(&self) -> bool {
-        !matches!(
-            self,
-            Self::Item(_, 1..) | Self::NewItem(_) | Self::Entry(_, 1..)
-        )
+/// Every table's rows in turn, each under its header, with a row for
+/// `adding` after its list's items, then [`Row::NewProfile`].
+pub fn all_rows(doc: &ConfigDoc, tables: &[Table], adding: Option<&Key>) -> Vec<Row> {
+    let mut all = Vec::new();
+    for table in tables {
+        all.push(Row::Header(table.clone()));
+        all.extend(rows(doc, table, adding));
     }
+    all.push(Row::NewProfile);
+    all
 }
 
 /// `table`'s rows, with a row for `adding` after its items.
 pub fn rows(doc: &ConfigDoc, table: &Table, adding: Option<&Key>) -> Vec<Row> {
     let mut rows = Vec::new();
-    if let Table::Profile(name) = table {
-        rows.push(Row::Name(name.clone()));
-    }
     for field in table.fields() {
         let Some(key) = Key::new(table.clone(), field.name) else {
             continue;
@@ -316,12 +319,20 @@ repos = [{ github = "org" }, { repo = "~/s", paths = ["/v/**"] }]
             ]
         );
         let profile = rows(&doc, &Table::Profile("p".into()), None);
-        assert_eq!(profile[0], Row::Name("p".into()));
         assert_eq!(
             profile[profile.len() - 2..],
             [Row::Entry("p".into(), 0), Row::Entry("p".into(), 1)]
         );
-        assert!(!Row::Entry("p".into(), 1).labelled());
+        // The whole config: each table under its header, then the row
+        // where a profile's added.
+        let tables = [Table::Github, Table::Profile("p".into())];
+        let all = all_rows(&doc, &tables, None);
+        assert_eq!(all[0], Row::Header(Table::Github));
+        assert_eq!(
+            all.iter().filter(|r| matches!(r, Row::Header(_))).count(),
+            2
+        );
+        assert_eq!(all.last(), Some(&Row::NewProfile));
     }
 
     #[test]

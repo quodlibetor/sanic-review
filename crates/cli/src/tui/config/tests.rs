@@ -65,15 +65,18 @@ fn draw(editor: &ConfigEditor) -> Terminal<TestBackend> {
     terminal
 }
 
-/// Selects `table`'s `row`th key.
+fn key_of(table: Table, name: &str) -> Key {
+    Key::new(table, name).unwrap()
+}
+
+/// Selects `table`'s `row`th row: its keys' for a section, and for a
+/// profile its header at 0, then its keys.
 fn select(editor: &mut ConfigEditor, table: usize, row: usize) {
-    editor.focus = Focus::Tables;
-    let _ = press(editor, KeyCode::Char('g'));
-    for _ in 0..table {
-        let _ = press(editor, KeyCode::Char('j'));
-    }
-    let _ = press(editor, KeyCode::Enter);
-    for _ in 0..row {
+    let table = editor.tables()[table].clone();
+    let profile = matches!(table, Table::Profile(_));
+    editor.select(&Row::Header(table));
+    let steps = if profile { row } else { row + 1 };
+    for _ in 0..steps {
         let _ = press(editor, KeyCode::Char('j'));
     }
 }
@@ -253,6 +256,9 @@ fn list_items_are_added_edited_moved_and_removed() {
     select(&mut editor, 2, 0);
     let _ = press(&mut editor, KeyCode::Char('+'));
     typed(&mut editor, "*");
+    // What's typed shows once, not on the unset list's row as well.
+    let screen = draw(&editor).backend().to_string();
+    assert_eq!(screen.matches("*▏").count(), 1, "{screen}");
     let _ = press(&mut editor, KeyCode::Enter);
     let _ = press(&mut editor, KeyCode::Char('+'));
     typed(&mut editor, "!org/storage");
@@ -265,12 +271,19 @@ fn list_items_are_added_edited_moved_and_removed() {
         "{}",
         editor.doc.text()
     );
-    assert_eq!(editor.row, 1, "on what was added");
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Item(key_of(Table::ReviewRequests, "teams"), 1)),
+        "on what was added"
+    );
     insta::assert_snapshot!("lists", draw(&editor).backend());
 
     // Order matters: the last match wins.
     let _ = press(&mut editor, KeyCode::Char('K'));
-    assert_eq!(editor.row, 0);
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Item(key_of(Table::ReviewRequests, "teams"), 0))
+    );
     assert!(
         editor
             .doc
@@ -389,7 +402,8 @@ fn repo_entries_open_switch_kind_and_take_globs() {
 #[test]
 fn profiles_are_added_renamed_moved_and_removed_asking_first() {
     let mut editor = editor(CONFIG);
-    editor.focus = Focus::Tables;
+    // `+` on the row after the tables.
+    let _ = press(&mut editor, KeyCode::Char('G'));
     let _ = press(&mut editor, KeyCode::Char('+'));
     typed(&mut editor, "extra");
     let _ = press(&mut editor, KeyCode::Enter);
@@ -399,15 +413,27 @@ fn profiles_are_added_renamed_moved_and_removed_asking_first() {
     assert_eq!(editor.doc.profiles(), ["extra", "ring"]);
     assert_eq!(editor.current_table(), Table::Profile("extra".into()));
 
-    // Its name is its first row.
-    let _ = press(&mut editor, KeyCode::Enter);
+    // Enter on its header renames it.
     let _ = press(&mut editor, KeyCode::Enter);
     let _ = ctrl(&mut editor, 'u');
     typed(&mut editor, "first");
     let _ = press(&mut editor, KeyCode::Enter);
     assert_eq!(editor.doc.profiles(), ["first", "ring"]);
-
-    editor.focus = Focus::Tables;
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Header(Table::Profile("first".into())))
+    );
+    // A rename to another profile's name is refused, and stays on it.
+    let _ = press(&mut editor, KeyCode::Enter);
+    let _ = ctrl(&mut editor, 'u');
+    typed(&mut editor, "ring");
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert_eq!(editor.doc.profiles(), ["first", "ring"]);
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Header(Table::Profile("first".into())))
+    );
+    editor.notice = None;
     let _ = press(&mut editor, KeyCode::Char('-'));
     insta::assert_snapshot!("remove_profile", draw(&editor).backend());
     let _ = press(&mut editor, KeyCode::Char('n'));
@@ -419,6 +445,12 @@ fn profiles_are_added_renamed_moved_and_removed_asking_first() {
     let _ = press(&mut editor, KeyCode::Char('g'));
     let _ = press(&mut editor, KeyCode::Char('-'));
     assert!(editor.popup.is_none());
+    // Tab and ] step to the next table's header, [ back.
+    let _ = press(&mut editor, KeyCode::Tab);
+    assert_eq!(editor.current_row(), Some(Row::Header(Table::Poll)));
+    let _ = press(&mut editor, KeyCode::Char(']'));
+    let _ = press(&mut editor, KeyCode::Char('['));
+    assert_eq!(editor.current_row(), Some(Row::Header(Table::Poll)));
 }
 
 #[test]
@@ -505,8 +537,8 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
     editor.counted(vec![Counted::Stopped(Stopped::RateLimited(
         std::time::Duration::from_secs(60),
     ))]);
-    let screen = format!("{:?}", draw(&editor).backend());
-    assert!(screen.contains("rate limited for 60s"), "{screen}");
+    let said = effects(&editor);
+    assert!(said.contains("GitHub rate limited the counts"), "{said}");
 }
 
 #[test]
@@ -536,18 +568,35 @@ fn a_failed_search_stays_on_the_counts_line_until_its_counted_again() {
     editor.counted(vec![Counted::Failed(owed.clone(), "422".into())]);
     // Other answers coming in don't clear it.
     editor.counted(others.collect());
-    let screen = format!("{:?}", draw(&editor).backend());
-    assert!(screen.contains("counting failed: 422"), "{screen}");
-    assert!(screen.contains("you owe —"), "{screen}");
-    assert!(!screen.contains("rate limited"), "{screen}");
+    let said = effects(&editor);
+    assert!(said.contains("A count failed: 422"), "{said}");
+    assert!(
+        said.contains("Couldn't count the reviews you're asked for."),
+        "{said}"
+    );
+    assert!(!said.contains("rate limited"), "{said}");
     // Waiting on serve says so over it.
     editor.counted(vec![Counted::Waiting]);
-    let screen = format!("{:?}", draw(&editor).backend());
-    assert!(screen.contains("waiting out serve"), "{screen}");
+    assert!(effects(&editor).contains("Waiting for serve's rate limit"));
     editor.counted(vec![Counted::Answer(owed, Answer::Count(2))]);
-    let screen = format!("{:?}", draw(&editor).backend());
-    assert!(!screen.contains("counting failed"), "{screen}");
-    assert!(screen.contains("you owe 2"), "{screen}");
+    let said = effects(&editor);
+    assert!(!said.contains("count failed"), "{said}");
+    assert!(said.contains("You're asked for 2 reviews"), "{said}");
+}
+
+/// What the Effects block says, as one text.
+fn effects(editor: &ConfigEditor) -> String {
+    editor
+        .effects()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -858,4 +907,419 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
         panic!("no suggestions");
     };
     assert!(suggest.rows.is_empty() && suggest.finding);
+}
+
+#[test]
+fn a_config_reads_as_a_commented_file_with_what_it_does_below() {
+    let text = r#"# sanic-review config; the format is described in docs/DESIGN.md.
+
+[review_requests]
+teams = ["*", "!sanic-hq/sanic-speedsters"]
+skip_titles = ["build(deps)*"] # dependabot
+
+[runner]
+model = "claude-sonnet-5"
+manual_reviews = true
+
+# The documentation team's.
+[profile.ring]
+instructions = ["~/.config/sanic-review/instructions/ring.md"]
+repos = [
+  { github = "sanic-hq/sanic-cli" },
+  { github = "sanic-hq/services", paths = ["/documentation/**"] },
+]
+
+[profile.default]
+repos = [{ github = "sanic-hq" }, { github = "quodlibetor" }]
+"#;
+    let mut editor = editor(text);
+    // On the first team pattern.
+    select(&mut editor, 2, 0);
+    let wanted = editor.want(SystemTime::UNIX_EPOCH);
+    let answers = wanted
+        .iter()
+        .map(|q| {
+            let answer = match q {
+                Query::Teams => Answer::Teams(vec![
+                    sanic_core::pr::TeamRef::new("sanic-hq", "zone"),
+                    sanic_core::pr::TeamRef::new("sanic-hq", "sanic-speedsters"),
+                ]),
+                Query::Orgs => Answer::Orgs(vec!["sanic-hq".into()]),
+                Query::RepoNames(_) => Answer::RepoNames {
+                    repos: std::collections::BTreeSet::from([sanic_core::repo::RepoName::new(
+                        "sanic-hq", "services",
+                    )]),
+                    complete: true,
+                },
+                Query::Repos(q) if q.contains("sanic-hq") => Answer::Count(1040),
+                Query::Repos(_) => Answer::Count(19),
+                Query::Prs(q) if q.contains("team-review-requested") => Answer::Count(9),
+                Query::Prs(q) if q.starts_with("author:@me") => Answer::Count(2),
+                Query::Prs(_) => Answer::Count(15),
+            };
+            Counted::Answer(q.clone(), answer)
+        })
+        .collect();
+    editor.counted(answers);
+    // Your teams, now in, are counted on the next plan.
+    for q in editor.want(SystemTime::UNIX_EPOCH) {
+        if let Query::Prs(team) = &q
+            && team.contains("team-review-requested")
+        {
+            // A count of its own for each team.
+            let n = if team.contains("sanic-speedsters") {
+                23
+            } else {
+                9
+            };
+            editor.counted(vec![Counted::Answer(q.clone(), Answer::Count(n))]);
+        }
+    }
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|frame| editor.render(frame)).unwrap();
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn every_comment_the_file_has_shows_where_it_sits() {
+    let text = "# About.\n\n[runner] # the runner\nmodel = \"m\" # for now\n# closing runner\n\n# above poll\n[poll]\nquiet_secs = 1\n\n[profile.p]\nrepos = [ # the repos\n  # about org\n  { github = \"org\" }, # on org\n  { github = \"else\" },\n  # more later\n]\nskip_titles = [\n  # about wip\n  \"wip*\",\n]\n# the end\n";
+    let editor = editor(text);
+    let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+    terminal.draw(|frame| editor.render(frame)).unwrap();
+    let screen = format!("{:?}", terminal.backend());
+    for comment in [
+        "# About.",
+        "[runner]  # the runner",
+        "model = \"m\"  # for now",
+        "# closing runner",
+        "# above poll",
+        "repos = [  # the repos",
+        "  # about org",
+        "{ github = \"org\" },  # on org",
+        "  # more later",
+        "  # about wip",
+        "# the end",
+    ] {
+        assert!(screen.contains(comment), "{comment:?} missing:\n{screen}");
+    }
+    // A comment inside a short list puts it an item a line.
+    assert!(!screen.contains("skip_titles = [\"wip*\"]"), "{screen}");
+}
+
+#[test]
+fn comments_in_empty_lists_and_profile_tables_show() {
+    let text = "[review_requests]\nteams = [ # none\n  # yet\n]\n\n# about profiles\n[profile]\n# above q\nq = { repos = [] } # after q\n";
+    let editor = editor(text);
+    let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+    terminal.draw(|frame| editor.render(frame)).unwrap();
+    let screen = format!("{:?}", terminal.backend());
+    for comment in [
+        "teams = [  # none",
+        "  # yet",
+        "# about profiles",
+        "# above q",
+        "[profile.q]  # after q",
+    ] {
+        assert!(screen.contains(comment), "{comment:?} missing:\n{screen}");
+    }
+}
+
+#[test]
+fn comments_closing_a_table_stay_with_it_when_the_file_orders_tables_otherwise() {
+    // The file has runner before poll, which the editor lists first.
+    let text =
+        "[runner]\nmodel = \"m\"\n# closing runner\n\n[poll]\nquiet_secs = 1\n\n# closing poll\n";
+    let editor = editor(text);
+    let lines: Vec<String> = editor
+        .file_lines(80)
+        .into_iter()
+        .map(|l| l.line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let at = |text: &str| {
+        lines
+            .iter()
+            .position(|l| l == text)
+            .unwrap_or_else(|| panic!("{text:?} missing: {lines:#?}"))
+    };
+    // Each after its own table's last key, a blank line before it, and
+    // not above the table that follows it here.
+    assert!(at("# closing runner") > at("model = \"m\""));
+    assert_eq!(lines[at("# closing runner") - 1], "");
+    assert!(at("# closing poll") > at("quiet_secs = 1"));
+    assert!(at("# closing poll") < at("[review_requests]"));
+    assert!(at("# closing runner") > at("[runner]"));
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("# closing")).count(),
+        2
+    );
+}
+
+/// The comments the view shows, from the file itself: each of the file's
+/// own is drawn in its comment style.
+fn shown_comments(editor: &ConfigEditor) -> Vec<String> {
+    let mut shown: Vec<String> = editor
+        .file_lines(200)
+        .into_iter()
+        .flat_map(|l| l.line.spans)
+        .filter(|span| span.style == render::COMMENT)
+        .map(|span| {
+            let text = span.content.trim_start();
+            let text = text.strip_prefix('#').unwrap_or(text);
+            text.strip_prefix(' ').unwrap_or(text).trim_end().to_owned()
+        })
+        .collect();
+    shown.sort();
+    shown
+}
+
+/// The comments in `text`, from every decor `toml_edit` parses it into:
+/// not from [`crate::config_doc::split_comments`], which the view uses,
+/// so a comment it misses can't go missing from both.
+fn file_comments(text: &str) -> Vec<String> {
+    fn raw(found: &mut Vec<String>, text: Option<&toml_edit::RawString>) {
+        let text = text
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default();
+        found.extend(
+            text.lines()
+                .filter_map(|line| line.trim().strip_prefix('#'))
+                .map(|c| c.strip_prefix(' ').unwrap_or(c).trim_end().to_owned()),
+        );
+    }
+    fn decor(found: &mut Vec<String>, decor: &toml_edit::Decor) {
+        raw(found, decor.prefix());
+        raw(found, decor.suffix());
+    }
+    fn key(found: &mut Vec<String>, key: &toml_edit::Key) {
+        decor(found, key.leaf_decor());
+        decor(found, key.dotted_decor());
+    }
+    fn in_value(found: &mut Vec<String>, value: &toml_edit::Value) {
+        decor(found, value.decor());
+        match value {
+            toml_edit::Value::Array(list) => {
+                list.iter().for_each(|v| in_value(found, v));
+                raw(found, Some(list.trailing()));
+            }
+            toml_edit::Value::InlineTable(table) => {
+                for (name, v) in table {
+                    table.key(name).into_iter().for_each(|k| key(found, k));
+                    in_value(found, v);
+                }
+                raw(found, Some(table.trailing()));
+            }
+            _ => {}
+        }
+    }
+    fn in_table(found: &mut Vec<String>, table: &toml_edit::Table) {
+        decor(found, table.decor());
+        for (name, item) in table {
+            table.key(name).into_iter().for_each(|k| key(found, k));
+            match item {
+                toml_edit::Item::Value(v) => in_value(found, v),
+                toml_edit::Item::Table(t) => in_table(found, t),
+                toml_edit::Item::ArrayOfTables(ts) => ts.iter().for_each(|t| in_table(found, t)),
+                toml_edit::Item::None => {}
+            }
+        }
+    }
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    let mut found = Vec::new();
+    in_table(&mut found, doc.as_table());
+    raw(&mut found, Some(doc.trailing()));
+    found.sort();
+    found
+}
+
+/// Configs in every shape the comment reviews turned up.
+const CORPUS: &[&str] = &[
+    // Header profiles, comments everywhere, tables in another order.
+    r#"# opens the file
+
+# the runner's own
+[runner] # on runner
+# above model
+model = "m" # on model
+# closes runner
+
+# the poll's own
+[poll]
+quiet_secs = 1
+
+[profile.a] # on a
+repos = [ # opening
+  # above x
+  { github = "o/x" }, # on x
+  { github = "o/y" } # on y, no comma
+  # closing
+]
+# closes a
+
+# the end
+"#,
+    // Dotted and inline profiles under an explicit [profile].
+    r#"[runner]
+model = "m"
+
+# closes runner
+# own of profile
+[profile] # on profile
+# above a
+a.repos = [{ github = "o" }] # after a
+# above b
+b = { repos = [{ github = "p" }] } # after b
+# closes the profiles
+
+# end
+"#,
+    // Arrays of tables, with and without their profile's header.
+    r#"[profile.a]
+# above entry
+[[profile.a.repos]] # on entry
+# above github
+github = "o" # on github
+
+# between entries
+[[profile.a.repos]]
+github = "p"
+
+# closes a
+[[profile.b.repos]]
+github = "q"
+# end of b
+"#,
+    // Dotted keys before any header, empty lists, no trailing commas.
+    r#"# about the dotted ones
+profile.a.repos = [ # empty
+  # nothing yet
+]
+review_requests.teams = [] # none
+# closes the dotted ones
+
+[runner] # last
+read_paths = ["x" # on x
+  ,"y" # on y
+] # after
+"#,
+    // A table the config doesn't take, and a key it doesn't either.
+    r#"[runner]
+model = "m"
+# above bogus
+bogus = 1 # on bogus
+
+# above foo
+[foo] # on foo
+# above bar
+bar = [1, # on 1
+  2]
+# closes foo
+
+[profile.a]
+repos = [{ github = "o" }]
+"#,
+    // Only comments.
+    "# just a comment\n\n# and another\n",
+    // A `#` in a string isn't a comment; no newline at the end.
+    "[runner]\nclaude = \"c # not a comment\" # real\nmodel = '''m\n# still the string\n''' # after\n# the end",
+    // An unknown table with one under it, a key before any header, and a
+    // profile key the config doesn't take.
+    r#"# about x
+x = 1 # on x
+
+[foo.sub] # on sub
+# above k
+k = 2
+
+# closes sub
+[profile.a]
+repos = [{ github = "o" }]
+# above odd
+odd = true # on odd
+"#,
+    // Comments set apart between two parts of a table the config doesn't
+    // take, or of one inside a table or profile: they're its own.
+    r#"[runner]
+model = "m"
+# apart in runner
+
+[runner.extra]
+k = 1
+
+[foo]
+a = 1
+# apart in foo
+
+[foo.sub]
+b = 2
+
+[[bar]]
+c = 1
+# between bars
+
+[[bar]]
+c = 2
+
+[profile.a]
+repos = [{ github = "o" }]
+# apart in a
+
+[profile.a.extra]
+x = 1
+"#,
+    // Multi-line strings that end with quotes of their own.
+    r#"[foo]
+a = """x"""" # after four
+b = '''y''''' # after five
+c = """""" # after an empty one
+"#,
+];
+
+#[test]
+fn every_comment_in_the_file_shows_once() {
+    for text in CORPUS {
+        let editor = editor(text);
+        assert_eq!(
+            shown_comments(&editor),
+            file_comments(text),
+            "in\n{text}\nthe view has\n{:#?}",
+            editor
+                .file_lines(200)
+                .into_iter()
+                .map(|l| l
+                    .line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn every_comment_still_shows_once_after_edits() {
+    for text in CORPUS {
+        let mut editor = editor(text);
+        let edits = [
+            Op::AddProfile { name: "new".into() },
+            Op::Set {
+                key: key_of(Table::Github, "api_url"),
+                value: Scalar::Text("http://x".into()),
+            },
+            Op::MoveProfile {
+                name: "new".into(),
+                to: 0,
+            },
+        ];
+        for op in edits {
+            // Some shapes refuse some edits; the rest must still hold.
+            let _ = editor.doc.apply(op);
+            let written = editor.doc.text();
+            assert_eq!(
+                shown_comments(&editor),
+                file_comments(&written),
+                "after edits, in\n{written}"
+            );
+        }
+    }
 }

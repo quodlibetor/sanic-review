@@ -203,13 +203,16 @@ activity and the log, plus a config editor. Its keys:
 The dashboard uses the same keys where they make sense in a browser; `?`
 lists them.
 
-**The config editor** (`e`, `setup`, or a first `serve`) lists the tables
-on the left and their keys on the right, unset ones showing their default:
+**The config editor** (`e`, `setup`, or a first `serve`) reads as the config
+file, each key commented with what it does, unset ones commented out with
+their default, and says under it what the config does: the repos it
+watches, the reviews you're asked for, your open PRs.
 
 | Key | Does |
 |-----|------|
-| Tab, `j`/`k`, `g`/`G` | switch sides, move, jump to first/last |
-| Enter | edit a key, flip a bool, or open a repo entry |
+| `j`/`k`, `g`/`G` | move a row, jump to first/last |
+| Tab, `]` / Shift-Tab, `[` | the next table / the one before |
+| Enter | edit a key, flip a bool, open a repo entry, rename a profile |
 | `+` / `-` | add or remove a list item, repo entry, glob or profile |
 | `K` / `J` | move one up or down, since order decides what wins |
 | `f` | suggest teams, orgs and checkouts, models, skills or instructions |
