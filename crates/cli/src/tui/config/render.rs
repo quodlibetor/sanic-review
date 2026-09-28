@@ -15,6 +15,7 @@ use super::{
     Check, ConfigEditor, Focus, Input, Popup, Typing,
     counts::{EntryId, EntryPlan, Stopped, Tally},
     rows::{EntryEdit, EntryRow, KINDS, Row, Shown, entries, entry_text, items, kind_label, shown},
+    suggest::{Suggest, What},
 };
 use crate::config_doc::{
     EntryKind, Key, Table,
@@ -83,6 +84,7 @@ impl ConfigEditor {
                 ),
                 " y save · any other key cancels",
             ),
+            Some(Popup::Suggest(suggest)) => self.render_suggest(frame, suggest),
             Some(Popup::RemoveProfile(name)) => render_question(
                 frame,
                 " Remove profile? ",
@@ -468,7 +470,7 @@ impl ConfigEditor {
             (Some(_), _, _) => "Enter set · blank unsets · Esc cancel · Tab complete ",
             (None, Some(_), _) => "Space kind · + glob · - remove · Esc back · ? help ",
             (None, None, Focus::Tables) => "+ profile · - remove · K/J move · ^S save · ? help ",
-            (None, None, Focus::Keys) => "+ add · - remove · u unset · ^S save · ? help ",
+            (None, None, Focus::Keys) => "+ add · - remove · f find · u unset · ^S save · ? ",
         };
         let [left, right] = Layout::horizontal([
             Constraint::Fill(1),
@@ -477,6 +479,81 @@ impl ConfigEditor {
         .areas(status);
         frame.render_widget(Paragraph::new(state), left);
         frame.render_widget(Paragraph::new(hint.dim()), right);
+    }
+
+    fn render_suggest(&self, frame: &mut Frame<'_>, suggest: &Suggest) {
+        let area = frame.area().inner(Margin::new(3, 2));
+        frame.render_widget(Clear, area);
+        let title = match &suggest.what {
+            What::Teams { .. } => " Count review requests to these teams ".to_owned(),
+            What::Repos { profile } => format!(" Watch in [profile.{profile}] "),
+            What::Model { key } => format!(" {key} "),
+            What::Skills { profile } => format!(" Skills for [profile.{profile}] "),
+            What::Instructions { profile } => format!(" Instructions for [profile.{profile}] "),
+        };
+        let block = Block::bordered().title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let repos = matches!(suggest.what, What::Repos { .. });
+        let [head, body, footer] = Layout::vertical([
+            Constraint::Length(u16::from(repos) * 2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        if repos {
+            let root = self
+                .typed(&Input::ScanRoot)
+                .unwrap_or_else(|| Line::raw(suggest.root.clone()));
+            let mut spans = vec![Span::raw(" checkouts under ")];
+            spans.extend(root.spans);
+            spans.push(Span::raw(format!(", {} deep", suggest.depth)));
+            if suggest.finding {
+                spans.push("  scanning…".dim());
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), head);
+        }
+        let items: Vec<ListItem<'_>> = suggest
+            .rows
+            .iter()
+            .map(|row| {
+                let mark = match (suggest.picks_one(), row.on) {
+                    (true, _) => "",
+                    (false, true) => "[x] ",
+                    (false, false) => "[ ] ",
+                };
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!(" {mark}{}  ", row.label)),
+                    row.detail.clone().dim(),
+                ]))
+            })
+            .collect();
+        let empty = if suggest.finding {
+            " looking…"
+        } else if repos {
+            " s scans for checkouts"
+        } else {
+            " nothing new to suggest"
+        };
+        if items.is_empty() {
+            frame.render_widget(Paragraph::new(empty.dim()), body);
+        } else {
+            let mut state = ListState::default().with_selected(Some(suggest.cursor));
+            frame.render_stateful_widget(
+                List::new(items).highlight_style(highlight(true)),
+                body,
+                &mut state,
+            );
+        }
+        let hint = match &suggest.what {
+            What::Model { .. } => " Enter set · Esc cancel",
+            What::Teams { .. } => " Space tick · Enter write · Esc cancel",
+            What::Repos { .. } => {
+                " Space pick · Enter add · s scan · d directory · </> depth · Esc cancel"
+            }
+            _ => " Space pick · Enter add · Esc cancel",
+        };
+        frame.render_widget(Paragraph::new(hint.dim()), footer);
     }
 
     fn render_diff(&self, frame: &mut Frame<'_>, scroll: u16, saving: bool) {
@@ -596,6 +673,7 @@ const HELP: &[(&str, &str)] = &[
     ("+", "add a list item, repo entry, glob or profile"),
     ("-", "remove it; a profile asks first"),
     ("K/J", "move an item, entry or profile up or down"),
+    ("f", "suggest teams, repos, models, skills or instructions"),
     ("u", "unset the key, back to its default"),
     ("v", "show the changes"),
     ("Ctrl-S", "save, after showing the changes"),

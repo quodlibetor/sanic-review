@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│  │                                                                        │  │"
 "│  │ y write it · j/k scroll · any other key keeps editing                  │  │"
 "│ s└────────────────────────────────────────────────────────────────────────┘  │"
-"│ ✓ loads                        + add · - remove · u unset · ^S save · ? help │"
+"│ ✓ loads                    + add · - remove · f find · u unset · ^S save · ? │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

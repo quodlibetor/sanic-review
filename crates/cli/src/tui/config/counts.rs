@@ -42,6 +42,7 @@ pub trait EditorGithub: Send + Sync + 'static {
         pages: NonZeroUsize,
     ) -> impl Future<Output = Result<Searched, ApiError>> + Send;
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>> + Send;
+    fn my_orgs(&self) -> impl Future<Output = Result<Vec<String>, ApiError>> + Send;
 }
 
 impl EditorGithub for Client {
@@ -63,6 +64,10 @@ impl EditorGithub for Client {
 
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>> + Send {
         Client::my_teams(self)
+    }
+
+    fn my_orgs(&self) -> impl Future<Output = Result<Vec<String>, ApiError>> + Send {
+        Client::my_orgs(self)
     }
 }
 
@@ -90,6 +95,8 @@ pub enum Query {
     RepoNames(String),
     /// Your teams.
     Teams,
+    /// The orgs you're in, to suggest.
+    Orgs,
 }
 
 /// GitHub's answer to a [`Query`].
@@ -105,6 +112,7 @@ pub enum Answer {
     /// The search failed, for this reason; it's asked again after the
     /// next edit.
     Failed(String),
+    Orgs(Vec<String>),
 }
 
 /// Why counting stopped.
@@ -433,6 +441,8 @@ pub struct Plan {
     pub team_requests: Vec<(TeamRef, String)>,
     /// PRs the window hides, while `poll` is selected.
     pub older: Vec<String>,
+    /// Whether your orgs are wanted, to suggest for a profile's repos.
+    pub orgs_to_suggest: bool,
 }
 
 /// What of the config the plan is for.
@@ -465,6 +475,7 @@ impl Plan {
         };
         match showing {
             Showing::Profile(name) => {
+                plan.orgs_to_suggest = true;
                 for entry in watched.profiles.get(name).into_iter().flatten() {
                     let scope = watched.entry_scope(entry);
                     let (repos, claimed) = match &entry.scope {
@@ -549,6 +560,9 @@ impl Plan {
                 .map(|(_, q)| Query::Prs(q.clone())),
         );
         wanted.extend(self.older.iter().cloned().map(Query::Prs));
+        if self.orgs_to_suggest {
+            wanted.push(Query::Orgs);
+        }
         let mut seen = std::collections::HashSet::new();
         wanted.retain(|q| seen.insert(q.clone()));
         wanted
@@ -573,6 +587,15 @@ impl Tally<'_> {
             .iter()
             .map(|q| self.count(&Query::Prs(q.clone())))
             .sum()
+    }
+
+    /// The orgs you're in, once they're in.
+    #[must_use]
+    pub fn orgs(&self) -> Option<&[String]> {
+        match self.0.get(&Query::Orgs) {
+            Some(Answer::Orgs(orgs)) => Some(orgs),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -874,6 +897,7 @@ async fn ask<G: EditorGithub>(github: &G, query: &Query) -> Result<Answer, Refus
                 })
         }
         Query::Teams => github.my_teams().await.map(Answer::Teams),
+        Query::Orgs => github.my_orgs().await.map(Answer::Orgs),
     };
     answer.map_err(|err| match err {
         ApiError::RateLimited { retry_after } => {
@@ -974,6 +998,11 @@ mod tests {
         async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
             self.answer("teams")?;
             Ok(vec![TeamRef::new("org", "x")])
+        }
+
+        async fn my_orgs(&self) -> Result<Vec<String>, ApiError> {
+            self.answer("orgs")?;
+            Ok(vec!["org".into()])
         }
     }
 
@@ -1321,6 +1350,9 @@ mod tests {
                 })
             }
             async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
+                Ok(Vec::new())
+            }
+            async fn my_orgs(&self) -> Result<Vec<String>, ApiError> {
                 Ok(Vec::new())
             }
         }

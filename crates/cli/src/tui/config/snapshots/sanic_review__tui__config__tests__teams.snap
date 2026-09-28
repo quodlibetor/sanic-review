@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: draw(&editor).backend()
+---
+"┌ Config /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml┐"
+"│ github            │  [review_requests]                                       │"
+"│ p┌ Count review requests to these teams ──────────────────────────────────┐  │"
+"│ r│ [x] org/storage                                                        │  │"
+"│ r│ [x] org/zone                                                           │  │"
+"│ p│                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│  │                                                                        │  │"
+"│ ≤│ Space tick · Enter write · Esc cancel                                  │r │"
+"│ w└────────────────────────────────────────────────────────────────────────┘xc│"
+"│ ✓ loads                    + add · - remove · f find · u unset · ^S save · ? │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

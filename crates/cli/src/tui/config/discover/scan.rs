@@ -1,4 +1,4 @@
-//! Finding local checkouts to offer in `setup`.
+//! Finding local checkouts to offer.
 
 use std::path::{Path, PathBuf};
 

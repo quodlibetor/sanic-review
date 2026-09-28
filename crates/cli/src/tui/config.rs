@@ -5,8 +5,10 @@
 mod check;
 mod complete;
 pub mod counts;
+pub mod discover;
 mod render;
 mod rows;
+mod suggest;
 
 use std::{
     collections::HashMap,
@@ -23,6 +25,8 @@ use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watche
 use self::rows::{
     EntryEdit, EntryRow, KINDS, Row, Shown, entries, items, rows, scalar_text, shown,
 };
+use self::suggest::{Apply, Suggest, Suggestion, What};
+pub use self::suggest::{Find, Found};
 use crate::config_doc::{
     ConfigDoc, Key, Op, RepoEntry, Saved, Scalar, Setting, Table,
     schema::{Fallback, Kind},
@@ -64,6 +68,8 @@ pub struct ConfigEditor {
     serve_window: Option<Serving>,
     /// A save is being written.
     saving: bool,
+    /// Models to suggest and complete.
+    models: Vec<String>,
 }
 
 /// The recency window `serve` shows, in days; `None` is any age.
@@ -101,6 +107,8 @@ enum Input {
     NewProfile,
     /// A field of the open repo entry.
     Entry(EntryRow),
+    /// Where `f` scans for checkouts.
+    ScanRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +126,8 @@ enum Popup {
     Held(u32),
     /// Waiting for a yes before removing this profile.
     RemoveProfile(String),
+    /// `f`'s suggestions for a key.
+    Suggest(Box<Suggest>),
 }
 
 /// What a key did to the editor.
@@ -138,6 +148,8 @@ pub enum Outcome {
     Save {
         told: u32,
     },
+    /// Find this and hand it to [`ConfigEditor::found`].
+    Find(Find),
 }
 
 impl ConfigEditor {
@@ -166,6 +178,7 @@ impl ConfigEditor {
             waiting: false,
             serve_window: None,
             saving: false,
+            models: Vec::new(),
         }
     }
 
@@ -250,6 +263,243 @@ impl ConfigEditor {
     /// differs.
     pub fn set_serve_window(&mut self, days: Option<u32>) {
         self.serve_window = Some(Serving(days));
+    }
+
+    /// The models `f` suggests and Tab completes for a `model`.
+    pub fn set_models(&mut self, models: Vec<String>) {
+        self.models = models;
+    }
+
+    /// What [`Outcome::Find`] found.
+    pub fn found(&mut self, found: Found) {
+        let Some(Popup::Suggest(suggest)) = &mut self.popup else {
+            if let Found::Failed(why) = found {
+                self.notice = Some(why);
+            }
+            return;
+        };
+        // A find outlives the popup that asked for it: what a closed one
+        // asked for isn't this one's to show.
+        let asked = suggest.finding
+            && match (&found, &suggest.what) {
+                (Found::Checkouts(_), What::Repos { .. }) | (Found::Failed(_), _) => true,
+                (
+                    Found::Extras { profile, .. },
+                    What::Skills { profile: for_ } | What::Instructions { profile: for_ },
+                ) => profile == for_,
+                _ => false,
+            };
+        if !asked {
+            return;
+        }
+        suggest.finding = false;
+        let present = present_entries(&self.doc, &self.path);
+        match found {
+            Found::Checkouts(checkouts) => {
+                for found in checkouts {
+                    let label = contract_path(&found.path);
+                    let org = found.repo.owner.to_ascii_lowercase();
+                    if !present.orgs.contains(&org) && !suggest.rows.iter().any(|r| r.label == org)
+                    {
+                        suggest
+                            .rows
+                            .push(org_row(&org, "an owner of checkouts found"));
+                    }
+                    // A scan again, deeper, finds what the last one did.
+                    if !present.checkouts.contains(&found.path)
+                        && !suggest.rows.iter().any(|r| r.label == label)
+                    {
+                        suggest.rows.push(Suggestion {
+                            label: label.clone(),
+                            detail: found.repo.to_string(),
+                            on: false,
+                            apply: Apply::Entry(RepoEntry::Checkout {
+                                path: label,
+                                remote: None,
+                            }),
+                        });
+                    }
+                }
+            }
+            Found::Extras {
+                skills,
+                instructions,
+                ..
+            } => match &suggest.what {
+                What::Skills { .. } => {
+                    suggest.rows = skills
+                        .into_iter()
+                        .map(|skill| Suggestion {
+                            label: skill.name,
+                            detail: format!(
+                                "{}  {}",
+                                skill.description.unwrap_or_default(),
+                                contract_path(&skill.dir)
+                            ),
+                            on: false,
+                            apply: Apply::Item(contract_path(&skill.dir)),
+                        })
+                        .collect();
+                }
+                _ => {
+                    suggest.rows = instructions
+                        .into_iter()
+                        .map(|file| Suggestion {
+                            label: contract_path(&file),
+                            detail: String::new(),
+                            on: false,
+                            apply: Apply::Item(contract_path(&file)),
+                        })
+                        .collect();
+                }
+            },
+            Found::Failed(why) => self.notice = Some(why),
+        }
+    }
+
+    /// `f`: suggestions for the selected key.
+    fn suggest(&mut self) -> Outcome {
+        let row = self.current_row();
+        let key = row.as_ref().and_then(Row::key);
+        let tally = Tally(&self.answers);
+        match (&row, key) {
+            (_, Some(key)) if key.table == Table::ReviewRequests && key.name == "teams" => {
+                let Some(teams) = tally.teams() else {
+                    self.notice = Some("your teams aren't in yet".into());
+                    return Outcome::Open;
+                };
+                let patterns = match self.doc.list(&key) {
+                    Setting::Set(patterns) => patterns,
+                    Setting::Unset | Setting::Invalid(_) => vec!["*".into()],
+                };
+                self.popup = Some(Popup::Suggest(Box::new(Suggest::teams(teams, patterns))));
+            }
+            (Some(Row::Entry(profile, _) | Row::NoEntries(profile)), _) => {
+                let present = present_entries(&self.doc, &self.path);
+                let mut orgs: Vec<(String, &str)> = Vec::new();
+                for org in tally.orgs().into_iter().flatten() {
+                    orgs.push((org.to_ascii_lowercase(), "one of your orgs"));
+                }
+                for team in tally.teams().into_iter().flatten() {
+                    orgs.push((team.org.to_ascii_lowercase(), "one of your teams' orgs"));
+                }
+                let mut rows: Vec<Suggestion> = Vec::new();
+                for (org, why) in orgs {
+                    if !present.orgs.contains(&org) && !rows.iter().any(|r| r.label == org) {
+                        rows.push(org_row(&org, why));
+                    }
+                }
+                let what = What::Repos {
+                    profile: profile.clone(),
+                };
+                self.popup = Some(Popup::Suggest(Box::new(Suggest::new(what, rows))));
+            }
+            (_, Some(key)) if key.name == "model" => {
+                let rows = self
+                    .models
+                    .iter()
+                    .map(|model| Suggestion {
+                        label: model.clone(),
+                        detail: String::new(),
+                        on: false,
+                        apply: Apply::Model(model.clone()),
+                    })
+                    .collect();
+                self.popup = Some(Popup::Suggest(Box::new(Suggest::new(
+                    What::Model { key },
+                    rows,
+                ))));
+            }
+            (_, Some(key)) if matches!(key.name, "skills" | "instructions") => {
+                let Table::Profile(profile) = key.table.clone() else {
+                    return Outcome::Open;
+                };
+                let what = if key.name == "skills" {
+                    What::Skills {
+                        profile: profile.clone(),
+                    }
+                } else {
+                    What::Instructions {
+                        profile: profile.clone(),
+                    }
+                };
+                let mut suggest = Suggest::new(what, Vec::new());
+                suggest.finding = true;
+                self.popup = Some(Popup::Suggest(Box::new(suggest)));
+                let listed = |name| {
+                    Key::new(Table::Profile(profile.clone()), name)
+                        .map(|k| items(&self.doc, &k))
+                        .unwrap_or_default()
+                };
+                return Outcome::Find(Find::Extras {
+                    entries: entries(&self.doc, &profile)
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .collect(),
+                    skills: listed("skills"),
+                    instructions: listed("instructions"),
+                    profile,
+                });
+            }
+            _ => {
+                self.notice = Some(
+                    "f suggests teams, repos, models, skills and instructions for those keys"
+                        .into(),
+                );
+            }
+        }
+        Outcome::Open
+    }
+
+    /// Keys on `f`'s suggestions.
+    fn suggest_key(&mut self, mut suggest: Box<Suggest>, key: KeyEvent) -> Outcome {
+        let repos = matches!(suggest.what, What::Repos { .. });
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                suggest.cursor = (suggest.cursor + 1).min(suggest.rows.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => suggest.cursor = suggest.cursor.saturating_sub(1),
+            KeyCode::Char(' ') if !suggest.picks_one() => suggest.toggle(),
+            KeyCode::Char('s') if repos && !suggest.finding => {
+                suggest.finding = true;
+                let find = Find::Checkouts {
+                    root: suggest.root.clone(),
+                    depth: suggest.depth,
+                };
+                self.popup = Some(Popup::Suggest(suggest));
+                return Outcome::Find(find);
+            }
+            KeyCode::Char('d') if repos => {
+                let root = suggest.root.clone();
+                self.popup = Some(Popup::Suggest(suggest));
+                self.start_typing(Input::ScanRoot, root);
+                return Outcome::Open;
+            }
+            KeyCode::Char('<') if repos => suggest.depth = suggest.depth.saturating_sub(1),
+            KeyCode::Char('>') if repos => suggest.depth += 1,
+            KeyCode::Enter => {
+                let ops = suggest.ops();
+                if ops.is_empty() {
+                    self.notice = Some(
+                        if suggest.picks_one() || matches!(suggest.what, What::Teams { .. }) {
+                            "nothing changed".into()
+                        } else {
+                            "Space picks what to add".into()
+                        },
+                    );
+                    return Outcome::Open;
+                }
+                let mut outcome = Outcome::Open;
+                for op in ops {
+                    outcome = self.apply(op);
+                }
+                return outcome;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => return Outcome::Open,
+            _ => {}
+        }
+        self.popup = Some(Popup::Suggest(suggest));
+        Outcome::Open
     }
 
     /// The save [`Outcome::Save`] asked for is being written.
@@ -379,11 +629,12 @@ impl ConfigEditor {
             self.notice = Some("still saving".into());
             return Outcome::Open;
         }
-        if let Some(popup) = self.popup.take() {
-            return self.popup_key(popup, key);
-        }
+        // Typing first: a scan's directory is typed over its suggestions.
         if let Some(typing) = self.typing.take() {
             return self.typing_key(typing, key);
+        }
+        if let Some(popup) = self.popup.take() {
+            return self.popup_key(popup, key);
         }
         match key.code {
             KeyCode::Char('s') if ctrl => self.ask_save(),
@@ -412,6 +663,7 @@ impl ConfigEditor {
             KeyCode::Char('u') => return self.unset(),
             KeyCode::Char('+') => self.add(),
             KeyCode::Char('-') => return self.remove(),
+            KeyCode::Char('f') => return self.suggest(),
             KeyCode::Char('K') => return self.shift(-1),
             KeyCode::Char('J') => return self.shift(1),
             _ => {}
@@ -421,6 +673,7 @@ impl ConfigEditor {
 
     fn popup_key(&mut self, popup: Popup, key: KeyEvent) -> Outcome {
         match (popup, key.code) {
+            (Popup::Suggest(suggest), _) => return self.suggest_key(suggest, key),
             (Popup::Diff { scroll, saving }, KeyCode::Char('j') | KeyCode::Down) => {
                 self.popup = Some(Popup::Diff {
                     scroll: scroll.saturating_add(1),
@@ -504,8 +757,21 @@ impl ConfigEditor {
             }
             KeyCode::Enter => return self.commit(&typing.into, typing.text.trim()),
             KeyCode::Char('u') if ctrl => typing.text.clear(),
+            KeyCode::Tab if matches!(&typing.into, Input::Scalar(k) if k.name == "model") => {
+                if let Some(done) = complete_model(&self.models, &typing.text) {
+                    typing.text = done;
+                }
+            }
             KeyCode::Tab if self.completes_paths(&typing.into) => {
-                let base = self.path.parent().unwrap_or(Path::new("."));
+                // The scan's directory resolves as `setup`'s did, against
+                // the working directory; the config's paths against its own.
+                let cwd;
+                let base = if typing.into == Input::ScanRoot {
+                    cwd = std::env::current_dir().unwrap_or_default();
+                    &cwd
+                } else {
+                    self.path.parent().unwrap_or(Path::new("."))
+                };
                 let home = std::env::home_dir();
                 if let Some(done) = complete::complete_path(&typing.text, base, home.as_deref()) {
                     typing.text = done;
@@ -528,6 +794,7 @@ impl ConfigEditor {
                 .entry
                 .as_ref()
                 .is_some_and(|e| e.entry.kind() != crate::config_doc::EntryKind::Github),
+            Input::ScanRoot => true,
             _ => false,
         }
     }
@@ -752,6 +1019,16 @@ impl ConfigEditor {
                 return outcome;
             }
             Input::Entry(row) => return self.commit_entry(row, text),
+            Input::ScanRoot => {
+                if let Some(Popup::Suggest(suggest)) = &mut self.popup {
+                    suggest.root = if text.is_empty() {
+                        suggest::ROOT.into()
+                    } else {
+                        text.to_owned()
+                    };
+                }
+                return Outcome::Open;
+            }
         };
         self.apply(op)
     }
@@ -1112,6 +1389,69 @@ impl ConfigEditor {
             Focus::Keys => self.row = target.min(self.rows().len().saturating_sub(1)),
         }
     }
+}
+
+/// What every profile's entries already name: whole orgs, lowercased,
+/// and checkouts, expanded against the config's directory.
+struct Present {
+    orgs: Vec<String>,
+    checkouts: Vec<PathBuf>,
+}
+
+fn present_entries(doc: &ConfigDoc, path: &Path) -> Present {
+    let base = path.parent().unwrap_or(Path::new("."));
+    let mut present = Present {
+        orgs: Vec::new(),
+        checkouts: Vec::new(),
+    };
+    for profile in doc.profiles() {
+        for entry in entries(doc, &profile).into_iter().flatten() {
+            match entry {
+                RepoEntry::Github { name, .. } if !name.contains('/') => {
+                    present.orgs.push(name.to_ascii_lowercase());
+                }
+                RepoEntry::Checkout { path, .. } | RepoEntry::Scoped { path, .. } => {
+                    if let Ok(path) = sanic_core::config::expand_path(&path, base) {
+                        present.checkouts.push(path);
+                    }
+                }
+                RepoEntry::Github { .. } => {}
+            }
+        }
+    }
+    present
+}
+
+fn org_row(org: &str, why: &str) -> Suggestion {
+    Suggestion {
+        label: org.to_owned(),
+        detail: format!("every repo in it · {why}"),
+        on: false,
+        apply: Apply::Entry(RepoEntry::Github {
+            name: org.to_owned(),
+            paths: Vec::new(),
+        }),
+    }
+}
+
+/// `typed` completed to the one model it matches, or as far as the
+/// models starting with it agree.
+fn complete_model(models: &[String], typed: &str) -> Option<String> {
+    let starting: Vec<&String> = models
+        .iter()
+        .filter(|m| m.to_lowercase().starts_with(&typed.to_lowercase()))
+        .collect();
+    let (first, rest) = starting.split_first()?;
+    let mut common = (*first).clone();
+    for model in rest {
+        let agreed = common
+            .char_indices()
+            .zip(model.chars())
+            .find(|((_, a), b)| !a.eq_ignore_ascii_case(b))
+            .map_or(common.len().min(model.len()), |((at, _), _)| at);
+        common.truncate(agreed);
+    }
+    (common.len() > typed.len()).then_some(common)
 }
 
 #[cfg(test)]

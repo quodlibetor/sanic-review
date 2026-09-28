@@ -1,4 +1,4 @@
-//! Models to suggest at setup's model prompt. Suggestions only: any answer is
+//! Models to suggest for `model`. Suggestions only: any answer is
 //! accepted, since Bedrock, Vertex and proxy ids can't be listed.
 
 use std::path::{Path, PathBuf};

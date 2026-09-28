@@ -483,6 +483,7 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
         .map(|q| {
             let answer = match q {
                 Query::Teams => Answer::Teams(vec![sanic_core::pr::TeamRef::new("org", "x")]),
+                Query::Orgs => Answer::Orgs(vec!["org".into()]),
                 Query::RepoNames(_) => Answer::RepoNames {
                     repos: std::collections::BTreeSet::from([sanic_core::repo::RepoName::new(
                         "org", "api",
@@ -667,4 +668,194 @@ fn entries_on_one_checkout_through_two_remotes_keep_their_own_counts() {
     };
     assert!(fork.contains("repo:fork/src"), "{fork}");
     assert!(up.contains("repo:up/src"), "{up}");
+}
+
+fn answer(editor: &mut ConfigEditor, query: Query, answer: Answer) {
+    editor.counted(vec![Counted::Answer(query, answer)]);
+}
+
+#[test]
+fn f_ticks_your_teams_into_the_filter() {
+    let mut editor = editor(CONFIG);
+    select(&mut editor, 2, 0);
+    let _ = press(&mut editor, KeyCode::Char('f'));
+    assert_eq!(editor.notice.as_deref(), Some("your teams aren't in yet"));
+    answer(
+        &mut editor,
+        Query::Teams,
+        Answer::Teams(vec![
+            sanic_core::pr::TeamRef::new("org", "zone"),
+            sanic_core::pr::TeamRef::new("org", "storage"),
+        ]),
+    );
+    let _ = press(&mut editor, KeyCode::Char('f'));
+    insta::assert_snapshot!("teams", draw(&editor).backend());
+    let _ = press(&mut editor, KeyCode::Char(' '));
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(
+        editor
+            .doc
+            .text()
+            .contains("teams = [\"*\", \"!org/storage\"]"),
+        "{}",
+        editor.doc.text()
+    );
+}
+
+#[test]
+fn f_on_repos_suggests_orgs_and_scans_for_checkouts() {
+    let mut editor = editor(CONFIG);
+    answer(
+        &mut editor,
+        Query::Orgs,
+        Answer::Orgs(vec!["org".into(), "other".into()]),
+    );
+    select(&mut editor, 4, 7);
+    let _ = press(&mut editor, KeyCode::Char('f'));
+    let Some(Popup::Suggest(suggest)) = &editor.popup else {
+        panic!("no suggestions");
+    };
+    let labels: Vec<&str> = suggest.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["other"], "org is watched already");
+    // Type another directory to scan, then scan it.
+    let _ = press(&mut editor, KeyCode::Char('d'));
+    let _ = ctrl(&mut editor, 'u');
+    typed(&mut editor, "/src");
+    let _ = press(&mut editor, KeyCode::Enter);
+    let _ = press(&mut editor, KeyCode::Char('<'));
+    assert_eq!(
+        press(&mut editor, KeyCode::Char('s')),
+        Outcome::Find(Find::Checkouts {
+            root: "/src".into(),
+            depth: 2
+        })
+    );
+    editor.found(Found::Checkouts(vec![discover::scan::Found {
+        path: PathBuf::from("/src/tool"),
+        repo: sanic_core::repo::RepoName::new("Else", "tool"),
+    }]));
+    insta::assert_snapshot!("repos_found", draw(&editor).backend());
+    let _ = press(&mut editor, KeyCode::Char('G'));
+    let _ = press(&mut editor, KeyCode::Char('j'));
+    let _ = press(&mut editor, KeyCode::Char('j'));
+    let _ = press(&mut editor, KeyCode::Char(' '));
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(
+        editor
+            .doc
+            .text()
+            .contains("repos = [{ github = \"org\" }, \"/src/tool\"]"),
+        "{}",
+        editor.doc.text()
+    );
+}
+
+#[test]
+fn models_are_suggested_and_complete_as_typed() {
+    let mut editor = editor(CONFIG);
+    editor.set_models(vec!["auto".into(), "opus".into(), "claude-sonnet-5".into()]);
+    // runner.model
+    select(&mut editor, 3, 4);
+    let _ = press(&mut editor, KeyCode::Char('f'));
+    let _ = press(&mut editor, KeyCode::Char('j'));
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(
+        editor.doc.text().contains("model = \"opus\""),
+        "{}",
+        editor.doc.text()
+    );
+    let _ = press(&mut editor, KeyCode::Enter);
+    let _ = ctrl(&mut editor, 'u');
+    typed(&mut editor, "Cl");
+    let _ = press(&mut editor, KeyCode::Tab);
+    assert_eq!(text(&editor), Some("claude-sonnet-5"));
+}
+
+#[test]
+fn f_on_skills_asks_for_whats_in_the_checkouts_and_adds_what_you_pick() {
+    let mut editor = editor(CONFIG);
+    select(&mut editor, 4, 2);
+    let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
+        panic!("nothing to find");
+    };
+    assert_eq!(profile, "ring");
+    editor.found(Found::Extras {
+        profile,
+        skills: vec![discover::skills::Skill {
+            dir: PathBuf::from("/src/.claude/skills/review"),
+            name: "review".into(),
+            description: Some("Reviews.".into()),
+        }],
+        instructions: vec![PathBuf::from("/src/CLAUDE.md")],
+    });
+    let _ = press(&mut editor, KeyCode::Char(' '));
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(
+        editor
+            .doc
+            .text()
+            .contains("skills = [\"/src/.claude/skills/review\"]"),
+        "{}",
+        editor.doc.text()
+    );
+}
+
+#[test]
+fn finds_land_once_and_only_on_the_popup_that_asked() {
+    let mut editor = editor(CONFIG);
+    answer(
+        &mut editor,
+        Query::Orgs,
+        Answer::Orgs(vec!["ORG".into(), "Other".into()]),
+    );
+    // A profile's repos: orgs you're in are matched without case.
+    select(&mut editor, 4, 7);
+    let _ = press(&mut editor, KeyCode::Char('f'));
+    let Some(Popup::Suggest(suggest)) = &editor.popup else {
+        panic!("no suggestions");
+    };
+    let labels: Vec<&str> = suggest.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["other"], "org is watched already");
+    let checkout = || {
+        Found::Checkouts(vec![discover::scan::Found {
+            path: PathBuf::from("/src/tool"),
+            repo: sanic_core::repo::RepoName::new("else", "tool"),
+        }])
+    };
+    // Nothing was asked for yet.
+    editor.found(checkout());
+    let Some(Popup::Suggest(suggest)) = &editor.popup else {
+        panic!("no suggestions");
+    };
+    assert_eq!(suggest.rows.len(), 1);
+    // Scanning twice offers each checkout once.
+    for _ in 0..2 {
+        let _ = press(&mut editor, KeyCode::Char('s'));
+        editor.found(checkout());
+    }
+    let Some(Popup::Suggest(suggest)) = &editor.popup else {
+        panic!("no suggestions");
+    };
+    let labels: Vec<&str> = suggest.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["other", "else", "/src/tool"]);
+
+    // Skills a closed popup asked for don't land on another profile's.
+    let _ = press(&mut editor, KeyCode::Esc);
+    select(&mut editor, 4, 2);
+    let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
+        panic!("nothing to find");
+    };
+    editor.found(Found::Extras {
+        profile: format!("not-{profile}"),
+        skills: vec![discover::skills::Skill {
+            dir: PathBuf::from("/elsewhere/review"),
+            name: "review".into(),
+            description: None,
+        }],
+        instructions: Vec::new(),
+    });
+    let Some(Popup::Suggest(suggest)) = &editor.popup else {
+        panic!("no suggestions");
+    };
+    assert!(suggest.rows.is_empty() && suggest.finding);
 }

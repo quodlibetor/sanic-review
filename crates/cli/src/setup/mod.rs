@@ -1,7 +1,5 @@
 //! `sanic-review setup`: write or update the config interactively.
 
-mod models;
-mod scan;
 pub mod skills;
 
 use std::{
@@ -32,6 +30,7 @@ use crate::{
         choices::{Selections, apply, apply_extras},
     },
     config_edit::write_atomically,
+    tui::discover::{models, scan},
 };
 
 const MULTI_HELP: &str = "space: toggle · →: all · ←: none · type to filter · enter: done";

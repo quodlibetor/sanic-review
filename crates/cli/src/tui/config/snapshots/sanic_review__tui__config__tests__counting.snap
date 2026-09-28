@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│ … repos · you owe …, in … repos · yours … · 14 days                counting… │"
 "│ ≤: a search can't apply path globs or the team filter, so these can be fewer │"
 "│ what this profile reviews; the most specific entry wins                      │"
-"│ ✓ loads                        + add · - remove · u unset · ^S save · ? help │"
+"│ ✓ loads                    + add · - remove · f find · u unset · ^S save · ? │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

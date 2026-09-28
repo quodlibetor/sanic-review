@@ -1205,7 +1205,25 @@ fonttools (run through `uv`, which only this task needs) to
   wins. An entry in a shape the editor doesn't know, and repos written
   as `[[profile.<name>.repos]]` tables, are shown to edit by hand. On the
   list of tables, `+` adds a profile after the others, `-` removes one
-  after a yes, and `K`/`J` move one. Tab completes a path as it's typed
+  after a yes, and `K`/`J` move one. `f` finds what the selected key
+  could hold, in a list to pick from:
+  - on `review_requests.teams`, your teams, ticked where the filter lets
+    their requests count; writing it makes the filter `*` then `!org/slug`
+    for each unticked team, as `setup` did, so teams you join later count
+    until you exclude them, and leaves hand-written patterns alone when
+    the same teams count;
+  - on a profile's `repos`, the orgs you're in and your teams' orgs, then,
+    on `s`, a scan for checkouts under a directory (`~` unless `d` types
+    another) to a depth `<` and `>` change, with the scanned checkouts'
+    owners; what any profile already watches isn't offered;
+  - on a `model`, `auto`, the aliases and the models your Claude settings
+    and environment name, as `setup` suggests them; Tab completes them as
+    they're typed;
+  - on a profile's `skills` and `instructions`, the skills and instruction
+    files in its checkouts (a path-scoped one's globbed directories
+    first) and your own skills, less what it lists already.
+  Space picks, Enter adds what's picked. Scans and searches of the disk
+  run off the UI thread. Tab completes a path as it's typed
   (skills, instructions, `read_paths`, `runner.claude`, a checkout), as
   far as the matches agree.
   Each edit goes into the file's document in place, keeping its comments

@@ -46,6 +46,7 @@ use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
+pub(crate) use self::config::discover;
 pub use self::layout::Sizes;
 use self::{
     config::{Checker, ConfigEditor, counts::Counter},
@@ -409,14 +410,11 @@ fn run(
                         ));
                     }
                 }
-                Flow::CheckConfig { generation, text } => {
+                flow @ (Flow::CheckConfig { .. }
+                | Flow::SaveConfig { .. }
+                | Flow::FindForConfig(_)) => {
                     if let Some(editing) = &editing {
-                        editing.checker.start(generation, text);
-                    }
-                }
-                Flow::SaveConfig { told } => {
-                    if let Some(editing) = &editing {
-                        save_config(app, &editing.checker, shared, store, told);
+                        editing.act(flow, app, shared, store);
                     }
                 }
                 Flow::TurnOffManualReviews(told) => {
@@ -435,9 +433,48 @@ fn run(
 /// off the UI thread.
 struct Editing {
     checker: Checker,
+    found_tx: std_mpsc::Sender<config::Found>,
+    found: std_mpsc::Receiver<config::Found>,
 }
 
 impl Editing {
+    fn new(checker: Checker) -> Self {
+        let (found_tx, found) = std_mpsc::channel();
+        Self {
+            checker,
+            found_tx,
+            found,
+        }
+    }
+
+    /// Does what the editor asked of the loop.
+    fn act(&self, flow: Flow, app: &mut App, shared: &Shared, store: &Store) {
+        match flow {
+            Flow::CheckConfig { generation, text } => self.checker.start(generation, text),
+            Flow::SaveConfig { told } => save_config(app, &self.checker, shared, store, told),
+            Flow::FindForConfig(find) => self.find(find, shared),
+            _ => {}
+        }
+    }
+
+    /// Starts finding what the editor suggests, off the UI thread.
+    fn find(&self, find: config::Find, shared: &Shared) {
+        let path = shared.config_path.clone();
+        let resolver = Arc::clone(&shared.resolver);
+        let found = self.found_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("config find".into())
+            .spawn(move || {
+                // Only fails once the editor has closed.
+                let _ = found.send(discover::find(find, &path, &*resolver));
+            });
+        if let Err(err) = spawned {
+            let _ = self
+                .found_tx
+                .send(config::Found::Failed(format!("couldn't look: {err}")));
+        }
+    }
+
     /// Hands the editor what's come in, and `counter` what it wants.
     fn tend(&self, editor: &mut ConfigEditor, counter: &Counter, shared: &Shared) {
         if let Some((generation, checked)) = self.checker.finished() {
@@ -448,6 +485,9 @@ impl Editing {
                 warn!("saving the config failed: {err:?}");
             }
             editor.saved(saved);
+        }
+        for found in self.found.try_iter() {
+            editor.found(found);
         }
         editor.set_serve_window(*shared.window.borrow());
         editor.counted(counter.counted());
@@ -466,8 +506,18 @@ fn open_editor(app: &mut App, shared: &Shared) -> Option<Editing> {
     if let config::Outcome::Check { generation, text } = editor.check_now() {
         checker.start(generation, text);
     }
+    let model =
+        crate::config_doc::Key::new(crate::config_doc::Table::Runner, "model").and_then(|key| {
+            match editor.doc().scalar(&key) {
+                crate::config_doc::Setting::Set(crate::config_doc::Scalar::Text(model)) => {
+                    Some(model)
+                }
+                _ => None,
+            }
+        });
+    editor.set_models(discover::known_models(model.as_deref()));
     app.overlay = Some(Overlay::Config(Box::new(editor)));
-    Some(Editing { checker })
+    Some(Editing::new(checker))
 }
 
 /// The editor on the config file, or why it can't open.
@@ -827,6 +877,8 @@ pub enum Flow {
     SaveConfig {
         told: u32,
     },
+    /// Find what the config editor suggests.
+    FindForConfig(config::Find),
 }
 
 /// What the UI asks `serve` to do.
@@ -1195,6 +1247,7 @@ impl App {
             }
             config::Outcome::Check { generation, text } => Flow::CheckConfig { generation, text },
             config::Outcome::Save { told } => Flow::SaveConfig { told },
+            config::Outcome::Find(find) => Flow::FindForConfig(find),
         }
     }
 
