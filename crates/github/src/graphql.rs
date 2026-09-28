@@ -90,6 +90,7 @@ const VIEWER_QUERY: &str = "query { viewer { login } }";
 #[cfg(test)]
 pub(crate) const QUERIES: &[(&str, &str)] = &[
     ("COUNT_QUERY", COUNT_QUERY),
+    ("REPO_COUNT_QUERY", REPO_COUNT_QUERY),
     ("PR_QUERY", PR_QUERY),
     ("REACTIONS_QUERY", REACTIONS_QUERY),
     ("SEARCH_QUERY", SEARCH_QUERY),
@@ -130,6 +131,21 @@ const COUNT_QUERY: &str = r"
 query($q: String!) {
   search(query: $q, type: ISSUE, first: 1) { issueCount }
 }";
+
+/// How many repositories match: `repositoryCount`, as `COUNT_QUERY` has
+/// `issueCount`.
+const REPO_COUNT_QUERY: &str = r"
+query($q: String!) {
+  search(query: $q, type: REPOSITORY, first: 1) { repositoryCount }
+}";
+
+/// What [`Client::search_prs_pages`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Searched {
+    pub keys: Vec<PrKey>,
+    /// Whether that's every match, or the page limit stopped it short.
+    pub complete: bool,
+}
 
 #[derive(Serialize)]
 struct Request<'a, V> {
@@ -269,6 +285,16 @@ impl Client {
     /// Open PRs matching a GitHub search, e.g. `review-requested:@me`. The
     /// `is:open is:pr` qualifiers are added here.
     pub async fn search_prs(&self, qualifiers: &str) -> Result<Vec<PrKey>, ApiError> {
+        Ok(self.search_prs_pages(qualifiers, None).await?.keys)
+    }
+
+    /// [`Client::search_prs`], reading at most `pages` pages of results
+    /// when that's set.
+    pub async fn search_prs_pages(
+        &self,
+        qualifiers: &str,
+        pages: Option<usize>,
+    ) -> Result<Searched, ApiError> {
         #[derive(Deserialize)]
         struct Data {
             search: Search,
@@ -300,7 +326,7 @@ impl Client {
         let q = format!("is:open is:pr {qualifiers}");
         let mut keys = Vec::new();
         let mut after: Option<String> = None;
-        loop {
+        for page in 1.. {
             let data: Data = self
                 .graphql(
                     SEARCH_QUERY,
@@ -320,11 +346,23 @@ impl Client {
                 PageInfo {
                     has_next_page: true,
                     end_cursor: Some(cursor),
-                } => after = Some(cursor),
+                } if pages.is_none_or(|pages| page < pages) => after = Some(cursor),
+                PageInfo {
+                    has_next_page: true,
+                    ..
+                } if pages.is_some() => {
+                    return Ok(Searched {
+                        keys,
+                        complete: false,
+                    });
+                }
                 _ => break,
             }
         }
-        Ok(keys)
+        Ok(Searched {
+            keys,
+            complete: true,
+        })
     }
 
     /// How many open PRs match a GitHub search, fetching none of them. The
@@ -345,6 +383,29 @@ impl Client {
             .graphql(COUNT_QUERY, json!({ "q": q }), &format!("count `{q}`"))
             .await?;
         Ok(data.search.issue_count)
+    }
+
+    /// How many repositories match a GitHub repository search, fetching
+    /// none of them. Forks are left out unless `fork:true` is given, and
+    /// archived ones are in unless `archived:false` is.
+    pub async fn count_repos(&self, qualifiers: &str) -> Result<u32, ApiError> {
+        #[derive(Deserialize)]
+        struct Data {
+            search: Count,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Count {
+            repository_count: u32,
+        }
+        let data: Data = self
+            .graphql(
+                REPO_COUNT_QUERY,
+                json!({ "q": qualifiers }),
+                &format!("count repos `{qualifiers}`"),
+            )
+            .await?;
+        Ok(data.search.repository_count)
     }
 
     /// A full snapshot of the PR from `me`'s point of view, or `None` if it

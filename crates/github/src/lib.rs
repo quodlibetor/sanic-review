@@ -13,6 +13,7 @@ mod schema_check;
 mod token;
 
 pub use client::{ApiError, Client};
+pub use graphql::Searched;
 pub use notifications::{Notification, NotificationPoll};
 pub use review::{
     CreatedReview, NewComment, NewReaction, NewReply, NewReview, PENDING_REVIEW, PostError,

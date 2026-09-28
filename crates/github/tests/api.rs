@@ -190,6 +190,64 @@ async fn search_pages_through_results_and_skips_non_prs() {
     assert_eq!(keys, [key("org/a", 1), key("org/b", 2)]);
 }
 
+#[tokio::test]
+async fn a_capped_search_stops_after_its_pages_and_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(path("/graphql"))
+        .and(body_partial_json(json!({ "variables": { "after": "c1" } })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "c2" },
+                "nodes": [{ "number": 2, "repository": { "nameWithOwner": "org/b" } }]
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(path("/graphql"))
+        .and(body_partial_json(json!({ "variables": { "after": null } })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
+                "nodes": [{ "number": 1, "repository": { "nameWithOwner": "org/a" } }]
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    let github = client(&server);
+    let searched = github
+        .search_prs_pages("review-requested:@me", Some(2))
+        .await
+        .unwrap();
+    assert_eq!(searched.keys, [key("org/a", 1), key("org/b", 2)]);
+    assert!(!searched.complete);
+    let searched = github
+        .search_prs_pages("review-requested:@me", Some(1))
+        .await
+        .unwrap();
+    assert_eq!(searched.keys, [key("org/a", 1)]);
+    assert!(!searched.complete);
+}
+
+#[tokio::test]
+async fn repo_counts_search_repositories() {
+    let server = MockServer::start().await;
+    Mock::given(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": { "q": "user:org fork:true archived:false" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": { "search": { "repositoryCount": 214 } } })),
+        )
+        .mount(&server)
+        .await;
+    let count = client(&server)
+        .count_repos("user:org fork:true archived:false")
+        .await
+        .unwrap();
+    assert_eq!(count, 214);
+}
+
 /// A server answering for `pr.json`'s PR, its reactions follow-up and its
 /// files.
 async fn pr_server() -> MockServer {

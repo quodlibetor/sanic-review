@@ -59,6 +59,32 @@ pub fn older(qualifiers: &str, day: &str, scope: &[String]) -> String {
     q
 }
 
+/// Searches for `qualifiers` kept to watched repos by `scope`, split so
+/// each fits in GitHub's longest search. Each of `scope`'s qualifiers is
+/// in one search, and they name disjoint repos, so counts of the searches
+/// add up to the count over the whole scope. An empty scope is one search
+/// of `qualifiers` alone.
+#[must_use]
+pub fn chunked(qualifiers: &str, scope: &[String]) -> Vec<String> {
+    // With the `is:open is:pr ` a PR search adds.
+    let room = MAX_SEARCH - "is:open is:pr ".len();
+    let mut searches: Vec<String> = Vec::new();
+    for qualifier in scope {
+        match searches.last_mut() {
+            Some(q) if q.len() + 1 + qualifier.len() <= room => {
+                q.push(' ');
+                q.push_str(qualifier);
+            }
+            // A qualifier too long to share a search goes alone.
+            _ => searches.push(format!("{qualifiers} {qualifier}")),
+        }
+    }
+    if searches.is_empty() {
+        searches.push(qualifiers.to_owned());
+    }
+    searches
+}
+
 /// The GitHub reads the poller needs; a trait so tests can fake GitHub.
 pub trait GithubApi {
     fn notifications(
@@ -775,6 +801,25 @@ pub(crate) mod tests {
         assert_eq!(
             older("author:@me", "2026-09-09", &[]),
             "author:@me updated:<2026-09-09"
+        );
+    }
+
+    #[test]
+    fn chunked_searches_cover_the_whole_scope_each_once() {
+        let scope: Vec<String> = (0..40).map(|i| format!("repo:org/repo-{i}")).collect();
+        let searches = chunked("author:@me updated:>=2026-09-09", &scope);
+        assert!(searches.len() > 1);
+        let mut covered = Vec::new();
+        for q in &searches {
+            assert!(q.len() + "is:open is:pr ".len() <= MAX_SEARCH, "{q}");
+            let rest = q.strip_prefix("author:@me updated:>=2026-09-09 ").unwrap();
+            covered.extend(rest.split(' ').map(String::from));
+        }
+        assert_eq!(covered, scope);
+        assert_eq!(chunked("author:@me", &[]), ["author:@me"]);
+        assert_eq!(
+            chunked("author:@me", &["user:org".into(), "repo:o/r".into()]),
+            ["author:@me user:org repo:o/r"]
         );
     }
 
