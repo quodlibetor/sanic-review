@@ -18,8 +18,8 @@ use toml_edit::{Array, DocumentMut, Item, TableLike, Value};
 pub use self::entry::{EntryKind, RepoEntry};
 use self::schema::{Field, Kind};
 use crate::config_edit::{
-    move_keeping_comments, new_table, push_on_own_line, remove_keeping_comments, set_in,
-    unset_keeping_comments,
+    move_keeping_comments, new_table, push_on_own_line, remove_keeping_comments, set_in, take_turn,
+    unset_keeping_comments, write_atomically,
 };
 
 /// What a config file that didn't exist starts with.
@@ -237,6 +237,15 @@ pub struct ConfigDoc {
     ops: Vec<Op>,
 }
 
+/// Equal when read from the same text and edited the same way.
+impl PartialEq for ConfigDoc {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.original, self.header, &self.ops) == (&other.original, other.header, &other.ops)
+    }
+}
+
+impl Eq for ConfigDoc {}
+
 impl ConfigDoc {
     /// The file's text, or `None` for a file that doesn't exist yet. Text
     /// that isn't TOML is refused: it has to be fixed by hand. Text that is,
@@ -261,6 +270,12 @@ impl ConfigDoc {
     #[must_use]
     pub fn original(&self) -> &str {
         &self.original
+    }
+
+    /// The text it was read from, or `None` for a file that didn't exist.
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        self.header.is_empty().then_some(self.original.as_str())
     }
 
     /// Whether writing it would change the file.
@@ -375,6 +390,35 @@ impl ConfigDoc {
             _ => self.doc.get(&table.to_string())?.as_table_like(),
         }
     }
+}
+
+/// What [`save`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    pub text: String,
+    /// Someone else wrote the file since it was read, so the edits were
+    /// made again on what they wrote.
+    pub replayed: bool,
+}
+
+/// Writes `doc` to `path`, taking a turn with the file's other editors. If
+/// the file changed since `doc` read it, the edits are made again on it as
+/// it is now. Either way, it's written only if it loads.
+pub fn save(path: &Path, doc: &ConfigDoc, resolver: &dyn CheckoutResolver) -> Result<Saved> {
+    let _turn = take_turn();
+    let now = Config::read_text(path)?;
+    let replayed = now.as_deref() != doc.source();
+    let doc = if replayed {
+        doc.replay_onto(now.as_deref())?
+    } else {
+        doc.clone()
+    };
+    doc.load(path, resolver)
+        .map_err(|Unloadable(err)| err)
+        .wrap_err("the config wouldn't load, so it wasn't written")?;
+    let text = doc.text();
+    write_atomically(path, &text)?;
+    Ok(Saved { text, replayed })
 }
 
 /// An item as the file writes it, on one line.
@@ -941,6 +985,58 @@ repos = [{ github = "org" }]
             format!("{NEW_FILE_HEADER}\n[profile.default]\nrepos = [{{ github = \"org\" }}]\n")
         );
         doc.load(path, &NoCheckouts).unwrap();
+    }
+
+    #[test]
+    fn saving_writes_or_replays_onto_what_changed_and_refuses_what_wont_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "# Mine.\n[profile.p]\nrepos = [{ github = \"org\" }]\n";
+        std::fs::write(&path, text).unwrap();
+        let mut doc = ConfigDoc::parse(Config::read_text(&path).unwrap().as_deref()).unwrap();
+        doc.apply(Op::Set {
+            key: key(Table::Poll, "quiet_secs"),
+            value: Scalar::Number(30),
+        })
+        .unwrap();
+        let saved = save(&path, &doc, &NoCheckouts).unwrap();
+        assert!(!saved.replayed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved.text);
+        assert!(saved.text.contains("quiet_secs = 30"));
+
+        // Changed by hand meanwhile: both edits stay.
+        std::fs::write(&path, format!("# by hand\n{text}")).unwrap();
+        let saved = save(&path, &doc, &NoCheckouts).unwrap();
+        assert!(saved.replayed);
+        assert!(saved.text.starts_with("# by hand\n"), "{}", saved.text);
+        assert!(saved.text.contains("quiet_secs = 30"));
+
+        // What wouldn't load isn't written.
+        doc.apply(Op::Set {
+            key: key(Table::Poll, "reconcile_secs"),
+            value: Scalar::Number(0),
+        })
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = save(&path, &doc, &NoCheckouts).unwrap_err();
+        assert!(format!("{err:#}").contains("wouldn't load"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // A new file is written with its header.
+        let new = dir.path().join("new/config.toml");
+        let mut doc = ConfigDoc::parse(None).unwrap();
+        doc.apply(Op::AddProfile { name: "p".into() }).unwrap();
+        doc.apply(Op::PushEntry {
+            profile: "p".into(),
+            entry: RepoEntry::Github {
+                name: "org".into(),
+                paths: Vec::new(),
+            },
+        })
+        .unwrap();
+        let saved = save(&new, &doc, &NoCheckouts).unwrap();
+        assert!(!saved.replayed);
+        assert!(saved.text.starts_with(NEW_FILE_HEADER));
     }
 
     #[test]

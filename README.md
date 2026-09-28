@@ -182,8 +182,8 @@ and is hidden unless you ask to see archived PRs. `i` opens an editor that turns
 title into a `skip_titles` glob (say, `build(deps)*`), previews which reviews
 it would skip, and adds it to your config.
 
-**The TUI** (`serve --ui tui`) is a summary, not an editor: reviews you owe,
-your PRs, activity and the log. Its keys:
+**The TUI** (`serve --ui tui`) is a summary of reviews you owe, your PRs,
+activity and the log, plus a config editor. Its keys:
 
 | Key | Does |
 |-----|------|
@@ -195,6 +195,7 @@ your PRs, activity and the log. Its keys:
 | `i` | ignore PRs by title |
 | `m` | turn manual reviews on or off; off asks first when that starts held reviews |
 | `c` | chat with the agent that reviewed the selected PR |
+| `e` | edit the config: every key, checked as you go, saved after showing the diff |
 | `z` / `Z` | cycle a pane through fit, full screen and collapsed / reset |
 | `?` | help |
 | `q` | quit `serve`, after listing any running reviews it would cancel |

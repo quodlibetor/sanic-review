@@ -4,8 +4,9 @@
 //! It runs on its own thread with its own read-only store connection, and
 //! rereads the store on an interval. Its only actions are asking `serve`
 //! to rerun a review, to archive or unarchive a PR and to save the panes'
-//! layout, editing the config's `skip_titles` and manual reviews, and
-//! opening the dashboard in a browser; nothing in it edits drafts.
+//! layout, editing the config (its `skip_titles` and manual reviews, or
+//! anything in it with the config editor), and opening the dashboard in a
+//! browser; nothing in it edits drafts.
 
 use std::{
     collections::HashMap,
@@ -47,11 +48,15 @@ use tracing::warn;
 
 pub use self::layout::Sizes;
 use self::{
+    config::{Checker, ConfigEditor},
     ignore::{IgnoreEditor, Outcome},
     layout::Size,
 };
-use crate::{chat, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
+use crate::{
+    chat, config_doc::ConfigDoc, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes,
+};
 
+mod config;
 mod ignore;
 mod layout;
 
@@ -318,9 +323,16 @@ fn run(
     let mut loaded_at: Option<Instant> = None;
     let mut load_failed = false;
     let launcher = Launcher::new(Arc::clone(&shared.opener));
+    // Checks the config editor's edits while it's open.
+    let mut checker: Option<Checker> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(failure) = launcher.failure() {
             app.set_notice(failure);
+        }
+        if let (Some(checker), Some(editor)) = (&checker, app.editor_mut())
+            && let Some((generation, checked)) = checker.finished()
+        {
+            editor.checked(generation, checked);
         }
         if loaded_at.is_none_or(|at| at.elapsed() >= REFRESH) {
             loaded_at = Some(Instant::now());
@@ -371,6 +383,27 @@ fn run(
                         app.set_notice(notice);
                     }
                 }
+                Flow::EditConfig => {
+                    let (open, notice) = open_editor(&shared.config_path);
+                    if let Some(mut editor) = open {
+                        let checks =
+                            Checker::new(shared.config_path.clone(), Arc::clone(&shared.resolver));
+                        if let config::Outcome::Check { generation, text } = editor.check_now() {
+                            checks.start(generation, text);
+                        }
+                        checker = Some(checks);
+                        app.overlay = Some(Overlay::Config(Box::new(editor)));
+                    }
+                    if let Some(notice) = notice {
+                        app.set_notice(notice);
+                    }
+                }
+                Flow::CheckConfig { generation, text } => {
+                    if let Some(checker) = &checker {
+                        checker.start(generation, text);
+                    }
+                }
+                Flow::SaveConfig { told } => save_config(app, shared, store, told),
                 Flow::TurnOffManualReviews(told) => {
                     let config: ConfigFile = (&shared.config_path, &*shared.resolver);
                     if let Some(notice) = turn_off_manual_reviews(app, config, store, told) {
@@ -381,6 +414,47 @@ fn run(
         }
     }
     Ok(())
+}
+
+/// `e`: the editor on the config file, or why it can't open.
+fn open_editor(path: &Path) -> (Option<ConfigEditor>, Option<String>) {
+    let opened = sanic_core::config::Config::read_text(path).and_then(|text| {
+        let doc = ConfigDoc::parse(text.as_deref())?;
+        let target = config_edit::resolve_links(path)?;
+        Ok(ConfigEditor::new(
+            path,
+            (target != path).then_some(target),
+            doc,
+        ))
+    });
+    match opened {
+        Ok(editor) => (Some(editor), None),
+        Err(err) => (None, Some(format!("can't edit the config: {err:#}"))),
+    }
+}
+
+/// Writes the config editor's edits, asking first when they turn manual
+/// reviews off with more reviews held than it was `told` of.
+fn save_config(app: &mut App, shared: &Shared, store: &Store, told: u32) {
+    let on = *shared.manual_reviews.borrow();
+    let Some(editor) = app.editor_mut() else {
+        return;
+    };
+    if editor.turns_manual_reviews_off(on) {
+        match count_held(store) {
+            Ok(held) if held > told => return editor.ask_held(held),
+            Ok(_) => {}
+            Err(err) => {
+                warn!("saving the config failed: {err:?}");
+                return editor.saved(Err(err));
+            }
+        }
+    }
+    let saved = crate::config_doc::save(&shared.config_path, editor.doc(), &*shared.resolver);
+    if let Err(err) = &saved {
+        warn!("saving the config failed: {err:?}");
+    }
+    editor.saved(saved);
 }
 
 /// Adds `pattern` to the config file's `skip_titles`, and says how that
@@ -643,6 +717,9 @@ pub struct App {
     follow_log: bool,
     show_archived: bool,
     overlay: Option<Overlay>,
+    /// The config editor, while quitting from it asks first: a no goes
+    /// back to it with its edits.
+    behind_quit: Option<Overlay>,
     /// Shown in the status bar until the next key.
     notice: Option<String>,
 }
@@ -652,6 +729,8 @@ pub struct App {
 enum Overlay {
     Help,
     Ignore(Box<IgnoreEditor>),
+    /// The config editor, over the whole screen.
+    Config(Box<ConfigEditor>),
     /// Waiting for a yes before asking for a review of this PR now.
     ConfirmRerun {
         key: PrKey,
@@ -685,6 +764,17 @@ pub enum Flow {
     SwitchManualReviews,
     /// Turn manual reviews off, told this many held reviews start: `y`.
     TurnOffManualReviews(u32),
+    /// Open the config editor on the config file: `e`.
+    EditConfig,
+    /// Check the config editor's edited text.
+    CheckConfig {
+        generation: u64,
+        text: String,
+    },
+    /// Write the config editor's edits; see [`config::Outcome::Save`].
+    SaveConfig {
+        told: u32,
+    },
 }
 
 /// What the UI asks `serve` to do.
@@ -720,6 +810,7 @@ impl App {
             follow_log: true,
             show_archived: false,
             overlay: None,
+            behind_quit: None,
             notice: None,
         }
     }
@@ -803,8 +894,12 @@ impl App {
                 }
             };
         }
+        if let Some(Overlay::Config(editor)) = &mut self.overlay {
+            let outcome = editor.handle_key(key);
+            return self.config_editor_did(outcome);
+        }
         if let Some(Overlay::ConfirmQuit(_)) = &self.overlay {
-            self.overlay = None;
+            self.overlay = self.behind_quit.take();
             return match key.code {
                 // A second Ctrl-C doesn't ask again.
                 KeyCode::Char('c') if ctrl => Flow::Quit,
@@ -846,6 +941,7 @@ impl App {
             KeyCode::Char('x') => return self.toggle_archive(),
             KeyCode::Char('i') => self.open_ignore(),
             KeyCode::Char('m') => return Flow::SwitchManualReviews,
+            KeyCode::Char('e') => return Flow::EditConfig,
             KeyCode::Char('c') => return self.open_chat(),
             KeyCode::Char('o') => return Flow::Open(self.selected_page()),
             KeyCode::Char(c) if let Some(pane) = Pane::with_key(c) => return self.jump(pane),
@@ -1029,6 +1125,35 @@ impl App {
         }
     }
 
+    /// What the loop does after the config editor took a key.
+    fn config_editor_did(&mut self, outcome: config::Outcome) -> Flow {
+        match outcome {
+            config::Outcome::Open => Flow::Continue,
+            config::Outcome::Close => {
+                self.overlay = None;
+                Flow::Continue
+            }
+            config::Outcome::Quit => {
+                let editor = self.overlay.take();
+                let flow = self.quit();
+                if self.overlay.is_some() {
+                    self.behind_quit = editor;
+                }
+                flow
+            }
+            config::Outcome::Check { generation, text } => Flow::CheckConfig { generation, text },
+            config::Outcome::Save { told } => Flow::SaveConfig { told },
+        }
+    }
+
+    /// The config editor, while it's open.
+    fn editor_mut(&mut self) -> Option<&mut ConfigEditor> {
+        match &mut self.overlay {
+            Some(Overlay::Config(editor)) => Some(editor),
+            _ => None,
+        }
+    }
+
     /// Shows `notice` in the status bar until the next key.
     pub fn set_notice(&mut self, notice: String) {
         self.notice = Some(notice);
@@ -1178,6 +1303,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     match overlay {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
+        Some(Overlay::Config(editor)) => editor.render(frame),
         Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, why),
         Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
         Some(Overlay::ConfirmAutomatic(held)) => render_confirm_automatic(frame, *held),
@@ -1483,6 +1609,7 @@ const HELP: &[(&str, &str)] = &[
     ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
     ("m", "turn manual reviews on or off"),
+    ("e", "edit the config"),
     ("c", "chat with the agent that reviewed it"),
     ("o", "open it in the dashboard, or the index"),
     ("?, Esc", "close this help"),
@@ -2224,6 +2351,41 @@ mod tests {
         }
         press(&mut auto, KeyCode::Char('r'));
         assert_eq!(auto.overlay, None);
+    }
+
+    #[test]
+    fn e_opens_the_config_editor_which_takes_keys_until_it_closes() {
+        let mut app = app(false);
+        assert_eq!(app.handle_key(key(KeyCode::Char('e'))), Flow::EditConfig);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let (editor, notice) = open_editor(&path);
+        assert_eq!(notice, None, "a missing file opens as a new one");
+        let mut editor = editor.unwrap();
+        let config::Outcome::Check { generation, .. } = editor.check_now() else {
+            panic!("no check");
+        };
+        app.overlay = Some(Overlay::Config(Box::new(editor)));
+        app.editor_mut().unwrap().checked(generation, Ok(()));
+        // Its keys are its own: `x` doesn't archive, `q` closes it.
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.editor_mut().is_some());
+        // Ctrl-C asks first while reviews run, and a no goes back to it.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut busy = overview();
+        busy.running = vec![pr("org/api", 481)];
+        app.set_overview(busy);
+        assert_eq!(app.handle_key(ctrl_c), Flow::Continue);
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmQuit(_))));
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.editor_mut().is_some());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.editor_mut().is_none());
+
+        std::fs::write(&path, "[runner").unwrap();
+        let (editor, notice) = open_editor(&path);
+        assert!(editor.is_none());
+        assert!(notice.unwrap().contains("isn't valid TOML"));
     }
 
     #[test]

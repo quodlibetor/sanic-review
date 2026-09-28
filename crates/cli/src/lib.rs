@@ -5,7 +5,7 @@ mod chat;
 #[allow(
     dead_code,
     unused_imports,
-    reason = "the config editor, which uses it, comes next"
+    reason = "the config editor edits lists and profiles in the next change"
 )]
 mod config_doc;
 mod config_edit;

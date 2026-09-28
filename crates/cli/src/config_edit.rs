@@ -452,7 +452,7 @@ fn edit_text(
 /// The TUI and the dashboard's handlers edit the config file concurrently,
 /// so edits take turns: each reads the file during its turn, and none
 /// writes over another's temporary file.
-fn take_turn() -> MutexGuard<'static, ()> {
+pub fn take_turn() -> MutexGuard<'static, ()> {
     static EDITING: Mutex<()> = Mutex::new(());
     EDITING.lock().unwrap_or_else(PoisonError::into_inner)
 }

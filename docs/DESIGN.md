@@ -1049,10 +1049,11 @@ fonttools (run through `uv`, which only this task needs) to
   one-line summary of the queued and running runs.
   Each finished review logs its PR, suggested verdict, comment and
   unanchored counts, and the first line of its summary.
-- `--ui tui`: a ratatui summary with four panes. No editing happens in the
-  TUI. Its only actions are rerunning a review, archiving a PR, adding
+- `--ui tui`: a ratatui summary with four panes. Drafts aren't edited in
+  the TUI. Its only actions are rerunning a review, archiving a PR, adding
   a `skip_titles` pattern to the config, switching manual reviews in the
-  config, opening the dashboard and saving its own layout.
+  config, editing the config (`e`), opening the dashboard and saving its
+  own layout.
   - **Reviews you owe:** open PRs by others that you review: your review
     is requested, or you've left one in any state. Submitting a review
     clears GitHub's request and a push can dismiss the review, so a PR stays
@@ -1177,6 +1178,37 @@ fonttools (run through `uv`, which only this task needs) to
   says so until the next key; `serve` applies it as it reloads. A config
   file that doesn't load, at `m` or at `y`, is left alone, and the status
   bar says why instead.
+  `e` opens the config editor over the whole screen. On the left are the
+  tables, `github`, `poll`, `review_requests`, `runner` and each profile;
+  on the right, every key the selected one takes, from a schema of the
+  config beside the loader's. A key the file doesn't set shows dimmed with
+  its default, or with the key it inherits and that key's value
+  (`‹runner.model: auto›`); one of the wrong type shows in red. Tab
+  switches sides, `j`/`k` and `g`/`G` move, Enter edits a text or number
+  (Enter sets it, a blank unsets it, Esc cancels, Ctrl-U clears; a number
+  takes only digits), Space or Enter flips a bool from what it means now,
+  set or not, and `u` unsets a key. Lists are shown, and edited by hand.
+  Each edit goes into the file's document in place, keeping its comments
+  and layout, and is kept in order. After each one the text is checked
+  with the loader off the UI thread, with what remote discovery finds for
+  each checkout remembered while the editor is open; the footer says
+  whether it loads, and why not, as the status bar does for `m`. `v`
+  shows the diff against the file as it was read. Ctrl-S saves: refused
+  while the text doesn't load (selecting the profile the error names), it
+  shows the diff and writes on `y`. Writing takes a turn with the file's
+  other editors and rereads it; if someone wrote it meanwhile, from the
+  dashboard or by hand, the edits are made again on what's there, and a
+  file that then doesn't load, or an edit that no longer applies, isn't
+  written and says why. It's written as `i` writes, keeping a symlink a
+  symlink, and `serve` applies it through its reload. An edit that turns
+  manual reviews off while `serve` has them on asks first how many held
+  reviews will start, and asks again if more are held by `y`, as `m`
+  does. Saving a changed `github.api_url` says it applies when `serve`
+  restarts. Esc or `q` leaves, asking first while there are unsaved
+  edits; Ctrl-C quits `serve` as it does elsewhere. A file that isn't
+  TOML can't be opened; one that is but doesn't load can, since fixing
+  it is what the editor is for, and one that doesn't exist opens empty,
+  written with a line saying where the format is described.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
   terminal alone and shows in the log pane instead.
