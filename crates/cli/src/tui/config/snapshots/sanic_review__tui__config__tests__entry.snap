@@ -22,7 +22,7 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│                   │                                                          │"
-"│                   │                                                          │"
+"│                                                                              │"
 "│ paths are globs from the repo's root; the most specific entry wins           │"
 "│ … checking                Space kind · + glob · - remove · Esc back · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

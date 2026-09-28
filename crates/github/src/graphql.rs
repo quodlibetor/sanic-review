@@ -10,6 +10,8 @@ use sanic_core::{
     run::Side,
     state::reactions_wanted,
 };
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 
@@ -108,6 +110,7 @@ pub(crate) const QUERIES: &[(&str, &str)] = &[
 const SEARCH_QUERY: &str = r"
 query($q: String!, $after: String) {
   search(query: $q, type: ISSUE, first: 50, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest { number repository { nameWithOwner } } }
   }
@@ -143,7 +146,8 @@ query($q: String!) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Searched {
     pub keys: Vec<PrKey>,
-    /// Whether that's every match, or the page limit stopped it short.
+    /// Whether that's every PR the search matches: GitHub returns at most
+    /// a thousand, and a page limit can stop it sooner.
     pub complete: bool,
 }
 
@@ -293,7 +297,7 @@ impl Client {
     pub async fn search_prs_pages(
         &self,
         qualifiers: &str,
-        pages: Option<usize>,
+        pages: Option<NonZeroUsize>,
     ) -> Result<Searched, ApiError> {
         #[derive(Deserialize)]
         struct Data {
@@ -302,6 +306,7 @@ impl Client {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Search {
+            issue_count: usize,
             page_info: PageInfo,
             nodes: Vec<SearchNode>,
         }
@@ -326,6 +331,7 @@ impl Client {
         let q = format!("is:open is:pr {qualifiers}");
         let mut keys = Vec::new();
         let mut after: Option<String> = None;
+        let mut matched = 0;
         for page in 1.. {
             let data: Data = self
                 .graphql(
@@ -334,6 +340,7 @@ impl Client {
                     &format!("search `{q}`"),
                 )
                 .await?;
+            matched = data.search.issue_count;
             for node in data.search.nodes {
                 if let (Some(number), Some(repo)) = (node.number, node.repository) {
                     keys.push(PrKey {
@@ -346,23 +353,14 @@ impl Client {
                 PageInfo {
                     has_next_page: true,
                     end_cursor: Some(cursor),
-                } if pages.is_none_or(|pages| page < pages) => after = Some(cursor),
-                PageInfo {
-                    has_next_page: true,
-                    ..
-                } if pages.is_some() => {
-                    return Ok(Searched {
-                        keys,
-                        complete: false,
-                    });
-                }
+                } if pages.is_none_or(|pages| page < pages.get()) => after = Some(cursor),
                 _ => break,
             }
         }
-        Ok(Searched {
-            keys,
-            complete: true,
-        })
+        // GitHub returns at most a thousand results of a search, and pages
+        // may stop it sooner.
+        let complete = keys.len() >= matched;
+        Ok(Searched { keys, complete })
     }
 
     /// How many open PRs match a GitHub search, fetching none of them. The

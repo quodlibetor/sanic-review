@@ -4,16 +4,22 @@
 
 mod check;
 mod complete;
+pub mod counts;
 mod render;
 mod rows;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use color_eyre::eyre::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sanic_core::config::contract_path;
 
 pub use self::check::{Checked, Checker};
+use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
 use self::rows::{
     EntryEdit, EntryRow, KINDS, Row, Shown, entries, items, rows, scalar_text, shown,
 };
@@ -43,7 +49,26 @@ pub struct ConfigEditor {
     popup: Option<Popup>,
     /// Shown in the status line until the next key.
     notice: Option<String>,
+    /// What the text watched when it last loaded, which the counts count.
+    watched: Option<Watched>,
+    /// What's been counted, by what was asked.
+    answers: HashMap<Query, Answer>,
+    /// What [`ConfigEditor::want`] last asked for, and why.
+    wanted: Vec<Query>,
+    plan: Plan,
+    /// Why counting stopped, until the next answer.
+    stopped: Option<Stopped>,
+    /// Counting waits for `serve`'s rate limit to end.
+    waiting: bool,
+    /// The recency window `serve` is showing, when it's running.
+    serve_window: Option<Serving>,
+    /// A save is being written.
+    saving: bool,
 }
+
+/// The recency window `serve` shows, in days; `None` is any age.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Serving(Option<u32>);
 
 /// Whether the edited text loads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +158,14 @@ impl ConfigEditor {
             generation: 0,
             popup: None,
             notice: None,
+            watched: None,
+            answers: HashMap::new(),
+            wanted: Vec::new(),
+            plan: Plan::default(),
+            stopped: None,
+            waiting: false,
+            serve_window: None,
+            saving: false,
         }
     }
 
@@ -151,14 +184,77 @@ impl ConfigEditor {
         }
     }
 
-    /// The answer to [`Outcome::Check`] for `generation`.
+    /// The answer to [`Outcome::Check`] for `generation`. While the text
+    /// doesn't load, the counts stay those of the last that did.
     pub fn checked(&mut self, generation: u64, checked: Checked) {
         if generation == self.generation {
             self.check = match checked {
-                Ok(()) => Check::Loads,
+                Ok(watched) => {
+                    self.watched = Some(watched);
+                    Check::Loads
+                }
                 Err(why) => Check::Fails(why),
             };
         }
+    }
+
+    /// What to count now, most wanted first: the headline's, then what's
+    /// on screen. Nothing until the text has loaded once.
+    pub fn want(&mut self, now: SystemTime) -> Vec<Query> {
+        let Some(watched) = &self.watched else {
+            return Vec::new();
+        };
+        let table = self.current_table();
+        let teams = Tally(&self.answers)
+            .teams()
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        let showing = match &table {
+            Table::Profile(name) => Showing::Profile(name),
+            Table::ReviewRequests => Showing::ReviewRequests(&teams),
+            Table::Poll => Showing::Poll,
+            Table::Github | Table::Runner => Showing::Other,
+        };
+        self.plan = Plan::new(watched, showing, now);
+        self.wanted = self.plan.queries();
+        self.wanted.clone()
+    }
+
+    /// Answers from the counter.
+    pub fn counted(&mut self, counted: Vec<Counted>) {
+        for counted in counted {
+            match counted {
+                Counted::Answer(query, answer) => {
+                    self.answers.insert(query, answer);
+                    self.stopped = None;
+                    self.waiting = false;
+                }
+                // Shown until that search is counted again, whatever else
+                // comes in meanwhile. GitHub answered, so counting isn't
+                // stopped.
+                Counted::Failed(query, why) => {
+                    self.answers.insert(query, Answer::Failed(why));
+                    self.stopped = None;
+                    self.waiting = false;
+                }
+                Counted::Stopped(stopped) => {
+                    self.stopped = Some(stopped);
+                    self.waiting = false;
+                }
+                Counted::Waiting => self.waiting = true,
+            }
+        }
+    }
+
+    /// The window `serve` is showing, to say so when the edited one
+    /// differs.
+    pub fn set_serve_window(&mut self, days: Option<u32>) {
+        self.serve_window = Some(Serving(days));
+    }
+
+    /// The save [`Outcome::Save`] asked for is being written.
+    pub fn saving(&mut self) {
+        self.saving = true;
     }
 
     /// Saving would start `held` held reviews: asks first, and on a yes
@@ -177,6 +273,7 @@ impl ConfigEditor {
     /// How [`Outcome::Save`] went. Once written, editing carries on from
     /// what was written.
     pub fn saved(&mut self, saved: Result<Saved>) {
+        self.saving = false;
         let saved = match saved {
             Ok(saved) => saved,
             Err(err) => {
@@ -274,6 +371,13 @@ impl ConfigEditor {
         self.notice = None;
         if ctrl && key.code == KeyCode::Char('c') {
             return Outcome::Quit;
+        }
+        // The save lands on the text as it was sent, and replaces the
+        // edits with what it wrote: edits made meanwhile, or leaving to
+        // discard them, would be lost to it.
+        if self.saving {
+            self.notice = Some("still saving".into());
+            return Outcome::Open;
         }
         if let Some(popup) = self.popup.take() {
             return self.popup_key(popup, key);

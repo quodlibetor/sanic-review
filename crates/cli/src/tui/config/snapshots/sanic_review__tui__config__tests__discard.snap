@@ -22,7 +22,7 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│                   │                                                          │"
-"│                   │                                                          │"
+"│                                                                              │"
 "│ hold queued reviews until you start them                                     │"
 "│ … checking                     + add · - remove · u unset · ^S save · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

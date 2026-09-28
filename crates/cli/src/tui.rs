@@ -48,7 +48,7 @@ use tracing::warn;
 
 pub use self::layout::Sizes;
 use self::{
-    config::{Checker, ConfigEditor},
+    config::{Checker, ConfigEditor, counts::Counter},
     ignore::{IgnoreEditor, Outcome},
     layout::Size,
 };
@@ -199,6 +199,11 @@ pub struct Shared {
     pub window: watch::Receiver<Option<u32>>,
     /// The poller's refresh batch under way, if any.
     pub progress: watch::Receiver<Option<Progress>>,
+    /// Until when a rate limit pauses polling; the config editor's counts
+    /// wait for it too.
+    pub paused: watch::Receiver<Option<tokio::time::Instant>>,
+    /// What the config editor counts with.
+    pub github: Arc<sanic_github::Client>,
     pub clock: Arc<dyn Clock>,
     /// What you ask `serve` to do.
     pub requests: mpsc::UnboundedSender<Request>,
@@ -323,16 +328,27 @@ fn run(
     let mut loaded_at: Option<Instant> = None;
     let mut load_failed = false;
     let launcher = Launcher::new(Arc::clone(&shared.opener));
-    // Checks the config editor's edits while it's open.
-    let mut checker: Option<Checker> = None;
+    // Check, save and count the config editor's edits while it's open.
+    let mut editing: Option<Editing> = None;
+    // Counts for the config editor. It outlives each opening, so what it
+    // knows, its budget and a rate limit GitHub set it carry over.
+    let mut counter: Option<Counter> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(failure) = launcher.failure() {
             app.set_notice(failure);
         }
-        if let (Some(checker), Some(editor)) = (&checker, app.editor_mut())
-            && let Some((generation, checked)) = checker.finished()
-        {
-            editor.checked(generation, checked);
+        match (&editing, &counter, app.editor_mut()) {
+            (Some(editing), Some(counter), Some(editor)) => editing.tend(editor, counter, shared),
+            // Closed: its checks stop with it, and counting stops until
+            // it opens again.
+            (Some(_), _, None) => {
+                editing = None;
+                if let Some(counter) = &counter {
+                    counter.want(Vec::new());
+                    counter.counted();
+                }
+            }
+            _ => {}
         }
         if loaded_at.is_none_or(|at| at.elapsed() >= REFRESH) {
             loaded_at = Some(Instant::now());
@@ -384,26 +400,25 @@ fn run(
                     }
                 }
                 Flow::EditConfig => {
-                    let (open, notice) = open_editor(&shared.config_path);
-                    if let Some(mut editor) = open {
-                        let checks =
-                            Checker::new(shared.config_path.clone(), Arc::clone(&shared.resolver));
-                        if let config::Outcome::Check { generation, text } = editor.check_now() {
-                            checks.start(generation, text);
-                        }
-                        checker = Some(checks);
-                        app.overlay = Some(Overlay::Config(Box::new(editor)));
-                    }
-                    if let Some(notice) = notice {
-                        app.set_notice(notice);
+                    editing = open_editor(app, shared);
+                    if editing.is_some() && counter.is_none() {
+                        counter = Some(Counter::start(
+                            &shared.runtime,
+                            Arc::clone(&shared.github),
+                            shared.paused.clone(),
+                        ));
                     }
                 }
                 Flow::CheckConfig { generation, text } => {
-                    if let Some(checker) = &checker {
-                        checker.start(generation, text);
+                    if let Some(editing) = &editing {
+                        editing.checker.start(generation, text);
                     }
                 }
-                Flow::SaveConfig { told } => save_config(app, shared, store, told),
+                Flow::SaveConfig { told } => {
+                    if let Some(editing) = &editing {
+                        save_config(app, &editing.checker, shared, store, told);
+                    }
+                }
                 Flow::TurnOffManualReviews(told) => {
                     let config: ConfigFile = (&shared.config_path, &*shared.resolver);
                     if let Some(notice) = turn_off_manual_reviews(app, config, store, told) {
@@ -416,8 +431,47 @@ fn run(
     Ok(())
 }
 
-/// `e`: the editor on the config file, or why it can't open.
-fn open_editor(path: &Path) -> (Option<ConfigEditor>, Option<String>) {
+/// What runs beside the config editor while it's open: checks and saves
+/// off the UI thread.
+struct Editing {
+    checker: Checker,
+}
+
+impl Editing {
+    /// Hands the editor what's come in, and `counter` what it wants.
+    fn tend(&self, editor: &mut ConfigEditor, counter: &Counter, shared: &Shared) {
+        if let Some((generation, checked)) = self.checker.finished() {
+            editor.checked(generation, checked);
+        }
+        if let Some(saved) = self.checker.saved() {
+            if let Err(err) = &saved {
+                warn!("saving the config failed: {err:?}");
+            }
+            editor.saved(saved);
+        }
+        editor.set_serve_window(*shared.window.borrow());
+        editor.counted(counter.counted());
+        counter.want(editor.want(shared.clock.now()));
+    }
+}
+
+/// `e`: opens the config editor, or says why it can't.
+fn open_editor(app: &mut App, shared: &Shared) -> Option<Editing> {
+    let (opened, notice) = read_editor(&shared.config_path);
+    if let Some(notice) = notice {
+        app.set_notice(notice);
+    }
+    let mut editor = opened?;
+    let checker = Checker::new(shared.config_path.clone(), Arc::clone(&shared.resolver));
+    if let config::Outcome::Check { generation, text } = editor.check_now() {
+        checker.start(generation, text);
+    }
+    app.overlay = Some(Overlay::Config(Box::new(editor)));
+    Some(Editing { checker })
+}
+
+/// The editor on the config file, or why it can't open.
+fn read_editor(path: &Path) -> (Option<ConfigEditor>, Option<String>) {
     let opened = sanic_core::config::Config::read_text(path).and_then(|text| {
         let doc = ConfigDoc::parse(text.as_deref())?;
         let target = config_edit::resolve_links(path)?;
@@ -433,9 +487,10 @@ fn open_editor(path: &Path) -> (Option<ConfigEditor>, Option<String>) {
     }
 }
 
-/// Writes the config editor's edits, asking first when they turn manual
-/// reviews off with more reviews held than it was `told` of.
-fn save_config(app: &mut App, shared: &Shared, store: &Store, told: u32) {
+/// Starts writing the config editor's edits, off the UI thread since it
+/// loads them first, asking first when they turn manual reviews off with
+/// more reviews held than it was `told` of.
+fn save_config(app: &mut App, checker: &Checker, shared: &Shared, store: &Store, told: u32) {
     let on = *shared.manual_reviews.borrow();
     let Some(editor) = app.editor_mut() else {
         return;
@@ -450,11 +505,8 @@ fn save_config(app: &mut App, shared: &Shared, store: &Store, told: u32) {
             }
         }
     }
-    let saved = crate::config_doc::save(&shared.config_path, editor.doc(), &*shared.resolver);
-    if let Err(err) = &saved {
-        warn!("saving the config failed: {err:?}");
-    }
-    editor.saved(saved);
+    checker.save(editor.doc().clone());
+    editor.saving();
 }
 
 /// Adds `pattern` to the config file's `skip_titles`, and says how that
@@ -2063,6 +2115,15 @@ mod tests {
             skips: watch::channel(SkipRules::default()).1,
             window,
             progress: watch::channel(None).1,
+            paused: watch::channel(None).1,
+            // Nothing here counts, so it's never called.
+            github: Arc::new(
+                sanic_github::Client::new(
+                    "http://127.0.0.1:1",
+                    sanic_github::Token::new("t".into()),
+                )
+                .unwrap(),
+            ),
             clock: Arc::new(FixedClock),
             requests: mpsc::unbounded_channel().0,
             config_path: PathBuf::new(),
@@ -2359,14 +2420,16 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('e'))), Flow::EditConfig);
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let (editor, notice) = open_editor(&path);
+        let (editor, notice) = read_editor(&path);
         assert_eq!(notice, None, "a missing file opens as a new one");
         let mut editor = editor.unwrap();
         let config::Outcome::Check { generation, .. } = editor.check_now() else {
             panic!("no check");
         };
         app.overlay = Some(Overlay::Config(Box::new(editor)));
-        app.editor_mut().unwrap().checked(generation, Ok(()));
+        app.editor_mut()
+            .unwrap()
+            .checked(generation, Ok(config::counts::Watched::default()));
         // Its keys are its own: `x` doesn't archive, `q` closes it.
         press(&mut app, KeyCode::Char('x'));
         assert!(app.editor_mut().is_some());
@@ -2383,7 +2446,7 @@ mod tests {
         assert!(app.editor_mut().is_none());
 
         std::fs::write(&path, "[runner").unwrap();
-        let (editor, notice) = open_editor(&path);
+        let (editor, notice) = read_editor(&path);
         assert!(editor.is_none());
         assert!(notice.unwrap().contains("isn't valid TOML"));
     }

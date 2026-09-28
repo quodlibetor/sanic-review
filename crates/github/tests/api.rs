@@ -4,7 +4,7 @@
 // Integration-test helpers are test code; clippy only exempts `#[test]` fns.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 use sanic_core::run::Side;
 use sanic_core::{
@@ -18,6 +18,7 @@ use sanic_github::{
     ApiError, Client, NewComment, NewReaction, NewReply, NewReview, NotificationPoll,
     PostedComment, ReviewEvent, ReviewStatus, Token,
 };
+
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -165,6 +166,7 @@ async fn search_pages_through_results_and_skips_non_prs() {
         .and(body_partial_json(json!({ "variables": { "after": "c1" } })))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": 2,
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [{ "number": 2, "repository": { "nameWithOwner": "org/b" } }]
             }}})),
@@ -177,6 +179,7 @@ async fn search_pages_through_results_and_skips_non_prs() {
         })))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": 2,
                 "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
                 "nodes": [{ "number": 1, "repository": { "nameWithOwner": "Org/A" } }, {}]
             }}})),
@@ -197,6 +200,7 @@ async fn a_capped_search_stops_after_its_pages_and_says_so() {
         .and(body_partial_json(json!({ "variables": { "after": "c1" } })))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": 3,
                 "pageInfo": { "hasNextPage": true, "endCursor": "c2" },
                 "nodes": [{ "number": 2, "repository": { "nameWithOwner": "org/b" } }]
             }}})),
@@ -207,6 +211,7 @@ async fn a_capped_search_stops_after_its_pages_and_says_so() {
         .and(body_partial_json(json!({ "variables": { "after": null } })))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": 3,
                 "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
                 "nodes": [{ "number": 1, "repository": { "nameWithOwner": "org/a" } }]
             }}})),
@@ -215,13 +220,35 @@ async fn a_capped_search_stops_after_its_pages_and_says_so() {
         .await;
     let github = client(&server);
     let searched = github
-        .search_prs_pages("review-requested:@me", Some(2))
+        .search_prs_pages("review-requested:@me", NonZeroUsize::new(2))
         .await
         .unwrap();
     assert_eq!(searched.keys, [key("org/a", 1), key("org/b", 2)]);
     assert!(!searched.complete);
     let searched = github
-        .search_prs_pages("review-requested:@me", Some(1))
+        .search_prs_pages("review-requested:@me", NonZeroUsize::new(1))
+        .await
+        .unwrap();
+    assert_eq!(searched.keys, [key("org/a", 1)]);
+    assert!(!searched.complete);
+}
+
+#[tokio::test]
+async fn a_search_past_githubs_result_cap_isnt_complete() {
+    // GitHub stops returning results well short of what it counts.
+    let server = MockServer::start().await;
+    Mock::given(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": 1500,
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{ "number": 1, "repository": { "nameWithOwner": "org/a" } }]
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    let searched = client(&server)
+        .search_prs_pages("review-requested:@me", None)
         .await
         .unwrap();
     assert_eq!(searched.keys, [key("org/a", 1)]);

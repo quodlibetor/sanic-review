@@ -157,6 +157,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 skips: live.skips.subscribe(),
                 window: live.window.subscribe(),
                 progress: live.progress.subscribe(),
+                paused: live.paused.subscribe(),
+                github: Arc::new(github.clone()),
                 clock: Arc::new(SystemClock),
                 requests,
                 config_path: config_path.clone(),
@@ -279,6 +281,9 @@ struct Live {
     recency: watch::Sender<RecencyWindow>,
     /// The refresh batch under way; `None` when the queue is empty.
     progress: watch::Sender<Option<Progress>>,
+    /// Until when a rate limit pauses polling, so the config editor's
+    /// counts, sharing the token, wait too.
+    paused: watch::Sender<Option<Instant>>,
 }
 
 impl Live {
@@ -294,6 +299,7 @@ impl Live {
             window: watch::Sender::new(recency.days()),
             recency: watch::Sender::new(recency),
             progress: watch::Sender::new(None),
+            paused: watch::Sender::new(None),
         }
     }
 
@@ -819,6 +825,7 @@ async fn poll_forever<G: GithubApi>(
         if let Some(wait) = backoff {
             let resume = Instant::now() + wait;
             paused_until = resume;
+            live.paused.send_replace(Some(resume));
             next_reconcile = next_reconcile.max(resume);
             next_notifications = next_notifications.max(resume);
         }

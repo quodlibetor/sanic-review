@@ -111,6 +111,7 @@ fn search(q: &str, nodes: &serde_json::Value) -> Mock {
         .and(Searching(format!("is:open is:pr {q}")))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "data": { "search": {
+                "issueCount": nodes.as_array().map_or(0, Vec::len),
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": nodes
             }}})),

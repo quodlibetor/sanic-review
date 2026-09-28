@@ -36,6 +36,12 @@ pub fn recent(qualifiers: &str, since: Option<&str>) -> String {
 /// The longest search GitHub takes.
 const MAX_SEARCH: usize = 256;
 
+/// Whether a PR search for `qualifiers` fits in GitHub's longest.
+#[must_use]
+pub fn fits(qualifiers: &str) -> bool {
+    qualifiers.len() + "is:open is:pr ".len() <= MAX_SEARCH
+}
+
 /// Searches for `qualifiers` kept to watched repos by `scope`, split so
 /// each fits in GitHub's longest search. Each of `scope`'s qualifiers is
 /// in one search, and they name disjoint repos, so counts of the searches

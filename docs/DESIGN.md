@@ -1215,8 +1215,10 @@ fonttools (run through `uv`, which only this task needs) to
   whether it loads, and why not, as the status bar does for `m`. `v`
   shows the diff against the file as it was read. Ctrl-S saves: refused
   while the text doesn't load (selecting the profile the error names), it
-  shows the diff and writes on `y`. Writing takes a turn with the file's
-  other editors and rereads it; if someone wrote it meanwhile, from the
+  shows the diff and writes on `y`, off the UI thread, since writing
+  loads the result again, remote discovery included; the footer says
+  it's saving meanwhile, and keys other than Ctrl-C wait for it.
+  Writing takes a turn with the file's other editors and rereads it; if someone wrote it meanwhile, from the
   dashboard or by hand, the edits are made again on what's there, and a
   file that then doesn't load, or an edit that no longer applies, isn't
   written and says why. It's written as `i` writes, keeping a symlink a
@@ -1229,6 +1231,47 @@ fonttools (run through `uv`, which only this task needs) to
   TOML can't be opened; one that is but doesn't load can, since fixing
   it is what the editor is for, and one that doesn't exist opens empty,
   written with a line saying where the format is described.
+  A line over the footer counts what the config watches, as it last
+  loaded: its repos, the PRs you owe a review and how many repos they're
+  in, and your own PRs, within `poll.updated_within_days`, saying when
+  `serve` is showing another window (one picked on the dashboard, or the
+  config's before a save). While the text doesn't load the counts stay,
+  dimmed. Repos are each repo entries name, plus each watched org's
+  repos (a repository search with forks and without archived ones) less
+  those entries claim. PRs are the dashboard's lists' searches, kept to
+  the watched orgs and repos in as many searches as fit, added up; you
+  owe `review-requested:@me -author:@me`, which counts team requests
+  too, and yours `author:@me`. The repos you owe reviews in are those of
+  the PRs that search returns, read a few pages at most, so past that,
+  or past GitHub's thousand results, it's `≥`. Path globs, and a team
+  filter that leaves out one of your teams, can't be searched, so counts
+  they'd cut are `≤`, and a line says why. A selected profile's entries
+  each show their repos and PRs on both lists, an org's without the repos
+  entries claim: left out of its search, or, when that doesn't fit in
+  one, counted in searches of their own, as many as fit, and taken off
+  the org's. Counts go with the entry they're for, found by what it
+  covers (its checkout or org or repo, and its globs), so they follow it
+  as it moves, and an entry the config didn't have when it last loaded
+  shows none. A failed search shows `—` where the counts it's part of
+  would be, and nowhere else;
+  `review_requests` lists your teams with the requests to each and
+  whether the filter leaves them out, and
+  `updated_within_days` shows how many PRs the window hides, as the
+  dashboard's hidden counts. Counting runs on `serve`'s runtime: the
+  editor says what it wants, most wanted first, and counting starts once
+  edits have settled for a moment, one search at a time, asking only what
+  it hasn't already been told since `serve` started; its budget and a
+  rate limit on it carry over from one opening of the editor to the next. A newer edit drops
+  what's still queued. Searches come out of a small budget that refills
+  slowly, since they share `serve`'s token and GitHub's secondary limits.
+  While `serve`'s poller is paused by a rate limit, counting waits for
+  it. A rate limit on the counts stops them, saying for how long, until
+  the next edit, which waits it out; a rejected token says to `gh auth
+  login`; any other failure is shown on the counts line, and as `—` in
+  what it counts for, until that search is counted again, while the
+  other searches go on. A failed search is asked again only when the set
+  of searches the editor needs changes, as when an edit changes what's
+  counted or another table is selected, not on every edit.
   The terminal is restored on exit, and on a panic on the main or TUI
   thread, which also ends `serve`. A panic in a review task leaves the
   terminal alone and shows in the log pane instead.
@@ -1544,7 +1587,8 @@ downcast.
   argument GitHub doesn't have fails a test instead of every poll.
 - Runner tests use a fake `claude` executable that returns canned structured
   output.
-- Debounce and polling tests use `tokio::time::pause()`.
+- Debounce and polling tests use `tokio::time::pause()`, and so do the
+  config editor's counts, against a fake of the `EditorGithub` trait.
 - VCS tests create real jj and git repos in tempdirs. They cover remote
   discovery, workspace and worktree creation and cleanup, and fix amend and
   discard.

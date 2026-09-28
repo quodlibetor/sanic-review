@@ -1,6 +1,6 @@
 //! Drawing the config editor.
 
-use std::fmt::Write;
+use std::{fmt::Write, path::Path};
 
 use ratatui::{
     Frame,
@@ -13,6 +13,7 @@ use sanic_core::config::contract_path;
 
 use super::{
     Check, ConfigEditor, Focus, Input, Popup, Typing,
+    counts::{EntryId, EntryPlan, Stopped, Tally},
     rows::{EntryEdit, EntryRow, KINDS, Row, Shown, entries, entry_text, items, kind_label, shown},
 };
 use crate::config_doc::{
@@ -37,12 +38,25 @@ impl ConfigEditor {
         }
         let inner = outer.inner(area);
         frame.render_widget(outer, area);
-        let [body, help, status] = Layout::vertical([
+        let tally = Tally(&self.answers);
+        let bounded =
+            self.watched.is_some() && (self.plan.globs || tally.excludes_a_team(&self.plan));
+        let [body, counts, note, help, status] = Layout::vertical([
             Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(u16::from(bounded)),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(inner);
+        self.render_counts(frame, counts);
+        frame.render_widget(
+            Paragraph::new(
+                " ≤: a search can't apply path globs or the team filter, so these can be fewer"
+                    .dim(),
+            ),
+            note,
+        );
         let [tables, keys] =
             Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)]).areas(body);
         self.render_tables(frame, tables);
@@ -138,6 +152,8 @@ impl ConfigEditor {
             ListItem::new(Line::from(format!(" [{table}]").bold())),
             ListItem::new(""),
         ];
+        let area = area.inner(Margin::new(1, 0));
+        let tally = Tally(&self.answers);
         for row in self.rows() {
             let label = match (&row, row.key()) {
                 (Row::Name(_), _) => "name",
@@ -146,14 +162,165 @@ impl ConfigEditor {
             };
             let mut spans = vec![Span::raw(format!(" {label:<width$}"))];
             spans.extend(self.row_value(&row).spans);
+            let counted = match &row {
+                // Each entry's repos and PRs, found by what it covers, so
+                // they follow it as it moves; one the config didn't have
+                // when it last loaded shows none.
+                Row::Entry(profile, n) => self.planned_entry(profile, *n).map(|entry| {
+                    let (repos, prs) = tally.entry(entry);
+                    format!("{:>6} {:>6} ", repos.text(), prs.text())
+                }),
+                Row::Scalar(key) if key.name == "updated_within_days" => tally
+                    .prs(&self.plan.older)
+                    .map(|n| format!("hides {n} older ")),
+                _ => None,
+            };
+            if let Some(counted) = counted {
+                // The value gives way to the counts.
+                let room = usize::from(area.width).saturating_sub(counted.chars().count() + 1);
+                truncate(&mut spans, room);
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                spans.push(Span::raw(" ".repeat(room + 1 - used.min(room + 1))));
+                spans.push(counted.dim());
+            }
             lines.push(ListItem::new(Line::from(spans)));
+        }
+        if !self.plan.entries.is_empty() {
+            let header = format!("{:>6} {:>6} ", "repos", "PRs");
+            let room = usize::from(area.width).saturating_sub(header.chars().count());
+            lines[1] = ListItem::new(Line::from(vec![Span::raw(" ".repeat(room)), header.dim()]));
+        }
+        if let (Table::ReviewRequests, Some(teams)) = (&table, tally.teams()) {
+            let filter = sanic_core::config::TeamFilter::new(self.plan.teams.clone()).ok();
+            lines.push(ListItem::new(""));
+            lines.push(ListItem::new(Line::from(
+                format!(
+                    " {:<width$}requests, as the window counts them",
+                    "your teams"
+                )
+                .dim(),
+            )));
+            for team in teams {
+                let requests = self
+                    .plan
+                    .team_requests
+                    .iter()
+                    .find(|(t, _)| t == team)
+                    .and_then(|(_, q)| tally.prs(std::slice::from_ref(q)))
+                    .map_or_else(|| "…".to_owned(), |n| n.to_string());
+                let excluded = filter.as_ref().is_some_and(|f| !f.allows(team));
+                let mut spans = vec![Span::raw(format!(
+                    " {:<width$}{team:<32} {requests:>5}",
+                    ""
+                ))];
+                if excluded {
+                    spans.push("  excluded".dim());
+                }
+                lines.push(ListItem::new(Line::from(spans)));
+            }
         }
         let mut state = ListState::default().with_selected(Some(self.row + 2));
         frame.render_stateful_widget(
             List::new(lines).highlight_style(highlight(self.focus == Focus::Keys)),
-            area.inner(Margin::new(1, 0)),
+            area,
             &mut state,
         );
+    }
+
+    /// The counts planned for a profile's `n`th entry in the file, if the
+    /// config had it when it last loaded. Entries that cover the same
+    /// thing, such as one checkout read through two remotes, pair up in
+    /// order.
+    pub(super) fn planned_entry(&self, profile: &str, n: usize) -> Option<&EntryPlan> {
+        let base = self.path.parent().unwrap_or(Path::new("."));
+        let ids: Vec<Option<EntryId>> = entries(&self.doc, profile)
+            .into_iter()
+            .take(n + 1)
+            .map(|entry| EntryId::of(&entry.ok()?, base))
+            .collect();
+        let (id, before) = ids.split_last()?;
+        let id = id.as_ref()?;
+        let nth = before
+            .iter()
+            .filter(|other| other.as_ref() == Some(id))
+            .count();
+        self.plan
+            .entries
+            .iter()
+            .filter(|planned| planned.id == *id)
+            .nth(nth)
+    }
+
+    /// The counts line: what the config as it last loaded watches, and how
+    /// counting is going.
+    fn render_counts(&self, frame: &mut Frame<'_>, area: Rect) {
+        // Nothing's planned until the text has loaded once.
+        if self.wanted.is_empty() {
+            return;
+        }
+        let tally = Tally(&self.answers);
+        let plan = &self.plan;
+        let asked_in = tally.asked_in(plan);
+        let mut text = format!(
+            " {} repos · you owe {}, in {} repo{} · yours {}",
+            tally.repos(plan).text(),
+            tally.owed(plan).text(),
+            asked_in.text(),
+            if asked_in.value == Some(1) { "" } else { "s" },
+            tally.yours(plan).text(),
+        );
+        let window = self.watched.as_ref().and_then(|w| w.window);
+        match window {
+            Some(days) => {
+                let _ = write!(text, " · {days} days");
+            }
+            None => text.push_str(" · any age"),
+        }
+        if let Some(super::Serving(serving)) = self.serve_window.filter(|s| s.0 != window) {
+            match serving {
+                Some(days) => {
+                    let _ = write!(text, " (serve: {days})");
+                }
+                None => text.push_str(" (serve: any age)"),
+            }
+        }
+        let state = match (&self.stopped, &self.check) {
+            (Some(Stopped::RateLimited(wait)), _) => Span::styled(
+                format!("rate limited for {}s ", wait.as_secs()),
+                Style::new().fg(Color::Yellow),
+            ),
+            (Some(Stopped::Unauthorized), _) => Span::styled(
+                "token rejected: gh auth login ",
+                Style::new().fg(Color::Red),
+            ),
+            // A failure stays until it's counted again, but not over a wait
+            // that's holding that up.
+            (None, _)
+                if !self.waiting
+                    && let Some(why) = tally.failure(&self.wanted) =>
+            {
+                Span::styled(
+                    format!("counting failed: {why} "),
+                    Style::new().fg(Color::Red),
+                )
+            }
+            (None, Check::Fails(_)) => "config doesn't load ".dim(),
+            (None, _) if self.waiting => "waiting out serve's rate limit ".dim(),
+            (None, _) if !tally.done(&self.wanted) => "counting… ".dim(),
+            (None, _) => Span::raw(""),
+        };
+        let [left, right] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(u16::try_from(state.content.chars().count()).unwrap_or(u16::MAX)),
+        ])
+        .areas(area);
+        let counts = if matches!(self.check, Check::Fails(_)) {
+            Span::raw(text).dim()
+        } else {
+            Span::raw(text)
+        };
+        frame.render_widget(Paragraph::new(counts), left);
+        frame.render_widget(Paragraph::new(state), right);
     }
 
     fn row_value(&self, row: &Row) -> Line<'static> {
@@ -292,6 +459,7 @@ impl ConfigEditor {
             return;
         }
         let state = match &self.check {
+            _ if self.saving => Span::raw(" … saving").dim(),
             Check::Checking => Span::raw(" … checking").dim(),
             Check::Loads => Span::styled(" ✓ loads", Style::new().fg(Color::Green)),
             Check::Fails(_) => Span::styled(" ✗ doesn't load", Style::new().fg(Color::Red)),
@@ -351,6 +519,22 @@ impl ConfigEditor {
             " j/k scroll · any other key closes"
         };
         frame.render_widget(Paragraph::new(hint.dim()), footer);
+    }
+}
+
+/// Cuts `spans` to `width` characters, ending in `…` when cut.
+fn truncate(spans: &mut Vec<Span<'static>>, width: usize) {
+    let mut left = width;
+    for (i, span) in spans.iter_mut().enumerate() {
+        let len = span.content.chars().count();
+        if len <= left {
+            left -= len;
+            continue;
+        }
+        let kept: String = span.content.chars().take(left.saturating_sub(1)).collect();
+        span.content = format!("{kept}…").into();
+        spans.truncate(i + 1);
+        return;
     }
 }
 

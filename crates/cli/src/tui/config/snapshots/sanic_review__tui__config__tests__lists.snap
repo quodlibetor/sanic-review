@@ -22,7 +22,7 @@ expression: draw(&editor).backend()
 "│                   │                                                          │"
 "│                   │                                                          │"
 "│                   │                                                          │"
-"│                   │                                                          │"
+"│                                                                              │"
 "│ which of your teams' requests count: the last glob that matches wins, `!` exc│"
 "│ … checking                     + add · - remove · u unset · ^S save · ? help │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

@@ -15,20 +15,26 @@ use sanic_core::{
     repo::RepoName,
 };
 
-/// Whether the text loads, or why not in one line.
-pub type Checked = Result<(), String>;
+use super::counts::Watched;
+use crate::config_doc::{ConfigDoc, Saved, save};
+
+/// What the text watches once it loads, or why it doesn't in one line.
+pub type Checked = Result<Watched, String>;
 
 pub struct Checker {
     path: PathBuf,
     resolver: Arc<Remembering>,
     done_tx: mpsc::Sender<(u64, Checked)>,
     done: mpsc::Receiver<(u64, Checked)>,
+    saved_tx: mpsc::Sender<Result<Saved>>,
+    saved: mpsc::Receiver<Result<Saved>>,
 }
 
 impl Checker {
     /// Checks text as the config at `path`.
     pub fn new(path: PathBuf, resolver: Arc<dyn CheckoutResolver + Send + Sync>) -> Self {
         let (done_tx, done) = mpsc::channel();
+        let (saved_tx, saved) = mpsc::channel();
         Self {
             path,
             resolver: Arc::new(Remembering {
@@ -37,7 +43,33 @@ impl Checker {
             }),
             done_tx,
             done,
+            saved_tx,
+            saved,
         }
+    }
+
+    /// Starts writing `doc`, which [`save`] checks loads first, with what
+    /// the checks found; [`Checker::saved`] hands back how it went.
+    pub fn save(&self, doc: ConfigDoc) {
+        let path = self.path.clone();
+        let resolver = Arc::clone(&self.resolver);
+        let saved = self.saved_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("config save".into())
+            .spawn(move || {
+                // Only fails once the editor has closed.
+                let _ = saved.send(save(&path, &doc, &*resolver));
+            });
+        if let Err(err) = spawned {
+            let _ = self
+                .saved_tx
+                .send(Err(eyre!(err).wrap_err("starting the save")));
+        }
+    }
+
+    /// How the last [`Checker::save`] went, once it's done.
+    pub fn saved(&self) -> Option<Result<Saved>> {
+        self.saved.try_iter().last()
     }
 
     /// Starts checking `text`; [`Checker::finished`] hands it back with
@@ -72,7 +104,7 @@ impl Checker {
 pub fn check(text: &str, path: &Path, resolver: &dyn CheckoutResolver) -> Checked {
     let base = path.parent().unwrap_or(Path::new("."));
     Config::parse(text, base, resolver)
-        .map(drop)
+        .map(|config| Watched::of(&config))
         .map_err(|err| Unloadable(err).to_string())
 }
 
@@ -141,7 +173,8 @@ mod tests {
                 }
                 std::thread::yield_now();
             };
-            assert_eq!(finished, (generation, Ok(())));
+            assert_eq!(finished.0, generation);
+            assert!(finished.1.is_ok());
         }
         assert_eq!(counting.0.load(Ordering::SeqCst), 1);
 
