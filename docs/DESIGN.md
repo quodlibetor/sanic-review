@@ -303,7 +303,9 @@ against stored state, never from notification payloads.
 - **Hidden counts.** Each reconcile under a recency window also counts,
   without fetching them, the open PRs each list would have outside it:
   review requests for reviews you owe, and your own PRs, kept to watched
-  orgs and repos. A count can't apply the team filter or path globs, and
+  orgs and repos. The watched orgs and repos are split across as many
+  searches as it takes to fit GitHub's longest query, and their counts
+  added up. A count can't apply the team filter or path globs, and
   it leaves out PRs you've reviewed whose request has cleared. It's kept
   with the window it was counted under.
 - **Newest items only.** PR snapshots fetch the newest reviews, threads and

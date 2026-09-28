@@ -36,29 +36,6 @@ pub fn recent(qualifiers: &str, since: Option<&str>) -> String {
 /// The longest search GitHub takes.
 const MAX_SEARCH: usize = 256;
 
-/// Search `qualifiers` for PRs quiet since before `day` (`YYYY-MM-DD`),
-/// kept to watched repos by `scope`: as many of its qualifiers as fit in
-/// GitHub's longest search.
-#[must_use]
-pub fn older(qualifiers: &str, day: &str, scope: &[String]) -> String {
-    let mut q = format!("{qualifiers} updated:<{day}");
-    // With the `is:open is:pr ` the search adds.
-    let room = MAX_SEARCH - "is:open is:pr ".len();
-    for (i, qualifier) in scope.iter().enumerate() {
-        if q.len() + 1 + qualifier.len() > room {
-            tracing::debug!(
-                "hidden count: {} watched orgs and repos don't fit in a search, so PRs in \
-                 them aren't counted",
-                scope.len() - i
-            );
-            break;
-        }
-        q.push(' ');
-        q.push_str(qualifier);
-    }
-    q
-}
-
 /// Searches for `qualifiers` kept to watched repos by `scope`, split so
 /// each fits in GitHub's longest search. Each of `scope`'s qualifiers is
 /// in one search, and they name disjoint repos, so counts of the searches
@@ -317,28 +294,34 @@ impl<G: GithubApi> Poller<G> {
     }
 
     /// Counts each list's open PRs quiet since before `day`, which the
-    /// window of `days` leaves out, for the dashboard to say so. Only
-    /// review requests count as owed here, and the count can't apply the
-    /// team filter or path globs; a count that fails is logged and left
+    /// window of `days` leaves out, for the dashboard to say so: a search
+    /// per [`chunked`] part of the watched scope, added up. Only review
+    /// requests count as owed here, and the count can't apply the team
+    /// filter or path globs; a list whose count fails is logged and left
     /// as it was. Only a rejected token fails the reconcile: the PRs it
     /// found still get refreshed when a count is rate limited.
     async fn count_hidden(&mut self, days: u32, day: &str) -> Result<(), ApiError> {
         let scope = self.config.search_scope();
-        for (list, qualifiers) in [
+        'lists: for (list, qualifiers) in [
             (List::Owed, "review-requested:@me -author:@me"),
             (List::Mine, "author:@me"),
         ] {
-            match self.github.count_prs(&older(qualifiers, day, &scope)).await {
-                Ok(count) => self.store.set_hidden(list, days, count)?,
-                Err(ApiError::Other(report)) => {
-                    tracing::warn!("counting PRs older than the window failed: {report:?}");
+            let mut total = 0;
+            for q in chunked(&format!("{qualifiers} updated:<{day}"), &scope) {
+                match self.github.count_prs(&q).await {
+                    Ok(count) => total += count,
+                    Err(ApiError::Other(report)) => {
+                        tracing::warn!("counting PRs older than the window failed: {report:?}");
+                        continue 'lists;
+                    }
+                    Err(ApiError::RateLimited { .. }) => {
+                        tracing::warn!("counting PRs older than the window was rate limited");
+                        break 'lists;
+                    }
+                    Err(err @ ApiError::Unauthorized) => return Err(err),
                 }
-                Err(ApiError::RateLimited { .. }) => {
-                    tracing::warn!("counting PRs older than the window was rate limited");
-                    break;
-                }
-                Err(err @ ApiError::Unauthorized) => return Err(err),
             }
+            self.store.set_hidden(list, days, total)?;
         }
         Ok(())
     }
@@ -792,15 +775,39 @@ pub(crate) mod tests {
         assert_eq!(poller.github.searched.borrow().len(), searches + 2);
     }
 
-    #[test]
-    fn hidden_counts_keep_to_what_fits_in_a_search() {
-        let scope: Vec<String> = (0..40).map(|i| format!("repo:org/repo-{i}")).collect();
-        let q = older("author:@me", "2026-09-09", &scope);
-        assert!(q.starts_with("author:@me updated:<2026-09-09 repo:org/repo-0 "));
-        assert!(q.len() + "is:open is:pr ".len() <= MAX_SEARCH, "{q}");
+    #[tokio::test]
+    async fn hidden_counts_add_up_over_a_scope_too_long_for_one_search() {
+        let repos: Vec<String> = (0..40)
+            .map(|i| format!("{{ github = \"elsewhere/repo-{i}\" }}"))
+            .collect();
+        let config = Config::parse(
+            &format!("[profile.p]\nrepos = [{}]\n", repos.join(", ")),
+            Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let owed = chunked(
+            "review-requested:@me -author:@me updated:<2026-09-09",
+            &config.search_scope(),
+        );
+        assert!(owed.len() > 1);
+        let counts = owed.iter().zip(1..).map(|(q, n)| (q.clone(), n)).collect();
+        let github = FakeGithub {
+            counts,
+            ..FakeGithub::default()
+        };
+        let mut poller = Poller::new(
+            github,
+            Store::open_in_memory().unwrap(),
+            config,
+            "me".into(),
+        )
+        .with_clock(Arc::new(FixedClock));
+        poller.reconcile().await.unwrap();
+        let expected: u32 = (1..).take(owed.len()).sum();
         assert_eq!(
-            older("author:@me", "2026-09-09", &[]),
-            "author:@me updated:<2026-09-09"
+            poller.store().hidden(List::Owed, Some(14)).unwrap(),
+            Some(expected)
         );
     }
 
