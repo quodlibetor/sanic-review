@@ -97,18 +97,16 @@ You need:
 Then:
 
 ```sh
-sanic-review setup
-```
-
-This opens the config editor: every key, with `f` to suggest your teams,
-orgs, local checkouts, models and skills, and live counts of the repos and
-PRs the config watches. It checks the config as you go, shows the diff, and
-writes it only once it loads and you say yes, keeping the file's comments
-and layout. Run it again whenever; `e` in the TUI opens the same editor.
-
-```sh
 sanic-review serve
 ```
+
+With no config yet, this opens the config editor first: every key, with
+`f` to suggest your teams, orgs, local checkouts, models and skills, and
+live counts of the repos and PRs the config watches. It checks the config
+as you go, shows the diff, and writes it only once it loads and you say
+yes, keeping the file's comments and layout; `serve` then starts with it.
+Later, `e` in the TUI opens the same editor, and `sanic-review setup` opens
+it without starting `serve`, say when `serve` runs under systemd.
 
 `serve` runs in the foreground: it polls GitHub, runs reviews and serves the
 dashboard, logging its URL on startup (`o` in the TUI opens it). Its options:
@@ -134,6 +132,7 @@ Other commands:
 sanic-review review <PR url>     # ask the running serve to review a PR now
 sanic-review archive <PR url>    # stop reviewing it automatically (unarchive undoes it)
 sanic-review chat <PR url>       # ask the agent about its review; see --help
+sanic-review setup               # the config editor, without starting serve
 ```
 
 ## A short tour
@@ -204,12 +203,29 @@ activity and the log, plus a config editor. Its keys:
 The dashboard uses the same keys where they make sense in a browser; `?`
 lists them.
 
+**The config editor** (`e`, `setup`, or a first `serve`) lists the tables
+on the left and their keys on the right, unset ones showing their default:
+
+| Key | Does |
+|-----|------|
+| Tab, `j`/`k`, `g`/`G` | switch sides, move, jump to first/last |
+| Enter | edit a key, flip a bool, or open a repo entry |
+| `+` / `-` | add or remove a list item, repo entry, glob or profile |
+| `K` / `J` | move one up or down, since order decides what wins |
+| `f` | suggest teams, orgs and checkouts, models, skills or instructions |
+| `u` | unset a key, back to its default |
+| `v` / Ctrl-S | show the diff / save, after showing it |
+| Esc, `q` | back out of an entry, or leave, asking about unsaved edits |
+
+While typing, Enter sets, a blank unsets, Esc cancels and Tab completes a
+path or a model.
+
 For how any of this actually works, see [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Configuration
 
-`~/.config/sanic-review/config.toml`. `setup` writes it, and hand edits are
-fine too: `serve` reloads it when it changes and keeps comments and layout
+`~/.config/sanic-review/config.toml`. The config editor writes it, and hand
+edits are fine too: `serve` reloads it when it changes and keeps comments and layout
 when it edits it. A minimal one:
 
 ```toml

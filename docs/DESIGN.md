@@ -1589,8 +1589,15 @@ downcast.
   discovery, workspace and worktree creation and cleanup, and fix amend and
   discard.
 - SQLite tests get a fresh database per test, with migrations applied.
-- `insta` snapshots cover prompt assembly, GitHub payload previews and
-  dashboard HTML.
+- `insta` snapshots cover prompt assembly, GitHub payload previews,
+  dashboard HTML, and the TUI's and config editor's screens, drawn on
+  ratatui's `TestBackend`. Beyond Tab completing a typed path, the
+  editor's keys act only on its state: checks, saves and searches of the
+  disk come back as outcomes its host carries out, and the host asks it
+  what to count and hands it the answers.
+- Whether stdin and stdout are terminals, and whether `serve` has the
+  foreground, is passed in as values, so choosing the UI and opening the
+  editor on a first run are tested without a terminal.
 - The GitHub token is wrapped in a redacting type, so it can't appear in logs
   or `Debug` output.
 

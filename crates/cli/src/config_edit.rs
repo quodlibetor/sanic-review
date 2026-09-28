@@ -1,7 +1,7 @@
 //! Editing the config file in place, keeping its comments and layout.
-//! [`crate::config_doc`] and `setup`, the TUI's and the dashboard's ignore
-//! editors, their manual reviews switches and `serve --manual-reviews`
-//! write through here.
+//! The config editor (through [`crate::config_doc`]), the TUI's and the
+//! dashboard's ignore editors, their manual reviews switches and `serve
+//! --manual-reviews` write through here.
 
 use std::{
     path::{Path, PathBuf},

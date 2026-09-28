@@ -1,6 +1,7 @@
-//! Where tracing output goes: stdout for `--ui logs` and `setup`; the TUI's
-//! log pane plus a log file for `--ui tui`, since writing to the terminal
-//! would corrupt the screen.
+//! Where tracing output goes: stdout for `--ui logs` and the commands that
+//! don't take the screen; the TUI's log pane plus a log file for `--ui
+//! tui`, since writing to the terminal would corrupt the screen. `setup`,
+//! whose editor has the screen, logs nowhere.
 
 use std::{
     collections::VecDeque,

@@ -793,8 +793,9 @@ impl ConfigEditor {
                 }
             }
             KeyCode::Tab if self.completes_paths(&typing.into) => {
-                // The scan's directory resolves as `setup`'s did, against
-                // the working directory; the config's paths against its own.
+                // The scan's directory resolves against the working
+                // directory, as a path typed at a shell does; the config's
+                // paths against its own.
                 let cwd;
                 let base = if typing.into == Input::ScanRoot {
                     cwd = std::env::current_dir().unwrap_or_default();
