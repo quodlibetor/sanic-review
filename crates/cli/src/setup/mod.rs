@@ -1,9 +1,8 @@
 //! `sanic-review setup`: write or update the config interactively.
 
-mod edit;
 mod models;
 mod scan;
-mod skills;
+pub mod skills;
 
 use std::{
     collections::BTreeSet,
@@ -27,12 +26,16 @@ use sanic_github::{Client, Token};
 use sanic_runner::vcs::VcsResolver;
 use toml_edit::DocumentMut;
 
-use self::edit::{Selections, apply, apply_extras};
-use crate::config_edit::write_atomically;
+use crate::{
+    config_doc::{
+        NEW_FILE_HEADER,
+        choices::{Selections, apply, apply_extras},
+    },
+    config_edit::write_atomically,
+};
 
 const MULTI_HELP: &str = "space: toggle · →: all · ←: none · type to filter · enter: done";
 const NEW_PROFILE: &str = "(new profile)";
-const NEW_FILE_HEADER: &str = "# sanic-review config; the format is described in docs/DESIGN.md.\n";
 const DEFAULT_DEPTH: usize = 3;
 
 #[derive(Debug, clap::Args)]

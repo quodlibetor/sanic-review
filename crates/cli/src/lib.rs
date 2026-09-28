@@ -2,6 +2,12 @@
 
 mod archive;
 mod chat;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the config editor, which uses it, comes next"
+)]
+mod config_doc;
 mod config_edit;
 pub mod logging;
 pub mod poll;

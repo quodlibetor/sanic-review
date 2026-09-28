@@ -1,5 +1,6 @@
-//! Applying `setup` choices to a config document, keeping its comments and
-//! everything setup doesn't manage.
+//! Applying what was picked from discovered teams, checkouts, orgs,
+//! models, skills and instructions to a config document, keeping its
+//! comments and everything else in it.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,8 @@ use sanic_core::{
 };
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-use super::skills::{Places, ProfileExtras};
 use crate::config_edit::{new_table, push_on_own_line, remove_keeping_comments, set_value};
+use crate::setup::skills::{Places, ProfileExtras};
 
 /// What the user picked. Each list holds every option offered, with whether
 /// it was selected; options that weren't offered are left alone.

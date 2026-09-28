@@ -1,6 +1,7 @@
 //! Editing the config file in place, keeping its comments and layout.
-//! `setup`, the TUI's and the dashboard's ignore editors, their manual
-//! reviews switches and `serve --manual-reviews` write through here.
+//! [`crate::config_doc`] and `setup`, the TUI's and the dashboard's ignore
+//! editors, their manual reviews switches and `serve --manual-reviews`
+//! write through here.
 
 use std::{
     path::{Path, PathBuf},
@@ -9,22 +10,168 @@ use std::{
 
 use color_eyre::eyre::{Result, WrapErr, bail};
 use sanic_core::config::{CheckoutResolver, Config, Unloadable};
-use toml_edit::{Array, DocumentMut, Item, RawString, Table, Value};
+use toml_edit::{Array, DocumentMut, Item, RawString, Table, TableLike, Value};
 
 /// Sets `[table].key`, creating the table as needed. A replaced value keeps
 /// its surrounding whitespace and trailing comment.
-pub fn set_value(doc: &mut DocumentMut, table: &str, key: &str, mut value: Value) -> Result<()> {
+pub fn set_value(doc: &mut DocumentMut, table: &str, key: &str, value: Value) -> Result<()> {
     let item = doc.entry(table).or_insert_with(|| Item::Table(new_table()));
     let Some(item) = item.as_table_like_mut() else {
         bail!("`{table}` in the config is not a table");
     };
-    if let Some(old) = item.get_mut(key).and_then(Item::as_value_mut) {
+    set_in(item, key, value);
+    Ok(())
+}
+
+/// Sets `key` in `table`. A replaced value keeps its surrounding
+/// whitespace and trailing comment.
+pub fn set_in(table: &mut dyn TableLike, key: &str, mut value: Value) {
+    if let Some(old) = table.get_mut(key).and_then(Item::as_value_mut) {
         *value.decor_mut() = old.decor().clone();
         *old = value;
     } else {
-        item.insert(key, Item::Value(value));
+        table.insert(key, Item::Value(value));
     }
-    Ok(())
+}
+
+/// Removes `key` from the table `item`, keeping the comment lines above
+/// it: they go before the next key, or after the key before it when it was
+/// the last, or after the table's header when it was the only one. A
+/// comment on its own line goes with it. `false` if it wasn't there.
+pub fn unset_keeping_comments(item: &mut Item, key: &str) -> bool {
+    let Some(table) = item.as_table_like_mut() else {
+        return false;
+    };
+    let values: Vec<String> = table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .map(|(k, _)| k.to_owned())
+        .collect();
+    let Some(at) = values.iter().position(|k| k == key) else {
+        return table.remove(key).is_some();
+    };
+    let above = table
+        .key(key)
+        .map(|k| up_to_last_line(raw(k.leaf_decor().prefix())).to_owned())
+        .unwrap_or_default();
+    table.remove(key);
+    if !above.contains('#') {
+        return true;
+    }
+    if let Some(mut next) = values.get(at + 1).and_then(|k| table.key_mut(k)) {
+        let prefix = format!("{above}\n{}", raw(next.leaf_decor().prefix()));
+        next.leaf_decor_mut().set_prefix(prefix);
+        return true;
+    }
+    if let Some(prev) = at
+        .checked_sub(1)
+        .and_then(|i| table.get_mut(&values[i]))
+        .and_then(Item::as_value_mut)
+    {
+        // The line break after the value ends the comment's line.
+        let suffix = format!("{}\n{above}", raw(prev.decor().suffix()));
+        prev.decor_mut().set_suffix(suffix);
+    } else if let Some(header) = item.as_table_mut() {
+        // Likewise the one after the header.
+        let suffix = format!("{}\n{above}", raw(header.decor().suffix()));
+        header.decor_mut().set_suffix(suffix);
+    }
+    true
+}
+
+/// Moves `list[from]` to `to`, which counts the list without it, with its
+/// comments: the lines above it and the one after its comma, which is
+/// stored with the entry after it. Each place keeps its indent and what
+/// follows it.
+pub fn move_keeping_comments(list: &mut Array, from: usize, to: usize) {
+    let to = to.min(list.len().saturating_sub(1));
+    if from >= list.len() || from == to {
+        return;
+    }
+    // An entry's prefix is: the comment after the previous entry's comma
+    // (or on the `[` line), the entry's own comment lines, then its indent.
+    let parts: Vec<(String, String, String)> = list
+        .iter()
+        .map(|v| {
+            let prefix = raw(v.decor().prefix());
+            match (prefix.find('\n'), prefix.rfind('\n')) {
+                (Some(start), Some(end)) => (
+                    prefix[..start].to_owned(),
+                    prefix[start..end].to_owned(),
+                    prefix[end..].to_owned(),
+                ),
+                _ => (String::new(), String::new(), prefix.to_owned()),
+            }
+        })
+        .collect();
+    // The last entry's line comment follows the trailing comma, in the
+    // list's trailing space; without one, it's in the entry's suffix.
+    let comma = list.trailing_comma();
+    let final_place = list.len() - 1;
+    let mut suffixes: Vec<String> = list
+        .iter()
+        .map(|v| raw(v.decor().suffix()).to_owned())
+        .collect();
+    let mut closing = raw(Some(list.trailing())).to_owned();
+    let tail = if comma {
+        &mut closing
+    } else {
+        &mut suffixes[final_place]
+    };
+    let last_comment = tail
+        .drain(..tail.find('\n').unwrap_or(0))
+        .collect::<String>();
+    // The comment on each entry's line, by entry.
+    let line_comments: Vec<String> = parts
+        .iter()
+        .skip(1)
+        .map(|(after, _, _)| after.clone())
+        .chain([last_comment])
+        .collect();
+
+    let mut order: Vec<usize> = (0..list.len()).collect();
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    let value = list.remove(from);
+    list.insert_formatted(to, value);
+    for (place, entry) in list.iter_mut().enumerate() {
+        let before = match place.checked_sub(1) {
+            None => &parts[0].0,
+            Some(prev) => &line_comments[order[prev]],
+        };
+        let prefix = format!("{before}{}", parts[order[place]].1);
+        entry
+            .decor_mut()
+            .set_prefix(end_comment_line(prefix, &parts[place].2));
+        let suffix = if place == final_place && !comma {
+            end_comment_line(
+                line_comments[order[final_place]].clone(),
+                &suffixes[final_place],
+            )
+        } else {
+            suffixes[place].clone()
+        };
+        entry.decor_mut().set_suffix(suffix);
+    }
+    if comma {
+        let after_final = line_comments[order[final_place]].clone();
+        list.set_trailing(end_comment_line(after_final, &closing));
+    }
+}
+
+/// `text` then `rest`, with a line break between them when `text` ends in
+/// a comment and `rest` doesn't start a line, so the comment can't swallow
+/// what follows.
+fn end_comment_line(mut text: String, rest: &str) -> String {
+    let open = text
+        .rsplit('\n')
+        .next()
+        .is_some_and(|line| line.contains('#'));
+    if open && !rest.starts_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(rest);
+    text
 }
 
 /// A table that prints after a blank line.
@@ -405,6 +552,80 @@ skip_titles = ["wip*"]
             edit("l = [\"a\", # on a\n  \"x\"]\n", None),
             "l = [\"a\" # on a\n]\n"
         );
+    }
+
+    #[test]
+    fn moved_entries_take_their_comments_and_leave_the_layout() {
+        let moved = |text: &str, from, to| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            move_keeping_comments(doc["l"].as_array_mut().unwrap(), from, to);
+            doc.to_string()
+        };
+        assert_eq!(
+            moved("l = [\"a\", \"b\", \"c\"]\n", 2, 0),
+            "l = [\"c\", \"a\", \"b\"]\n"
+        );
+        assert_eq!(
+            moved(
+                "l = [\n  # about a\n  \"a\", # on a\n  \"b\",\n  \"c\", # on c\n]\n",
+                0,
+                2
+            ),
+            "l = [\n  \"b\",\n  \"c\", # on c\n  # about a\n  \"a\", # on a\n]\n"
+        );
+        assert_eq!(
+            moved("l = [ # the list\n  \"a\",\n  \"b\", # on b\n]\n", 1, 0),
+            "l = [ # the list\n  \"b\", # on b\n  \"a\",\n]\n"
+        );
+        // A comment never ends up before what followed it on its line.
+        for (text, from, to, want) in [
+            (
+                "l = [\"a\", # on a\n  \"b\"]\n",
+                0,
+                1,
+                "l = [\"b\",\n  \"a\" # on a\n]\n",
+            ),
+            (
+                "l = [\"a\", # on a\n \"b\", \"c\"]\n",
+                2,
+                0,
+                "l = [\"c\",\n \"a\", # on a\n \"b\"]\n",
+            ),
+            (
+                "l = [\n  \"a\", # on a\n  \"b\" # on b\n]\n",
+                1,
+                0,
+                "l = [\n  \"b\", # on b\n  \"a\" # on a\n]\n",
+            ),
+        ] {
+            let out = moved(text, from, to);
+            assert_eq!(out, want);
+            out.parse::<DocumentMut>().unwrap();
+        }
+        // Out of range, or to where it is, it stays.
+        assert_eq!(moved("l = [\"a\", \"b\"]\n", 1, 9), "l = [\"a\", \"b\"]\n");
+        assert_eq!(moved("l = [\"a\", \"b\"]\n", 5, 0), "l = [\"a\", \"b\"]\n");
+    }
+
+    #[test]
+    fn unset_keys_leave_the_comments_above_them() {
+        let unset = |text: &str, key: &str| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            assert!(unset_keeping_comments(&mut doc["t"], key));
+            doc.to_string()
+        };
+        assert_eq!(
+            unset("[t]\n# about a\na = 1 # on a\nb = 2\n", "a"),
+            "[t]\n# about a\nb = 2\n"
+        );
+        assert_eq!(
+            unset("[t]\na = 1\n\n# about b\nb = 2 # on b\n", "b"),
+            "[t]\na = 1\n\n# about b\n"
+        );
+        assert_eq!(unset("[t]\na = 1\nb = 2\n", "a"), "[t]\nb = 2\n");
+        assert_eq!(unset("[t]\n# about a\na = 1\n", "a"), "[t]\n# about a\n");
+        let mut doc: DocumentMut = "[t]\na = 1\n".parse().unwrap();
+        assert!(!unset_keeping_comments(&mut doc["t"], "z"));
     }
 
     #[test]

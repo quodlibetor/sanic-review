@@ -23,17 +23,20 @@ use crate::{
     skip::{ProfileSkips, SkipRules, TitleFilter},
 };
 
-const DEFAULT_API_URL: &str = "https://api.github.com";
-const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
-const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
-const DEFAULT_QUIET: Duration = Duration::from_mins(2);
-const DEFAULT_UPDATED_WITHIN_DAYS: u32 = 14;
-const DEFAULT_GIT_URL: &str = "https://github.com";
-const DEFAULT_CLAUDE: &str = "claude";
-const DEFAULT_MAX_RUNS: usize = 2;
-const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
-/// `runner.manual_reviews` when the config leaves it unset.
-const DEFAULT_MANUAL_REVIEWS: bool = true;
+// What each key means when the config leaves it unset, for the loader and
+// for showing in its place.
+pub const DEFAULT_API_URL: &str = "https://api.github.com";
+pub const DEFAULT_RECONCILE: Duration = Duration::from_mins(5);
+pub const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
+pub const DEFAULT_QUIET: Duration = Duration::from_mins(2);
+pub const DEFAULT_UPDATED_WITHIN_DAYS: u32 = 14;
+pub const DEFAULT_TEAMS: &[&str] = &["*"];
+pub const DEFAULT_SKIP_DRAFTS: bool = true;
+pub const DEFAULT_GIT_URL: &str = "https://github.com";
+pub const DEFAULT_CLAUDE: &str = "claude";
+pub const DEFAULT_MAX_RUNS: usize = 2;
+pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
+pub const DEFAULT_MANUAL_REVIEWS: bool = true;
 /// The `model` value that leaves the choice to `claude`, which then uses your
 /// own default model at run time.
 /// Matched ignoring case; setup writes it lowercase.
@@ -490,12 +493,15 @@ impl Config {
                 teams: TeamFilter::new(
                     raw.review_requests
                         .teams
-                        .unwrap_or_else(|| vec!["*".into()]),
+                        .unwrap_or_else(|| DEFAULT_TEAMS.iter().map(|&t| t.into()).collect()),
                 )
                 .wrap_err("in `review_requests.teams`")?,
                 skip_titles: TitleFilter::new(raw.review_requests.skip_titles)
                     .wrap_err("in `review_requests.skip_titles`")?,
-                skip_drafts: raw.review_requests.skip_drafts.unwrap_or(true),
+                skip_drafts: raw
+                    .review_requests
+                    .skip_drafts
+                    .unwrap_or(DEFAULT_SKIP_DRAFTS),
             },
             runner: RunnerSettings {
                 claude,
