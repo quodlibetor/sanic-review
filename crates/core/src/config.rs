@@ -660,8 +660,11 @@ fn resolve_target(
                 .ok_or_else(|| eyre!("`{key}` must be a string"))
         })
     };
+    // An empty list is no filter, as if `paths` were left out: zero globs
+    // would match no PR, and the entry would still claim its repo.
     let path_globs = match table.get("paths") {
         None => None,
+        Some(toml::Value::Array(items)) if items.is_empty() => None,
         Some(toml::Value::Array(items)) => Some(
             items
                 .iter()
@@ -946,6 +949,51 @@ mod tests {
             matched(&config, "org/repo", &["b/x"]).as_deref(),
             Some("whole")
         );
+    }
+
+    #[test]
+    fn an_empty_paths_list_is_the_same_as_none() {
+        let empty_first = parse(
+            r#"
+            [profile.empty]
+            repos = [{ github = "org/repo", paths = [] }, { repo = "services", paths = [] }]
+            [profile.whole]
+            repos = [{ github = "org/repo" }, "services"]
+            [profile.org]
+            repos = [{ github = "org" }, { github = "sanic-hq", paths = [] }]
+            "#,
+        )
+        .unwrap();
+        for target in empty_first.targets().map(|(_, t)| t) {
+            assert!(target.paths.is_none(), "{:?}", target.scope);
+        }
+        for repo in ["org/repo", "sanic-hq/services"] {
+            // Any file matches, and it ties with the unscoped entry rather
+            // than outranking it, so the first profile wins.
+            assert_eq!(
+                matched(&empty_first, repo, &["any/file"]).as_deref(),
+                Some("empty"),
+                "{repo}"
+            );
+            assert!(!empty_first.needs_files(&RepoName::parse(repo).unwrap()));
+        }
+
+        let whole_first = parse(
+            r#"
+            [profile.whole]
+            repos = [{ github = "org/repo" }, "services"]
+            [profile.empty]
+            repos = [{ github = "org/repo", paths = [] }, { repo = "services", paths = [] }]
+            "#,
+        )
+        .unwrap();
+        for repo in ["org/repo", "sanic-hq/services"] {
+            assert_eq!(
+                matched(&whole_first, repo, &["any/file"]).as_deref(),
+                Some("whole"),
+                "{repo}"
+            );
+        }
     }
 
     #[test]

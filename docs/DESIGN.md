@@ -183,7 +183,8 @@ the choice is ambiguous, that's a startup error that names the entry and
 suggests `remote = "..."`.
 
 A path-scoped entry selects a PR if any file it changes matches one of the
-globs.
+globs. An empty `paths` list is the same as leaving `paths` out: the entry
+is unscoped, not one that matches no PR.
 
 **Precedence.** When several entries match a PR, across or within profiles,
 the most specific wins: path-scoped, then repo, then org. Between equally
