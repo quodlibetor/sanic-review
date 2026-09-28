@@ -1299,6 +1299,27 @@ async fn assets_are_embedded() {
         assert_eq!(reply.headers[header::CONTENT_TYPE], kind);
         assert!(!reply.body.is_empty());
     }
+    // Not UTF-8, so not through `get`.
+    let font = f
+        .router()
+        .oneshot(
+            Request::get("/assets/twemoji.woff2")
+                .header(header::HOST, HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(font.status(), StatusCode::OK);
+    assert_eq!(font.headers()[header::CONTENT_TYPE], "font/woff2");
+    let bytes = font.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.starts_with(b"wOF2"));
+    // And the pages may load it.
+    let page = f.get("/").await;
+    let csp = page.headers[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("font-src 'self'"), "{csp}");
     assert_eq!(f.get("/assets/nope.js").await.status, StatusCode::NOT_FOUND);
     // Browsers that probe for the old icon path get the SVG.
     let ico = f.get("/favicon.ico").await;

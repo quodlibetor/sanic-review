@@ -45,7 +45,7 @@ run = "cargo llvm-cov nextest --workspace --locked"
 
 # Regenerates docs/images/*.png from the demo example; see scripts/screenshots.mjs.
 [tasks.screenshots]
-description = "Screenshot the demo dashboard for the README (needs Chrome; on Linux, fetches a pinned emoji font once)"
+description = "Screenshot the demo dashboard for the README (needs Chrome)"
 tools = { node = "26.10.0" }
 run = "node scripts/screenshots.mjs"
 
@@ -54,6 +54,24 @@ run = "node scripts/screenshots.mjs"
 [tasks.release]
 description = "Cut a release: mise run release [X.Y.Z] [--push]"
 run = "scripts/release.sh"
+
+# Rebuilds crates/web/assets/twemoji.woff2 from Mozilla's Twemoji COLR font,
+# pinned by release and sha256, subset to crates/web/assets/emoji.txt.
+[tasks.emoji-font]
+description = "Rebuild the dashboard's emoji font from the pinned Twemoji release"
+tools = { uv = "0.12.19" }
+run = """
+set -eu
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/Twemoji.Mozilla.ttf" \
+  https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf
+echo "6d90152ee0d29e82fe2a87793af5aa4b7ad13e6538360889e141e81ed299ee8e  $tmp/Twemoji.Mozilla.ttf" \
+  | shasum -a 256 -c -
+uvx --from 'fonttools[woff]==4.66.0' --with 'brotli==1.2.0' pyftsubset "$tmp/Twemoji.Mozilla.ttf" \
+  --unicodes-file=crates/web/assets/emoji.txt --flavor=woff2 \
+  --output-file=crates/web/assets/twemoji.woff2
+"""
 
 [tasks.check]
 description = "The gate every change must pass"

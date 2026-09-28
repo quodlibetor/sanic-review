@@ -16,7 +16,7 @@
 //!   confirm page and catch a keystroke on it.
 //! - Every response forbids framing, so a page can't overlay the Confirm
 //!   button and trick you into clicking it, and its CSP allows only the
-//!   dashboard's own scripts and styles.
+//!   dashboard's own scripts, styles and font.
 
 use std::fmt::Write as _;
 
@@ -41,8 +41,8 @@ const MAX_FORM: usize = 1 << 20;
 /// Images may come from the web, for the ones in comments; the sanitised
 /// Markdown has none until you click one (see `markdown`).
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-                   img-src 'self' https: http:; connect-src 'self'; form-action 'self'; \
-                   frame-ancestors 'none'; base-uri 'none'";
+                   font-src 'self'; img-src 'self' https: http:; connect-src 'self'; \
+                   form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /// A random token, fixed for the life of the process.
 pub struct Csrf(String);

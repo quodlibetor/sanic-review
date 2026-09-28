@@ -1,3 +1,13 @@
+/* The dashboard's own emoji, drawn the same on every platform: Twemoji
+   (https://github.com/twitter/twemoji, CC-BY 4.0), subset to the code
+   points in emoji.txt. The browser fetches it only for those, so
+   everything else keeps the stacks' fonts. */
+@font-face {
+  font-family: "Sanic Emoji";
+  src: url("/assets/twemoji.woff2") format("woff2");
+  unicode-range: U+1F44D, U+1F4AC, U+1F5BC;
+}
+
 :root {
   --bg: #fdfdfc;
   --fg: #1d1f21;
@@ -41,7 +51,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 15px/1.45 system-ui, sans-serif;
+  font: 15px/1.45 "Sanic Emoji", system-ui, sans-serif;
 }
 
 main {
@@ -61,7 +71,7 @@ textarea,
 .gh,
 .status,
 .drafts {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 13px;
 }
 
@@ -150,7 +160,7 @@ header.top {
 
 /* A key, as buttons and hints show it. */
 .k {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
   color: var(--dim);
   border: 1px solid var(--line);
@@ -162,7 +172,7 @@ header.top {
 
 /* A PR as owner/name#N, linking to GitHub. */
 .ref {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   color: var(--dim);
   text-decoration: none;
@@ -175,13 +185,13 @@ header.top {
 }
 
 .chip {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   white-space: nowrap;
 }
 
 .cnt {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   color: var(--drafts);
   white-space: nowrap;
@@ -530,7 +540,7 @@ details.grp[open] > summary .group-h::before {
 }
 
 .vm {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   margin-left: 0.1rem;
 }
@@ -683,13 +693,13 @@ details.grp[open] > summary .group-h::before {
 .sig.post {
   color: var(--drafts);
   font-weight: 600;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
 .sig.decided {
   color: var(--dim);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
@@ -857,7 +867,7 @@ button:disabled {
 table.diff {
   width: 100%;
   border-collapse: collapse;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   margin: 0.4rem 0;
 }
@@ -990,7 +1000,7 @@ main:has(> .cf) {
 }
 
 .cf .who .error {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   margin-top: 0.2rem;
   white-space: pre-wrap;
@@ -1136,12 +1146,12 @@ main:has(> .cols) > h1 {
 .rv > .md {
   margin: 0;
   padding: 0.5rem 0.75rem;
-  font-family: system-ui, sans-serif;
+  font-family: "Sanic Emoji", system-ui, sans-serif;
   font-size: 14px;
 }
 
 .mono {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 13px;
 }
 
@@ -1491,7 +1501,7 @@ p.seen {
 }
 
 .dc .h .anc {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 13px;
   font-weight: 600;
 }
@@ -1814,7 +1824,7 @@ p.seen {
 }
 
 .thread .th .anc {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   font-weight: 600;
 }
@@ -1845,7 +1855,7 @@ p.seen {
 }
 
 table.diff tr.thread-row td {
-  font-family: system-ui, sans-serif;
+  font-family: "Sanic Emoji", system-ui, sans-serif;
   white-space: normal;
   padding: 0.15rem 0.4rem 0.15rem 6.8rem;
   background: var(--raise);
@@ -1945,14 +1955,14 @@ main:has(#drafts.files) {
 }
 
 .file .fp {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-weight: 600;
   overflow-wrap: anywhere;
   min-width: 0;
 }
 
 .file .fh .stats {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
@@ -1984,7 +1994,7 @@ main:has(#drafts.files) {
 table.d {
   width: 100%;
   border-collapse: collapse;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Sanic Emoji", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
@@ -2028,7 +2038,7 @@ table.d tr.hh td {
 /* A draft or thread under the line it ends on: text, not code, and as
    wide as the file's box however far its lines scroll. */
 table.d tr.inl > td {
-  font-family: system-ui, sans-serif;
+  font-family: "Sanic Emoji", system-ui, sans-serif;
   font-size: 14px;
   white-space: normal;
   padding: 0.3rem 0.6rem;

@@ -1,0 +1,6 @@
+# The emoji the dashboard's own markup uses, which twemoji.woff2 draws.
+# `mise run emoji-font` subsets the font to these, and the tests check
+# the markup and style.css's unicode-range against them.
+U+1F44D  # 👍 thumbs up
+U+1F4AC  # 💬 speech balloon
+U+1F5BC  # 🖼 framed picture

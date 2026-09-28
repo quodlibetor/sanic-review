@@ -617,9 +617,26 @@ available when tuning instruction files.
 ## Dashboard
 
 `serve` serves it on `http://127.0.0.1:<port>/`. Pages are rendered on the
-server with maud, and htmx handles in-place edits. Every script, style and
-icon is embedded in the binary, so nothing is fetched at runtime but an
-image in a comment you click to load.
+server with maud, and htmx handles in-place edits. Every script, style,
+icon and font is embedded in the binary, so nothing is fetched at runtime
+but an image in a comment you click to load.
+
+The few colour emoji the dashboard's own markup uses come from
+an embedded subset of Mozilla's Twemoji COLR font, so they look the same on
+every platform rather than depending on the viewer's emoji font. COLRv0
+draws in Chrome, Firefox and Safari. `style.css`'s `@font-face` limits it
+by `unicode-range` to those code points and puts it first in every font
+stack, so the browser fetches it only for a page that has one of them, and
+every other character keeps the stack's fonts. The code points live in
+`crates/web/assets/emoji.txt`; a test fails when it differs from the
+characters from U+1F000 up in the markup (the crate's non-test sources
+and `app.js`), or from the `unicode-range`. Other emoji,
+such as most in PR content, use the viewer's fonts. Adding an emoji to the
+markup means adding it to `emoji.txt` and the `unicode-range`, then
+running `mise run emoji-font`, which downloads the Twemoji release pinned
+by URL and sha256 in `mise.toml`, checks it, and subsets it with
+fonttools (run through `uv`, which only this task needs) to
+`crates/web/assets/twemoji.woff2`.
 
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by
@@ -1240,7 +1257,8 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   unknown, used or expired pick is refused, before anything is loaded,
   with a note to pick Approve again on the PR page.
 - Responses forbid framing, so another page can't trick you into clicking
-  Confirm, and the CSP allows only the dashboard's own scripts. It lets
+  Confirm, and the CSP allows only the dashboard's own scripts, styles and
+  font. It lets
   images come from the web, for the ones in comments, which are only in a
   page once you click one (see Markdown under Dashboard). The
   referrer policy is `same-origin`: links out to GitHub carry no
@@ -1260,7 +1278,8 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   it as Rust's version file, and rustup reads it directly, so local builds,
   `check` CI and release builds use the same toolchain.
 - `mise.toml` pins every other tool: `cargo-deny`, `cargo-nextest`,
-  `cargo-llvm-cov`, `cargo-insta`, `dist`, and Node for the screenshots task.
+  `cargo-llvm-cov`, `cargo-insta`, `dist`, Node for the screenshots task
+  and uv for the emoji font task.
 - mise is also the task runner:
 
   | Task | Runs |
@@ -1273,6 +1292,7 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   | `mise run coverage` | `cargo llvm-cov nextest`. Informational, not part of `check` |
   | `mise run check` | fmt, lint, deny, dist, test |
   | `mise run screenshots` | regenerates the README's screenshots; see below |
+  | `mise run emoji-font` | rebuilds the dashboard's emoji font; see [Dashboard](#dashboard) |
 
 - **Every change passes `mise run check`.** Locally this is a rule in
   `CLAUDE.md`, because jj has no commit hooks. In CI, a GitHub Actions
@@ -1298,11 +1318,8 @@ which runs `scripts/screenshots.mjs` under a pinned Node:
   DevTools protocol, captures each page in light or dark mode, cropped to
   what it shows. The index goes first, since opening a PR's page marks its
   review seen. PNGs go through `oxipng` when it's installed.
-- On Linux, Chrome gets Noto Color Emoji through a temp fontconfig, since
-  without an emoji font it draws the dashboard's emoji as empty boxes. The
-  font is pinned by commit and sha256 in the script. The first run
-  downloads it from GitHub into `~/.cache/sanic-review/fonts/`, and a
-  download or cached copy that doesn't match the hash fails the run.
+- The dashboard serves its own emoji font, so the shots need no emoji
+  font installed and come out the same on every platform.
 - A page that doesn't load with a 200 fails the run rather than being
   captured.
 - The script stops the demo and Chrome and removes their temp dirs when it
