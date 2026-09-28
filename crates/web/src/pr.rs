@@ -24,6 +24,7 @@ use tracing::info;
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
     files::{self, Layout, View},
+    filter::IndexQuery,
     index::{Overview, archive_form, owed_status, why},
     links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
@@ -212,7 +213,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                         a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
                     }
                     @if h.chat { a.btn href="#chat" { "Chat" (keycap("c")) } }
-                    (archive_form(app, &pr.key, pr.archived, "pr"))
+                    (archive_form(app, &pr.key, pr.archived, None))
                 }
             }
             div.subnav {
@@ -1172,6 +1173,8 @@ pub struct ReviewNowForm {
     /// there asks; else the PR's page.
     #[serde(default)]
     next: String,
+    /// The index's URL, to go back to as it was.
+    back: Option<String>,
 }
 
 pub async fn review_now(
@@ -1197,7 +1200,11 @@ pub async fn review_now(
     info!(url = %key.url(), "review requested from the dashboard");
     let href = pr_href(&key);
     app.control.review_now(key);
-    Ok(Redirect::to(if form.next == "index" { "/" } else { &href }))
+    Ok(Redirect::to(&if form.next == "index" {
+        IndexQuery::from_href(form.back.as_deref()).href()
+    } else {
+        href
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1205,6 +1212,8 @@ pub struct ArchiveForm {
     archived: bool,
     /// Where to go afterwards: `index`, or else the PR's page.
     next: String,
+    /// The index's URL, to go back to as it was.
+    back: Option<String>,
 }
 
 /// Archives or unarchives the PR straight in the store, as
@@ -1229,7 +1238,7 @@ pub async fn archive(
         info!(url = %url, "unarchived from the dashboard");
     }
     Ok(if form.next == "index" {
-        Redirect::to("/")
+        Redirect::to(&IndexQuery::from_href(form.back.as_deref()).href())
     } else {
         Redirect::to(&pr_href(&key))
     })

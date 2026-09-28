@@ -18,9 +18,11 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
     /// The index, and whether it shows archived PRs: only then does the top
-    /// bar count their pending drafts.
+    /// bar count their pending drafts. `pending` is those of the rows a
+    /// filter leaves, while one is in use.
     Index {
         archived: bool,
+        pending: Option<u32>,
     },
     Pr,
     Confirm,
@@ -103,7 +105,11 @@ pub fn layout_in(
                 header.topbar {
                     a.home href="/" { "sanic-review" }
                     @for crumb in crumbs { span.crumb { "/ " (crumb) } }
-                    (counts(app, matches!(kind, Kind::Index { archived: true })))
+                    @if let Kind::Index { archived, pending } = kind {
+                        (counts(app, archived, pending))
+                    } @else {
+                        (counts(app, false, None))
+                    }
                 }
                 main { (content) }
                 (help())
@@ -125,10 +131,11 @@ fn icon_and_style() -> Markup {
 
 /// The run and draft counts the TUI's status line has, and the keys hint.
 /// The pending drafts are those of the PRs the index lists, archived ones
-/// only `with_archived`, as the index shows them. The index refreshes it
+/// only `with_archived`, as the index shows them; with `filtered`, the
+/// filter's share of them is shown as `N of M`. The index refreshes it
 /// with its lists. Counts the store can't read are left out, and logged,
 /// rather than failing the page they head.
-pub fn counts(app: &App, with_archived: bool) -> Markup {
+pub fn counts(app: &App, with_archived: bool, filtered: Option<u32>) -> Markup {
     let since = crate::index::since(app);
     let counts = {
         let store = app.store();
@@ -146,7 +153,11 @@ pub fn counts(app: &App, with_archived: bool) -> Markup {
             }
             @if let Some((c, pending)) = counts {
                 b { (c.queued) } " queued · " b { (c.running) } " running · "
-                b.cnt { (pending) } " pending drafts"
+                @if let Some(shown) = filtered {
+                    b.cnt { (shown) } " of " b { (pending) } " pending drafts"
+                } @else {
+                    b.cnt { (pending) } " pending drafts"
+                }
                 " " span.muted-sep { "|" } " "
             }
             a href="/settings" { "settings" } " · "

@@ -285,6 +285,234 @@ main:has(> #panes) {
   max-width: 80rem;
 }
 
+/* The filter's sidebar, beside the lists; on a narrower window it's over
+   them, and folds. */
+main:has(> #filter) {
+  max-width: 94rem;
+  display: grid;
+  grid-template-columns: 13.5rem minmax(0, 1fr);
+  gap: 0 1.6rem;
+  align-items: start;
+}
+
+.fside {
+  position: sticky;
+  top: 0.5rem;
+  max-height: calc(100vh - 1rem);
+  overflow-y: auto;
+  margin-top: 1rem;
+  font-size: 13px;
+}
+
+#filter-fold > summary {
+  list-style: none;
+  padding-bottom: 0.3rem;
+  border-bottom: 2px solid var(--line);
+}
+
+#filter-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fside .fsh {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.fside .fcount {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+/* Beside the lists the ticks show what's picked, so the heading only
+   counts; over them, it says what, since it folds away. */
+.fside .fpicks,
+.fside .ftoggle {
+  display: none;
+}
+
+.fsbody {
+  padding-top: 0.5rem;
+}
+
+#fq {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Without the script, ticking a box sends nothing: this does. */
+.fapply {
+  margin-top: 0.4rem;
+}
+
+.js .fapply {
+  display: none;
+}
+
+.fsclear {
+  display: inline-block;
+  font-size: 12.5px;
+  margin-top: 0.4rem;
+}
+
+.facet {
+  border: 0;
+  padding: 0;
+  margin: 0.8rem 0 0;
+  min-width: 0;
+}
+
+.facet legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 0;
+  margin-bottom: 0.1rem;
+}
+
+.facet legend .dim {
+  text-transform: none;
+  font-weight: normal;
+  letter-spacing: 0;
+}
+
+.fopt {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.fopt:hover {
+  background: var(--raise);
+}
+
+.fopt .fv {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fopt .fn {
+  color: var(--dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A value that would leave nothing, under the rest of the filter. */
+.fopt.zero {
+  color: var(--dim);
+}
+
+.fopt .newdot {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+details.fmore > summary {
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+}
+
+/* Under a list's heading: what the filter hides. */
+.fhidden {
+  font-size: 12.5px;
+  margin: 0.35rem 0 0.2rem 1.4rem;
+  padding: 0.2rem 0.5rem;
+  border-left: 3px solid var(--accent);
+  background: var(--raise);
+  border-radius: 0 3px 3px 0;
+}
+
+@media (max-width: 1000px) {
+  main:has(> #filter) {
+    display: block;
+  }
+
+  .fside {
+    position: static;
+    max-height: none;
+  }
+
+  /* Over the lists, the heading is a bar that folds the sidebar. */
+  #filter-fold > summary {
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+
+  #filter-fold > summary:hover {
+    background: var(--raise);
+  }
+
+  #filter-fold > summary::before {
+    content: "▸";
+    color: var(--accent);
+    font-size: 1rem;
+  }
+
+  #filter-fold[open] > summary::before {
+    content: "▾";
+  }
+
+  .fside .fcount {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .fside .fnum {
+    display: none;
+  }
+
+  .fside .fpicks,
+  .fside .ftoggle {
+    display: inline;
+  }
+
+  .fside .ftoggle {
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .fside .ftoggle::after {
+    content: "show";
+  }
+
+  #filter-fold[open] .ftoggle::after {
+    content: "hide";
+  }
+
+  #facets {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: 0 1rem;
+  }
+
+  #facets > .fsclear {
+    grid-column: 1 / -1;
+  }
+}
+
 .list {
   margin: 1rem 0 1.75rem;
 }
@@ -797,6 +1025,10 @@ details.grp[open] > summary .group-h::before {
 
   .group-h .dim {
     display: block;
+  }
+
+  .fhidden {
+    margin-left: 0;
   }
 
   .ib,

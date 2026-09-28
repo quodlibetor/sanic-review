@@ -1248,6 +1248,114 @@ async fn the_top_bar_counts_the_pending_drafts_the_lists_show() {
     assert_eq!(pending_in_top_bar(&f, "/?archived=true").await, "0");
 }
 
+/// Each group heading's text, without what its `<span>` adds.
+fn headings(index: &str) -> Vec<String> {
+    index
+        .split(r#"class="group-h"#)
+        .skip(1)
+        .map(|rest| {
+            let text = &rest[rest.find('>').unwrap() + 1..];
+            text[..text.find('<').unwrap()].to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_sidebar_filters_the_lists_from_the_query() {
+    let f = fixture(false).await;
+    let page = f.get("/?author=Alice&q=").await;
+    assert_eq!(page.status, StatusCode::OK);
+    // The address bar gets the filter as the index writes it.
+    assert_eq!(page.headers["hx-replace-url"], "/?author=Alice");
+    let index = page.body;
+    assert!(index.contains("Add the thing"), "{index}");
+    assert!(!index.contains("Fix &lt;script&gt; escaping") && !index.contains("WIP: try things"));
+    assert!(
+        index.contains(r#"Reviews you owe <span class="dim">1 of 3</span>"#),
+        "{index}"
+    );
+    assert!(index.contains(r#"<b>2</b> hidden by filter · <a class="fclear" href="/">clear</a>"#));
+    // Your PRs are all yours: author leaves them be, and says so.
+    assert!(index.contains("My change"));
+    assert!(index.contains(r#"Your PRs <span class="dim">1</span>"#));
+    assert!(index.contains("author isn't applied here: these are all yours"));
+    assert_eq!(headings(&index), ["NEEDS YOU · 1 of 2", "READY · 1"]);
+    // The refresh asks for the same, and the tick is kept.
+    assert!(index.contains(r#"<div id="panes" hx-get="/?author=Alice""#));
+    assert!(
+        index.contains(r#"name="author" value="alice" checked>"#),
+        "{index}"
+    );
+    assert!(index.contains(
+        r#"<span class="fcount" id="filter-n"><span class="fnum">1 in use</span><span class="fpicks">@Alice</span></span>"#
+    ));
+    // Folded over the lists, the heading says what's picked, in the
+    // sidebar's order, the words last.
+    let picked = f
+        .get("/?q=retry&state=unseen&reviewer=me&status=ready")
+        .await
+        .body;
+    assert!(
+        picked.contains(r#"<span class="fpicks">Ready, you, unseen review, “retry”</span>"#),
+        "{picked}"
+    );
+    // PR 7's pending drafts are all of them.
+    assert!(index.contains(r#"<b class="cnt">3</b> of <b>3</b> pending drafts"#));
+
+    let index = f.get("/?state=mergeable").await.body;
+    assert!(index.contains(r#"Reviews you owe <span class="dim">0 of 3</span>"#));
+    assert!(index.contains("<b>3</b> hidden by filter"));
+    assert_eq!(headings(&index), ["READY · 1"]);
+    assert!(index.contains(r#"<b class="cnt">0</b> of <b>3</b> pending drafts"#));
+    // Each author's count is of what the rest of the filter leaves.
+    let alice = &index[index.find(r#"value="alice""#).unwrap()..];
+    assert!(alice[..alice.find("</label>").unwrap()].contains(r#"<span class="fn">0</span>"#));
+
+    // Words match the title or the ref.
+    let index = f.get("/?q=%239").await.body;
+    assert!(index.contains("My change") && !index.contains("Add the thing"));
+    let index = f.get("/?q=escaping+FIX").await.body;
+    assert!(index.contains("Fix &lt;script&gt; escaping") && !index.contains("Add the thing"));
+
+    // Unknown keys are left out; a bad archived is a bad request.
+    assert_eq!(f.get("/?nope=1").await.headers["hx-replace-url"], "/");
+    assert_eq!(
+        f.get("/?archived=maybe").await.status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn archiving_and_review_now_from_a_filtered_index_go_back_to_it() {
+    let f = fixture(false).await;
+    let index = f.get("/?author=bob").await.body;
+    assert!(index.contains(r#"<input type="hidden" name="back" value="/?author=bob">"#));
+    assert!(index.contains(r#"data-archived-href="/?archived=true&amp;author=bob""#));
+    let reply = f
+        .post(
+            "/pr/org/repo/8/archive",
+            &[
+                ("archived", "true"),
+                ("next", "index"),
+                ("back", "/?author=bob"),
+            ],
+        )
+        .await;
+    assert_eq!(reply.headers[header::LOCATION], "/?author=bob");
+    f.post(
+        "/pr/org/repo/8/archive",
+        &[("archived", "false"), ("next", "index")],
+    )
+    .await;
+    let reply = f
+        .post(
+            "/pr/org/repo/8/review-now",
+            &[("next", "index"), ("back", "/?author=bob&q=escaping")],
+        )
+        .await;
+    assert_eq!(reply.headers[header::LOCATION], "/?author=bob&q=escaping");
+}
+
 #[tokio::test]
 async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
     let f = fixture(false).await;
@@ -2158,13 +2266,31 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
         f.post("/window", &[("window", "soon")]).await.status,
         StatusCode::CONFLICT
     );
-    // Picked with archived PRs shown, the index still shows them.
-    let archived = f.get("/?archived=true").await.body;
-    assert!(archived.contains(r#"<input type="hidden" name="archived" value="true">"#));
+    // Picked with archived PRs shown and a filter, the index is as it was.
+    let filtered = f.get("/?author=bob&archived=true").await.body;
+    assert!(
+        filtered.contains(
+            r#"<input type="hidden" name="back" value="/?archived=true&amp;author=bob">"#
+        )
+    );
     let back = f
-        .post("/window", &[("window", "default"), ("archived", "true")])
+        .post(
+            "/window",
+            &[
+                ("window", "default"),
+                ("back", "/?archived=true&author=bob"),
+            ],
+        )
         .await;
-    assert_eq!(back.headers[header::LOCATION], "/?archived=true");
+    assert_eq!(back.headers[header::LOCATION], "/?archived=true&author=bob");
+    // Sent anywhere else, it's the index.
+    let elsewhere = f
+        .post(
+            "/window",
+            &[("window", "default"), ("back", "https://example.com/")],
+        )
+        .await;
+    assert_eq!(elsewhere.headers[header::LOCATION], "/");
     let index = f.get("/").await.body;
     assert!(index.contains("9 older PRs hidden"));
     assert!(!index.contains("back to default"));

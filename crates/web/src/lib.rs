@@ -13,6 +13,7 @@ mod cells;
 mod chat;
 mod diff;
 mod files;
+mod filter;
 mod guard;
 mod highlight;
 mod ignore;
@@ -385,6 +386,8 @@ pub fn pr_href(key: &PrKey) -> String {
 /// A handler failure, shown as an error page.
 enum Error {
     NotFound(String),
+    /// A request that doesn't parse, with why.
+    BadRequest(String),
     /// A request the dashboard won't carry out, with why.
     Refused(String),
     /// Something broke; logged with the PR's URL when there is one.
@@ -415,6 +418,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::NotFound(what) => (StatusCode::NOT_FOUND, what),
+            Self::BadRequest(why) => (StatusCode::BAD_REQUEST, why),
             Self::Refused(why) => (StatusCode::CONFLICT, why),
             Self::Internal { url, report } => {
                 if let Some(url) = url {

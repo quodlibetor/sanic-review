@@ -21,8 +21,8 @@ const SHOWCASE = "/pr/quodlibetor/frobnicator/42";
 // where the shot stops, else it's the whole page.
 const openQuiet = `document.querySelector("#owed-quiet").open = true`;
 const SHOTS = [
-  { file: "index.png", path: "/", width: 1280, prepare: openQuiet },
-  { file: "index-dark.png", path: "/", width: 1280, dark: true, prepare: openQuiet },
+  { file: "index.png", path: "/", width: 1440, prepare: openQuiet },
+  { file: "index-dark.png", path: "/", width: 1440, dark: true, prepare: openQuiet },
   // The summary and the drafts on the first file, the last of them
   // accepted; the second file's draft is next.
   { file: "drafts.png", path: SHOWCASE, width: 1100, until: `document.querySelectorAll("article.draft")[4]` },

@@ -24,7 +24,93 @@ expression: "readable(&f, &page.body)"
 <b>0</b> queued · <b>0</b> running · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
 </header>
 <main>
-<div id="panes" hx-get="/?archived=false" hx-trigger="every 5s" hx-select="#panes" hx-select-oob="#counts" hx-swap="outerHTML" data-show-archived="false">
+<form class="fside" id="filter" method="get" action="/" role="search" aria-label="Filter the lists" hx-get="/" hx-trigger="change, submit" hx-target="#panes" hx-select="#panes" hx-select-oob="#counts,#facets,#filter-n" hx-swap="outerHTML" hx-sync="#panes:replace">
+<details id="filter-fold" open>
+<summary>
+<span class="fsh">Filter</span> <span class="fcount" id="filter-n">
+</span>
+<span class="ftoggle" aria-hidden="true">
+</span>
+</summary>
+<div class="fsbody">
+<input id="fq" type="search" name="q" value="" placeholder="title or #number" autocomplete="off" aria-label="words in the title or owner/name#N" hx-get="/" hx-trigger="input changed delay:250ms, search" hx-include="#filter">
+<button class="btn fapply" type="submit">Filter</button>
+<div id="facets">
+<fieldset class="facet">
+<legend>Status</legend>
+<label class="fopt" for="f-status-6e656564732d796f75">
+<input id="f-status-6e656564732d796f75" type="checkbox" name="status" value="needs-you">
+<span class="fv">Needs you</span>
+<span class="fn">2</span>
+</label>
+<label class="fopt" for="f-status-6e6f7468696e672d746f2d646f">
+<input id="f-status-6e6f7468696e672d746f2d646f" type="checkbox" name="status" value="nothing-to-do">
+<span class="fv">Nothing to do now</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-status-7265616479">
+<input id="f-status-7265616479" type="checkbox" name="status" value="ready">
+<span class="fv">Ready</span>
+<span class="fn">1</span>
+</label>
+</fieldset>
+<fieldset class="facet">
+<legend>Author <span class="dim">reviews you owe</span>
+</legend>
+<label class="fopt" for="f-author-616c696365">
+<input id="f-author-616c696365" type="checkbox" name="author" value="alice">
+<span class="fv">@alice</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-author-626f62">
+<input id="f-author-626f62" type="checkbox" name="author" value="bob">
+<span class="fv">@bob</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-author-6361726f6c">
+<input id="f-author-6361726f6c" type="checkbox" name="author" value="carol">
+<span class="fv">@carol</span>
+<span class="fn">1</span>
+</label>
+</fieldset>
+<fieldset class="facet">
+<legend>Repo</legend>
+<label class="fopt" for="f-repo-6f72672f7265706f">
+<input id="f-repo-6f72672f7265706f" type="checkbox" name="repo" value="org/repo">
+<span class="fv">org/repo</span>
+<span class="fn">4</span>
+</label>
+</fieldset>
+<fieldset class="facet">
+<legend>State</legend>
+<label class="fopt" for="f-state-6368616e6765732d726571756573746564">
+<input id="f-state-6368616e6765732d726571756573746564" type="checkbox" name="state" value="changes-requested">
+<span class="fv">changes requested</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-state-6d6572676561626c65">
+<input id="f-state-6d6572676561626c65" type="checkbox" name="state" value="mergeable">
+<span class="fv">mergeable</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-state-64726166742d7072">
+<input id="f-state-64726166742d7072" type="checkbox" name="state" value="draft-pr">
+<span class="fv">draft PR</span>
+<span class="fn">1</span>
+</label>
+<label class="fopt" for="f-state-756e7365656e">
+<input id="f-state-756e7365656e" type="checkbox" name="state" value="unseen">
+<span class="fv">
+<span class="newdot">
+</span> unseen review</span>
+<span class="fn">1</span>
+</label>
+</fieldset>
+</div>
+</div>
+</details>
+</form>
+<div id="panes" hx-get="/" hx-trigger="every 5s" hx-select="#panes" hx-select-oob="#counts,#facets,#filter-n" hx-swap="outerHTML" data-archived-href="/?archived=true">
 <section class="list" id="owed">
 <h2>Reviews you owe <span class="dim">3</span>
 <span class="sp">
@@ -92,6 +178,7 @@ expression: "readable(&f, &page.body)"
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
+<input type="hidden" name="back" value="/">
 <button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
@@ -144,6 +231,7 @@ and more detail</pre>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
+<input type="hidden" name="back" value="/">
 <button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
@@ -202,6 +290,7 @@ and more detail</pre>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
+<input type="hidden" name="back" value="/">
 <button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>
@@ -263,6 +352,7 @@ and more detail</pre>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
+<input type="hidden" name="back" value="/">
 <button class="linkbtn" type="submit">archive <span class="k">x</span>
 </button>
 </form>

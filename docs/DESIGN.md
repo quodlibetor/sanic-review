@@ -687,7 +687,9 @@ fonttools (run through `uv`, which only this task needs) to
   scrolls sideways. A row's actions show on hover and on the selected row.
   It rereads the lists, and the counts in the top bar, every few seconds;
   selection follows the PR, so a refresh that reorders rows keeps it, as
-  does a popover opened by key. PR state is the TUI's: urgent words
+  does a popover opened by key. When the PR leaves the list, the
+  selection passes to the next row left in it, else the one before, else
+  its first. PR state is the TUI's: urgent words
   highlighted, approved and mergeable ones green, the rest muted. The PR
   page's header shows it too, for an open PR whether or not either list
   has it, and leaves out `—`.
@@ -699,6 +701,45 @@ fonttools (run through `uv`, which only this task needs) to
   `poll.updated_within_days` for the lists, the TUI and the poller, and
   reconcile with it as soon as no rate limit pauses polling; "back to
   default" goes back to the config's.
+
+  A sidebar filters both lists by **Status** (the groups above),
+  **Author**, **Reviewed by** (the people the status cell counts),
+  **Repo** and **State** (approved, changes requested, mergeable, ci
+  failing, conflicts, draft PR, a review you haven't looked at), and by
+  words in the title or in `owner/name#N`:
+  - Values within a facet are either-or; the facets and the words all
+    apply. Each value says how many rows it would leave, given the other
+    facets and the words. A facet lists its commonest values and folds the
+    rest away, apart from the ones picked.
+  - Author filters only the reviews you owe, since your PRs are all
+    yours. While an author is picked, Your PRs says so instead of going
+    empty.
+  - The server filters, and the filter is the URL's query
+    (`?author=alice&state=unseen&q=retry`), so a filtered index is a
+    link. Nothing is kept per browser: a bare `/` is unfiltered. Ticking a
+    value, or typing, rereads the lists in place and puts the filter in
+    the URL. The refresh asks with the same query, so it keeps the filter.
+    It replaces the facets but not the text box, so typing isn't lost.
+  - A filtered list's heading and its group headers say `2 of 8`, and a
+    group the filter empties is left out. Under the heading, `N hidden by
+    filter · clear` says what the filter hides. The recency window's line
+    doesn't follow the filter.
+  - Showing or hiding archived PRs, picking a window, and archiving or
+    reviewing a PR now from the index all keep the filter.
+  - Changing the filter keeps the selected PR selected, as the refresh
+    does, while the filter still shows it; clearing it from either
+    `clear` link does too.
+  - A click in the sidebar leaves the keys with the lists; only the text
+    box keeps focus. From the keyboard, `/` focuses the text box, Tab
+    moves through the facets, Space ticks one, and Esc goes back to the
+    lists, where j/k move among the rows the filter leaves.
+  - On a wide window the sidebar sits beside the lists, always open.
+    Below 1000px it's over them, and folds: it starts folded, and folds
+    when the window narrows past that, unless focus is in it. There its
+    heading is a bar that toggles it, and says what's picked (`@alice,
+    approved, “retry”`), cut short when it runs out of room; beside the
+    lists it only counts the facets in use.
+  - The TUI has no filter.
 - **Top bar.** Every page's: home, where the page is, "manual reviews"
   while they're on, the queued, running and pending draft counts, and a
   link to Settings. Pending drafts are counted, here, in
@@ -706,8 +747,9 @@ fonttools (run through `uv`, which only this task needs) to
   review or regeneration that succeeded, the one its page shows. A
   regeneration copies the drafts it keeps, so counting every run's would
   count them again. The total, here and in the TUI's status bar, is of the
-  PRs the lists show: open, within the recency window, and archived only
-  while archived PRs are shown.
+  PRs the lists show: open, within the recency window, archived only
+  while archived PRs are shown, and on a filtered index only those the
+  filter leaves, as `N of M pending drafts`.
 - **PR page.** Drafts first. A header with the PR, its state and actions;
   under it the description and the review runs folded away, the runs'
   summary saying which one's drafts are shown ("Run 2 of 3", when it

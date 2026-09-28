@@ -7,8 +7,9 @@ use std::{
 
 use axum::{
     Form,
-    extract::{Query, State},
-    response::Redirect,
+    extract::{RawQuery, State},
+    http::HeaderName,
+    response::{IntoResponse, Redirect},
 };
 use color_eyre::eyre::Result;
 use maud::{Markup, html};
@@ -26,6 +27,7 @@ use tracing::info;
 use crate::{
     App, Error, Shared,
     cells::{LeadPop, ReviewedBy, plural},
+    filter::{self, Facet, IndexQuery, RowValues, Side, count, hidden_line},
     page::{self, Kind, countdown, csrf_field, drafts, keycap, pr_ref},
     pr_href,
 };
@@ -174,28 +176,143 @@ pub fn why(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Option
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct IndexQuery {
-    /// Show archived PRs too.
-    #[serde(default)]
-    archived: bool,
-}
+/// Tells htmx the address bar's URL once the sidebar's request swaps in.
+const HX_REPLACE_URL: HeaderName = HeaderName::from_static("hx-replace-url");
 
 pub async fn index(
     State(app): State<Shared>,
-    Query(query): Query<IndexQuery>,
-) -> Result<Markup, Error> {
+    RawQuery(raw): RawQuery,
+) -> Result<impl IntoResponse, Error> {
+    let query = IndexQuery::parse(raw.as_deref()).map_err(Error::BadRequest)?;
     let mut overview = Overview::load(&app)?;
     overview.load_facts(&app)?;
-    let content = lists(&app, &overview, query.archived);
-    Ok(page::layout(
+    let listed = Listed::of(&app, &overview, query.archived);
+    let values: Vec<RowValues> = listed
+        .owed
+        .iter()
+        .map(|l| l.values.clone())
+        .chain(listed.mine.iter().map(|l| l.values.clone()))
+        .collect();
+    // The top bar counts the pending drafts of the rows the filter leaves.
+    let pending = query.filter.is_active().then(|| {
+        values
+            .iter()
+            .filter(|v| query.filter.matches(v))
+            .map(|v| v.pending)
+            .sum()
+    });
+    let content = html! {
+        (filter::sidebar(&query, &values, &app.me))
+        (lists(&app, &overview, &listed, &query))
+    };
+    let page = page::layout(
         &app,
         Kind::Index {
             archived: query.archived,
+            pending,
         },
         "Dashboard",
         &content,
-    ))
+    );
+    Ok(([(HX_REPLACE_URL, query.href())], page))
+}
+
+/// The rows the lists show before the filter, in the store's order, each
+/// with its group and what the filter sees of it.
+struct Listed<'a> {
+    owed: Vec<Listing<'a, OwedReview, OwedGroup>>,
+    /// `None` is archived.
+    mine: Vec<Listing<'a, MyPr, Option<MyGroup>>>,
+}
+
+struct Listing<'a, P, G> {
+    pr: &'a P,
+    group: G,
+    values: RowValues<'a>,
+}
+
+impl<'a> Listed<'a> {
+    fn of(app: &App, overview: &'a Overview, show_archived: bool) -> Self {
+        let reviewers = |key: &PrKey| -> Vec<&'a str> {
+            overview.facts.get(key).map_or_else(Vec::new, |f| {
+                f.reviewers.iter().map(|r| r.login.as_str()).collect()
+            })
+        };
+        let states = |key: &PrKey, state: PrState, is_draft: bool| {
+            row_states(
+                state,
+                overview.merge(key),
+                is_draft,
+                overview.unseen.contains(key),
+            )
+        };
+        let owed = overview
+            .owed
+            .iter()
+            .filter(|pr| show_archived || !pr.archived)
+            .map(|pr| {
+                let group = OwedGroup::of(pr, overview, app.manual_reviews());
+                let values = RowValues {
+                    list: Side::Owed,
+                    status: group.status(),
+                    author: Some(&pr.author),
+                    reviewers: reviewers(&pr.key),
+                    repo: pr.key.repo.to_string(),
+                    states: states(&pr.key, pr.state, pr.is_draft),
+                    title: &pr.title,
+                    reference: pr.key.to_string(),
+                    pending: pr.pending_drafts,
+                };
+                Listing { pr, group, values }
+            })
+            .collect();
+        let mine = overview
+            .mine
+            .iter()
+            .filter(|pr| show_archived || !pr.archived)
+            .map(|pr| {
+                let group = (!pr.archived).then(|| MyGroup::of(pr, overview));
+                let values = RowValues {
+                    list: Side::Mine,
+                    status: group.map_or("archived", MyGroup::status),
+                    author: None,
+                    reviewers: reviewers(&pr.key),
+                    repo: pr.key.repo.to_string(),
+                    states: states(&pr.key, pr.state, pr.is_draft),
+                    title: &pr.title,
+                    reference: pr.key.to_string(),
+                    pending: pr.pending_drafts,
+                };
+                Listing { pr, group, values }
+            })
+            .collect();
+        Self { owed, mine }
+    }
+}
+
+/// What the State facet says of a row: its approval, failing CI,
+/// conflicts, whether it's a draft, and a review you haven't looked at.
+fn row_states(
+    state: PrState,
+    merge: Option<Merge>,
+    is_draft: bool,
+    unseen: bool,
+) -> Vec<&'static str> {
+    let approval = match state.approval {
+        Approval::Approved(_) => Some("approved"),
+        Approval::ChangesRequested => Some("changes-requested"),
+        Approval::Mergeable => Some("mergeable"),
+        Approval::None => None,
+    };
+    let ci = merge.is_some_and(|m| m.ci == Checks::Failing);
+    let conflicts = merge.is_some_and(|m| m.block == Some(Block::Conflicts));
+    approval
+        .into_iter()
+        .chain(ci.then_some("ci-failing"))
+        .chain(conflicts.then_some("conflicts"))
+        .chain(is_draft.then_some("draft-pr"))
+        .chain(unseen.then_some("unseen"))
+        .collect()
 }
 
 /// Where an owed review sits in the index, by what it asks of you.
@@ -213,6 +330,15 @@ pub enum OwedGroup {
 }
 
 impl OwedGroup {
+    /// Its [`filter::STATUSES`] value.
+    fn status(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "needs-you",
+            Self::InFlight => "in-flight",
+            Self::Quiet => "nothing-to-do",
+        }
+    }
+
     pub fn of(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Self {
         let status = pr.latest_status();
         let (label, class) = owed_status(pr, overview, manual_reviews);
@@ -252,6 +378,15 @@ pub enum MyGroup {
 }
 
 impl MyGroup {
+    /// Its [`filter::STATUSES`] value.
+    fn status(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "needs-you",
+            Self::Ready => "ready",
+            Self::WaitingOnReviewers => "waiting",
+        }
+    }
+
     pub fn of(pr: &MyPr, overview: &Overview) -> Self {
         match pr.state.urgency() {
             Urgency::Act => Self::NeedsYou,
@@ -371,13 +506,14 @@ fn index_status(
 
 /// Both lists, grouped by what they ask of you. The page rereads them, and
 /// the counts, every few seconds, as the TUI rereads the store.
-fn lists(app: &App, overview: &Overview, show_archived: bool) -> Markup {
-    let refresh = format!("/?archived={show_archived}");
+fn lists(app: &App, overview: &Overview, listed: &Listed, query: &IndexQuery) -> Markup {
+    // X shows or hides archived PRs, keeping the filter.
+    let toggled = query.with_archived(!query.archived).href();
     html! {
-        div #panes hx-get=(refresh) hx-trigger="every 5s" hx-select="#panes"
-            hx-select-oob="#counts" hx-swap="outerHTML" data-show-archived=(show_archived) {
-            (owed_list(app, overview, show_archived))
-            (my_list(app, overview, show_archived))
+        div #panes hx-get=(query.href()) hx-trigger="every 5s" hx-select="#panes"
+            hx-select-oob=(filter::REFRESHED) hx-swap="outerHTML" data-archived-href=(toggled) {
+            (owed_list(app, overview, &listed.owed, query))
+            (my_list(app, overview, &listed.mine, query))
             p.help-foot {
                 (keycap("j")) (keycap("k")) " move (a folded group is skipped) · "
                 (keycap("Tab")) " other list · " (keycap("Enter")) " open · "
@@ -391,36 +527,41 @@ fn lists(app: &App, overview: &Overview, show_archived: bool) -> Markup {
 }
 
 /// The list heading's link that shows or hides archived PRs.
-fn archived_toggle(show_archived: bool, hidden: usize) -> Markup {
+fn archived_toggle(query: &IndexQuery, hidden: usize) -> Markup {
+    let toggled = query.with_archived(!query.archived).href();
     html! {
         span.sp {
-            @if show_archived {
-                a.toggle-archived href="/?archived=false" { "hide archived" }
+            @if query.archived {
+                a.toggle-archived href=(toggled) { "hide archived" }
                 " " (keycap("X"))
             } @else if hidden > 0 {
-                a.toggle-archived href="/?archived=true" { "show " (hidden) " archived" }
+                a.toggle-archived href=(toggled) { "show " (hidden) " archived" }
                 " " (keycap("X"))
             }
         }
     }
 }
 
-fn owed_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
-    let shown: Vec<(OwedGroup, &OwedReview)> = overview
-        .owed
+fn owed_list(
+    app: &App,
+    overview: &Overview,
+    listed: &[Listing<OwedReview, OwedGroup>],
+    query: &IndexQuery,
+) -> Markup {
+    let shown: Vec<&Listing<OwedReview, OwedGroup>> = listed
         .iter()
-        .filter(|pr| show_archived || !pr.archived)
-        .map(|pr| (OwedGroup::of(pr, overview, app.manual_reviews()), pr))
+        .filter(|l| query.filter.matches(&l.values))
         .collect();
-    let group = |group| -> Vec<&OwedReview> {
+    // The group's rows the filter leaves, and how many it has without it.
+    let group = |group| -> (Vec<&OwedReview>, usize) {
         let mut prs: Vec<_> = shown
             .iter()
-            .filter(|(g, _)| *g == group)
-            .map(|(_, pr)| *pr)
+            .filter(|l| l.group == group)
+            .map(|l| l.pr)
             .collect();
         // New reviews first; otherwise the store's order.
         prs.sort_by_key(|pr| !overview.unseen.contains(&pr.key));
-        prs
+        (prs, listed.iter().filter(|l| l.group == group).count())
     };
     let (need, flight, quiet) = (
         group(OwedGroup::NeedsYou),
@@ -428,82 +569,92 @@ fn owed_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
         group(OwedGroup::Quiet),
     );
     let archived = overview.owed.iter().filter(|pr| pr.archived).count();
+    let back = query.href();
     html! {
         section.list #owed {
             h2 {
-                "Reviews you owe " span.dim { (shown.len()) }
-                (archived_toggle(show_archived, archived))
+                "Reviews you owe " span.dim { (count(shown.len(), listed.len())) }
+                (archived_toggle(query, archived))
             }
-            @if shown.is_empty() { p.dim { "No reviews requested." } }
-            @else { (columns()) }
-            @if !need.is_empty() {
-                div.group-h.act { "NEEDS YOU · " (need.len()) }
-                @for pr in &need { (owed_row(app, pr, overview)) }
+            (hidden_line(query, listed.len() - shown.len(), None))
+            @if listed.is_empty() { p.dim { "No reviews requested." } }
+            @else if !shown.is_empty() { (columns()) }
+            @if !need.0.is_empty() {
+                div.group-h.act { "NEEDS YOU · " (count(need.0.len(), need.1)) }
+                @for pr in &need.0 { (owed_row(app, pr, overview, &back)) }
             }
-            @if !flight.is_empty() {
+            @if !flight.0.is_empty() {
                 div.group-h {
-                    "IN FLIGHT · " (flight.len())
+                    "IN FLIGHT · " (count(flight.0.len(), flight.1))
                     span.dim { " — nothing to do; it shows up above when drafted" }
                 }
-                @for pr in &flight { (owed_row(app, pr, overview)) }
+                @for pr in &flight.0 { (owed_row(app, pr, overview, &back)) }
             }
-            @if !quiet.is_empty() {
+            @if !quiet.0.is_empty() {
                 details.grp.quiet #owed-quiet {
                     summary {
                         div.group-h {
-                            "NOTHING TO DO NOW · " (quiet.len())
+                            "NOTHING TO DO NOW · " (count(quiet.0.len(), quiet.1))
                             span.dim { " — skipped, archived, or done; r reviews one anyway" }
                         }
                     }
-                    @for pr in &quiet { (owed_row(app, pr, overview)) }
+                    @for pr in &quiet.0 { (owed_row(app, pr, overview, &back)) }
                 }
             }
-            (hidden_foot(app, overview.hidden.owed, show_archived))
+            (hidden_foot(app, overview.hidden.owed, query))
         }
     }
 }
 
-fn my_list(app: &App, overview: &Overview, show_archived: bool) -> Markup {
-    let shown: Vec<&MyPr> = overview
-        .mine
+fn my_list(
+    app: &App,
+    overview: &Overview,
+    listed: &[Listing<MyPr, Option<MyGroup>>],
+    query: &IndexQuery,
+) -> Markup {
+    let shown: Vec<&Listing<MyPr, Option<MyGroup>>> = listed
         .iter()
-        .filter(|pr| show_archived || !pr.archived)
+        .filter(|l| query.filter.matches(&l.values))
         .collect();
-    let group = |group: Option<MyGroup>| -> Vec<&MyPr> {
-        shown
+    let group = |group: Option<MyGroup>| -> (Vec<&MyPr>, usize) {
+        let prs = shown
             .iter()
-            .filter(|pr| {
-                if pr.archived {
-                    group.is_none()
-                } else {
-                    group == Some(MyGroup::of(pr, overview))
-                }
-            })
-            .copied()
-            .collect()
+            .filter(|l| l.group == group)
+            .map(|l| l.pr)
+            .collect();
+        (prs, listed.iter().filter(|l| l.group == group).count())
     };
     let archived = overview.mine.iter().filter(|pr| pr.archived).count();
+    // Your PRs are all yours, so an author picked leaves them all.
+    let note = query
+        .filter
+        .picked(Facet::Author)
+        .next()
+        .is_some()
+        .then_some("author isn't applied here: these are all yours");
+    let back = query.href();
     html! {
         section.list #mine {
             h2 {
-                "Your PRs " span.dim { (shown.len()) }
-                (archived_toggle(show_archived, archived))
+                "Your PRs " span.dim { (count(shown.len(), listed.len())) }
+                (archived_toggle(query, archived))
             }
-            @if shown.is_empty() { p.dim { "No open PRs of yours." } }
-            @else { (columns()) }
+            (hidden_line(query, listed.len() - shown.len(), note))
+            @if listed.is_empty() { p.dim { "No open PRs of yours." } }
+            @else if !shown.is_empty() { (columns()) }
             @for (which, heading, act) in [
                 (Some(MyGroup::NeedsYou), "NEEDS YOU", true),
                 (Some(MyGroup::Ready), "READY", false),
                 (Some(MyGroup::WaitingOnReviewers), "WAITING ON REVIEWERS", false),
                 (None, "ARCHIVED", false),
             ] {
-                @let prs = group(which);
+                @let (prs, all) = group(which);
                 @if !prs.is_empty() {
-                    div.group-h.act[act] { (heading) " · " (prs.len()) }
-                    @for pr in &prs { (my_row(app, pr, overview)) }
+                    div.group-h.act[act] { (heading) " · " (count(prs.len(), all)) }
+                    @for pr in &prs { (my_row(app, pr, overview, &back)) }
                 }
             }
-            (hidden_foot(app, overview.hidden.mine, show_archived))
+            (hidden_foot(app, overview.hidden.mine, query))
         }
     }
 }
@@ -527,7 +678,7 @@ const WINDOWS: &[(WindowChoice, &str)] = &[
 /// Under a list, dim: how many older PRs the recency window hides, and
 /// wider windows to pick, or the way back to the configured one. Nothing
 /// while the configured window is in force and hides nothing.
-fn hidden_foot(app: &App, hidden: Option<u32>, show_archived: bool) -> Markup {
+fn hidden_foot(app: &App, hidden: Option<u32>, query: &IndexQuery) -> Markup {
     let window = *app.window.borrow();
     let wider = |choice: WindowChoice| match (choice.days(), window.days()) {
         (_, None) => false,
@@ -543,9 +694,9 @@ fn hidden_foot(app: &App, hidden: Option<u32>, show_archived: bool) -> Markup {
         html! {
             form.window method="post" action="/window" {
                 (csrf_field(app))
-                input type="hidden" name="window" value=(choice);
                 // Back to the index as it was.
-                @if show_archived { input type="hidden" name="archived" value="true"; }
+                input type="hidden" name="back" value=(query.href());
+                input type="hidden" name="window" value=(choice);
                 button.linkbtn type="submit" { (words) }
             }
         }
@@ -588,7 +739,8 @@ fn unseen(overview: &Overview, key: &PrKey) -> Markup {
     }
 }
 
-fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
+/// `back` is the index's URL, which archiving goes back to.
+fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Markup {
     // Read once, so a reload midway can't split the row.
     let manual_reviews = app.manual_reviews();
     let (label, class) = index_status(pr, overview, manual_reviews);
@@ -633,7 +785,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
         @if pr.chat_run.is_some() {
             a.linkbtn href={ (href) "#chat" } { "chat " (keycap("c")) }
         }
-        (archive_form(app, &pr.key, pr.archived, "index"))
+        (archive_form(app, &pr.key, pr.archived, Some(back)))
     };
     html! {
         // Selection follows the PR across refreshes, not the row's place.
@@ -648,7 +800,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview) -> Markup {
     }
 }
 
-fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
+fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
     let href = pr_href(&pr.key);
     let lead = my_lead(pr, overview);
     let facts = overview.facts.get(&pr.key);
@@ -685,7 +837,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview) -> Markup {
                 @if pr.chat_run.is_some() {
                     a.linkbtn href={ (href) "#chat" } { "chat " (keycap("c")) }
                 }
-                (archive_form(app, &pr.key, pr.archived, "index"))
+                (archive_form(app, &pr.key, pr.archived, Some(back)))
             }
         }
     }
@@ -857,9 +1009,8 @@ fn approval_class(state: PrState) -> &'static str {
 pub struct WindowForm {
     /// A [`WindowChoice`], or `default` for `poll.updated_within_days`.
     window: String,
-    /// The index showed archived PRs, and goes back to showing them.
-    #[serde(default)]
-    archived: bool,
+    /// The index's URL, to go back to as it was.
+    back: Option<String>,
 }
 
 /// Picks the recency window from the hidden-PRs line, then goes back to
@@ -881,22 +1032,21 @@ pub async fn set_window(
     } else {
         info!("recency window back to `poll.updated_within_days`");
     }
-    Ok(Redirect::to(if form.archived {
-        "/?archived=true"
-    } else {
-        "/"
-    }))
+    Ok(Redirect::to(
+        &IndexQuery::from_href(form.back.as_deref()).href(),
+    ))
 }
 
-/// A button that archives the PR, or unarchives it, then goes back to
-/// `next`: `index` or `pr`.
-pub fn archive_form(app: &App, key: &PrKey, archived: bool, next: &str) -> Markup {
+/// A button that archives the PR, or unarchives it, then goes back to the
+/// index at `back`, or else to the PR's page.
+pub fn archive_form(app: &App, key: &PrKey, archived: bool, back: Option<&str>) -> Markup {
     html! {
         form.archive method="post" action={ (pr_href(key)) "/archive" } {
             (csrf_field(app))
             input type="hidden" name="archived" value=(!archived);
-            input type="hidden" name="next" value=(next);
-            @if next == "index" {
+            input type="hidden" name="next" value=(if back.is_some() { "index" } else { "pr" });
+            @if let Some(back) = back { input type="hidden" name="back" value=(back); }
+            @if back.is_some() {
                 button.linkbtn type="submit" {
                     @if archived { "unarchive " } @else { "archive " } (keycap("x"))
                 }

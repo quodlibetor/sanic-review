@@ -166,9 +166,17 @@
           go(href);
           return;
         }
-        // Confirmed from the index, it comes back to the index.
+        // Confirmed from the index, it comes back to the index, filtered as
+        // it is.
         const next = card.querySelector('input[name="next"]');
-        if (next && page === "index") next.value = "index";
+        if (next && page === "index") {
+          next.value = "index";
+          const back = document.createElement("input");
+          back.type = "hidden";
+          back.name = "back";
+          back.value = window.location.pathname + window.location.search;
+          next.after(back);
+        }
         const popup = dialog.firstElementChild;
         popup.replaceChildren(document.importNode(card, true));
         dialog.hidden = false;
@@ -200,8 +208,21 @@
     // Keys typed into a box act on nothing, so they needn't settle: the
     // Agent card's box, focused as it opens, keeps its first letters.
     if (typing(e.target)) {
-      // Esc leaves a draft's text box, which saves it.
-      if (e.key === "Escape" && !e.repeat) e.target.blur();
+      // Esc leaves a draft's text box, which saves it, and the filter's,
+      // which a search box would otherwise empty.
+      if (e.key === "Escape" && !e.repeat) {
+        if (e.target.type === "search") e.preventDefault();
+        e.target.blur();
+      }
+      return;
+    }
+    // The filter's boxes take their own keys, Tab and Space among them;
+    // Esc goes back to the lists.
+    if (e.target.closest && e.target.closest("#filter")) {
+      if (e.key === "Escape") {
+        e.target.blur();
+        e.preventDefault();
+      }
       return;
     }
     // Not even the browser's own handling, like Space ticking a box.
@@ -343,8 +364,16 @@
       }
       case "X": {
         const panes = document.getElementById("panes");
-        const shown = panes && panes.dataset.showArchived === "true";
-        go("/?archived=" + !shown);
+        if (!panes) return;
+        go(panes.dataset.archivedHref);
+        break;
+      }
+      case "/": {
+        const box = document.getElementById("fq");
+        if (!box) return;
+        document.getElementById("filter-fold").open = true;
+        box.focus();
+        box.select();
         break;
       }
       case "c": {
@@ -710,7 +739,7 @@
     "toggle",
     function (e) {
       const group = e.target;
-      if (!(group instanceof HTMLDetailsElement) || !group.matches("details.grp[id]")) return;
+      if (!(group instanceof HTMLDetailsElement) || !group.matches("details.grp[id], details.fmore[id]")) return;
       if (group.open) unfolded.add(group.id);
       else unfolded.delete(group.id);
     },
@@ -719,15 +748,48 @@
   // A popover v, d or Tab opened, by its id, so the refresh can open it
   // again on the row that comes back.
   let reopen = null;
-  document.body.addEventListener("htmx:beforeSwap", function () {
+  // Each list's rows as they were before the index's lists swap, so a
+  // selected PR the swap takes away passes to the nearest one left.
+  let before = null;
+  // The filter's box that had focus, by its id. htmx puts focus back
+  // before the groups unfold again, so a box inside a folded "more" can't
+  // take it then.
+  let refocus = null;
+  document.body.addEventListener("htmx:beforeSwap", function (e) {
     const active = document.activeElement;
     reopen = popover(active) ? active.getAttribute("aria-describedby") : null;
+    refocus = active && active.id && active.closest("#filter") ? active.id : null;
+    if (page === "index" && e.detail.target && e.detail.target.id === "panes") {
+      before = lists().map(function (list) {
+        return rows(list).map(idOf);
+      });
+    }
   });
+  // A selected PR that's gone, filtered out or archived, passes to the
+  // next row still shown in its list, else the one before it, else the
+  // list's first.
+  function keepNearest(old) {
+    lists().forEach(function (list, i) {
+      if (selected[i] === undefined) return;
+      const now = rows(list).map(idOf);
+      if (now.indexOf(selected[i]) >= 0) return;
+      const was = old[i] || [];
+      const at = was.indexOf(selected[i]);
+      const around = was.slice(at + 1).concat(was.slice(0, Math.max(at, 0)).reverse());
+      const next = around.find(function (key) {
+        return now.indexOf(key) >= 0;
+      });
+      selected[i] = next !== undefined ? next : now[0];
+    });
+  }
   document.body.addEventListener("htmx:afterSwap", function (e) {
     unfolded.forEach(function (id) {
       const group = document.getElementById(id);
       if (group) group.open = true;
     });
+    const was = refocus && document.getElementById(refocus);
+    if (was && was !== document.activeElement) was.focus({ preventScroll: true });
+    refocus = null;
     localTimes(e.detail.target.isConnected ? e.detail.target : document);
     const pop = reopen && document.getElementById(reopen);
     if (pop && pop.parentElement) pop.parentElement.focus({ preventScroll: true });
@@ -738,6 +800,8 @@
   // The index rereads its lists every few seconds; keep the selection.
   // A PR page's draft card comes back alone, so its tally is recounted.
   document.body.addEventListener("htmx:afterSettle", function () {
+    if (before) keepNearest(before);
+    before = null;
     draw(false);
     retally();
   });
@@ -838,6 +902,57 @@
     // On a narrow window the file list starts folded, above the files.
     const tree = files.querySelector(".tree");
     if (tree && window.matchMedia("(max-width: 1000px)").matches) tree.open = false;
+  }
+
+  // A click in the filter's sidebar sends it and leaves the keys with the
+  // lists: nothing there keeps focus but the text box. A key's click, such
+  // as Space on a box you tabbed to, has no detail, and keeps it.
+  const filterForm = document.getElementById("filter");
+  if (filterForm) {
+    filterForm.addEventListener("click", function (e) {
+      if (e.detail === 0 || e.target.closest("#fq")) return;
+      setTimeout(function () {
+        const active = document.activeElement;
+        if (active && filterForm.contains(active) && active.id !== "fq") active.blur();
+      });
+    });
+  }
+  // Clearing the filter in place keeps the selection, as ticking does.
+  document.addEventListener("click", function (e) {
+    const clear = e.target.closest("a.fclear");
+    if (!clear || !filterForm || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    filterForm.querySelectorAll("input[type=checkbox]").forEach(function (box) {
+      box.checked = false;
+    });
+    // Words are emptied as typing would, so htmx's `changed` knows the box
+    // is empty and the same words typed again are sent.
+    const box = document.getElementById("fq");
+    if (box.value) {
+      box.value = "";
+      htmx.trigger(box, "input");
+    } else {
+      htmx.trigger(filterForm, "change");
+    }
+  });
+
+  // The filter's sidebar: on a narrow window it starts folded, over the
+  // lists; on a wide one it stays open.
+  const fold = document.getElementById("filter-fold");
+  if (fold) {
+    const narrow = window.matchMedia("(max-width: 1000px)");
+    if (narrow.matches) fold.open = false;
+    // Widened past it, the sidebar opens again, since there its summary
+    // no longer toggles it; narrowed past it, it folds, as it starts,
+    // unless focus is in it: folding would drop focus to the page, and
+    // the next letter typed would be a key to the lists.
+    narrow.addEventListener("change", function () {
+      if (!narrow.matches) fold.open = true;
+      else if (!fold.contains(document.activeElement)) fold.open = false;
+    });
+    fold.querySelector("summary").addEventListener("click", function (e) {
+      if (!narrow.matches) e.preventDefault();
+    });
   }
 
   function retally() {
