@@ -120,9 +120,15 @@ port forwarding.
 transcripts, and `serve.log` when the TUI is in use. Nothing lives under `/tmp`.
 
 `serve` needs the config file. When there's none, including when the path
-is a symlink to a file that doesn't exist, it stops before starting
-anything, naming the path (and the link's target) and suggesting
-`sanic-review setup` in a terminal to write one, or `--config PATH`.
+is a symlink to a file that doesn't exist, and stdin and stdout are a
+terminal `serve` has the foreground of, it opens the config editor (see
+Terminal UI) on a new file first, before anything logs, so nothing draws
+over it. Once a save is written, the editor closes and `serve` starts
+with what it wrote; leaving without saving exits saying no config was
+written. Without such a terminal it stops before starting anything,
+naming the path (and the link's target) and suggesting `sanic-review
+serve` in the foreground of a terminal, `sanic-review setup`, or
+`--config PATH`.
 
 Each profile lists the targets it applies to in `repos`. An entry is one of:
 

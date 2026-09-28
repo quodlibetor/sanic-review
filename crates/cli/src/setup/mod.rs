@@ -13,7 +13,7 @@ use sanic_runner::vcs::VcsResolver;
 
 use crate::{
     config_doc::{ConfigDoc, Key, Scalar, Setting, Table},
-    tui::standalone::{Edited, edit},
+    tui::standalone::{Edited, Until, edit},
 };
 
 #[derive(Debug, clap::Args)]
@@ -41,9 +41,11 @@ pub async fn run(args: SetupArgs) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
     let edited = {
         let path = path.clone();
-        tokio::task::spawn_blocking(move || edit(&path, Arc::new(VcsResolver), github, runtime))
-            .await
-            .wrap_err("running the config editor")??
+        tokio::task::spawn_blocking(move || {
+            edit(&path, Arc::new(VcsResolver), github, runtime, Until::Left)
+        })
+        .await
+        .wrap_err("running the config editor")??
     };
     match edited {
         Edited::Written => println!(

@@ -1,5 +1,6 @@
-//! The config editor on its own, for `setup`: the whole terminal, no
-//! `serve`, and counts only with a GitHub token.
+//! The config editor on its own, for `setup` and for a first `serve`
+//! with no config: the whole terminal, before or without `serve`'s TUI,
+//! and counts only with a GitHub token.
 
 use std::{path::Path, sync::Arc, time::SystemTime};
 
@@ -19,7 +20,17 @@ pub enum Edited {
     Unwritten,
 }
 
-/// Runs the editor on the config at `path` until you leave it. Without
+/// When the editor closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    /// When you leave it.
+    Left,
+    /// Once a save is written, as when `serve` has no config to start
+    /// with, or when you leave it.
+    Written,
+}
+
+/// Runs the editor on the config at `path` until `until`. Without
 /// `github`, nothing is counted and GitHub suggests nothing, and the editor
 /// says why.
 pub fn edit(
@@ -27,6 +38,7 @@ pub fn edit(
     resolver: Arc<dyn CheckoutResolver + Send + Sync>,
     github: Option<Arc<Client>>,
     runtime: tokio::runtime::Handle,
+    until: Until,
 ) -> Result<Edited> {
     let (mut editor, host) = Host::open(path, resolver).map_err(|why| eyre!(why))?;
     // Its own thread, named as the TUI's, so a panic restores the terminal.
@@ -44,6 +56,9 @@ pub fn edit(
             let mut terminal = init_terminal().wrap_err("starting the config editor")?;
             let result = (|| loop {
                 host.tend(&mut editor, counter.as_ref(), SystemTime::now());
+                if until == Until::Written && editor.wrote() {
+                    return Ok(Edited::Written);
+                }
                 terminal
                     .draw(|frame| editor.render(frame))
                     .wrap_err("drawing the config editor")?;

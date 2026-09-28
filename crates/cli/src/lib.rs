@@ -109,7 +109,7 @@ impl Ui {
 
 /// What `serve`'s stdout is, for picking its UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stdout {
+pub(crate) enum Stdout {
     /// A terminal this process is in the foreground of.
     Foreground,
     /// A terminal another process group has the foreground of, as after

@@ -114,17 +114,22 @@ impl Tui {
 /// leaves the terminal alone: the worker records a panicking review as
 /// crashed and `serve` carries on.
 pub(crate) fn init_terminal() -> std::io::Result<DefaultTerminal> {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if matches!(std::thread::current().name(), Some("main" | "tui")) {
-            ratatui::restore();
-            previous(info);
-        } else {
-            // Printing it would corrupt the screen; the log pane shows it,
-            // under the span of whatever panicked.
-            tracing::error!("{info}");
-        }
-    }));
+    // Once, however often the terminal is taken: a first run's config
+    // editor, then the TUI.
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if matches!(std::thread::current().name(), Some("main" | "tui")) {
+                ratatui::restore();
+                previous(info);
+            } else {
+                // Printing it would corrupt the screen; the log pane shows
+                // it, under the span of whatever panicked.
+                tracing::error!("{info}");
+            }
+        }));
+    });
     let started = enable_raw_mode()
         .and_then(|()| execute!(std::io::stdout(), EnterAlternateScreen))
         .and_then(|()| Terminal::new(CrosstermBackend::new(std::io::stdout())));

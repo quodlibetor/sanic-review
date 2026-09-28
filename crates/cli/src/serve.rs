@@ -8,6 +8,7 @@
 
 use std::{
     collections::HashSet,
+    io::IsTerminal,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
@@ -22,7 +23,7 @@ use color_eyre::{
 };
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
-    config::{Config, Unloadable, default_config_path, default_data_dir},
+    config::{Config, DEFAULT_API_URL, Unloadable, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
     skip::SkipRules,
@@ -42,6 +43,7 @@ use crate::{
     ServeArgs, Stdout, Ui, config_edit, logging,
     poll::{GithubApi, Poller, Priority, Progress, RefreshQueue, Refreshed},
     schedule::{DueTimes, Update, schedule, standing_request},
+    tui::standalone::{self, Edited, Until},
     tui::{self, Request, Shared, Sizes, SystemBrowser, Tui},
     watch::ConfigWatcher,
     work::{Job, Worker},
@@ -58,8 +60,57 @@ fn missing_config(path: &Path) -> color_eyre::Report {
         Err(_) => format!("no config at {}", path.display()),
     };
     eyre!(what)
-        .suggestion("run `sanic-review setup` in a terminal to write one")
+        .suggestion(
+            "run `sanic-review serve` in the foreground of a terminal to write one in the config editor",
+        )
+        .suggestion("or `sanic-review setup`, which opens the same editor without starting serve")
         .suggestion("or pass `--config PATH` to use another file")
+}
+
+/// Whether a first run can open the config editor: it takes keys from
+/// stdin and draws on stdout, so both are a terminal `serve` has the
+/// foreground of.
+fn can_edit(stdin_is_tty: bool, stdout: Stdout) -> bool {
+    stdin_is_tty && stdout == Stdout::Foreground
+}
+
+/// A first run with no config: the config editor writes one, before
+/// anything logs so nothing draws over it, and `serve` carries on with
+/// what it wrote. Without a terminal, or when nothing's written, it fails
+/// saying how to get one.
+async fn first_run(path: &Path) -> Result<String> {
+    if !can_edit(std::io::stdin().is_terminal(), Stdout::detect()) {
+        return Err(missing_config(path));
+    }
+    // There's no config for an `api_url` yet. Without a token it still
+    // edits; `serve` then fails on the token as it would anyway.
+    let github = match Token::discover() {
+        Ok(token) => Some(Arc::new(Client::new(DEFAULT_API_URL, token)?)),
+        Err(_) => None,
+    };
+    let edited = {
+        let path = path.to_owned();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            standalone::edit(
+                &path,
+                Arc::new(VcsResolver),
+                github,
+                runtime,
+                Until::Written,
+            )
+        })
+        .await
+        .wrap_err("running the config editor")??
+    };
+    match (edited, Config::read_text(path)?) {
+        (Edited::Written, Some(text)) => Ok(text),
+        _ => Err(eyre!("no config written, so `serve` can't start"))
+            .suggestion(
+                "run `sanic-review serve` again, and save with Ctrl-S; it starts once saved",
+            )
+            .suggestion("or pass `--config PATH` to use another file"),
+    }
 }
 
 #[allow(
@@ -81,8 +132,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         None => default_config_path()?,
     })
     .wrap_err("resolving the config path")?;
-    let Some(config_text) = Config::read_text(&config_path)? else {
-        return Err(missing_config(&config_path));
+    let config_text = match Config::read_text(&config_path)? {
+        Some(text) => text,
+        None => first_run(&config_path).await?,
     };
     // Before anything logs, so the TUI's log pane and file get it all.
     let logs = match ui_kind {
@@ -1170,6 +1222,14 @@ mod tests {
         drop((runs, started, manual));
         gate.await.unwrap();
         assert_eq!(jobs_rx.recv().await, None);
+    }
+
+    #[test]
+    fn a_first_run_edits_only_with_a_terminal_in_the_foreground() {
+        assert!(can_edit(true, Stdout::Foreground));
+        assert!(!can_edit(false, Stdout::Foreground));
+        assert!(!can_edit(true, Stdout::Background));
+        assert!(!can_edit(true, Stdout::NotTerminal));
     }
 
     #[cfg(unix)]
