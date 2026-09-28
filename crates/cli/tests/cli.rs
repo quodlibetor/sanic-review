@@ -46,6 +46,21 @@ fn tui_without_a_terminal_is_refused() {
 }
 
 #[test]
+fn setup_without_a_terminal_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let output = sanic_review()
+        .args(["setup", "--config"])
+        .arg(dir.path().join("config.toml"))
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("needs a terminal"), "{stderr}");
+    assert!(!dir.path().join("config.toml").exists());
+}
+
+#[test]
 fn pr_commands_update_the_store() {
     let dir = tempfile::TempDir::new().unwrap();
     let key = PrKey {

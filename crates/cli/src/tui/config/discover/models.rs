@@ -82,16 +82,6 @@ pub fn known_models(
     models
 }
 
-/// The `models` containing `input`, ignoring case; all of them for no input.
-pub fn matching(models: &[String], input: &str) -> Vec<String> {
-    let input = input.trim().to_lowercase();
-    models
-        .iter()
-        .filter(|m| m.to_lowercase().contains(&input))
-        .cloned()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,13 +151,5 @@ mod tests {
             Some(PathBuf::from("/home/u/.claude/settings.json"))
         );
         assert_eq!(settings_path(|_| None, None), None);
-    }
-
-    #[test]
-    fn matching_ignores_case_and_shows_all_for_no_input() {
-        let models = known_models(None, None, |_| None);
-        assert_eq!(matching(&models, ""), models);
-        assert_eq!(matching(&models, "OP"), ["opus"]);
-        assert!(matching(&models, "bedrock-id").is_empty());
     }
 }

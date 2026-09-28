@@ -256,6 +256,11 @@ impl ConfigEditor {
     /// The counts line: what the config as it last loaded watches, and how
     /// counting is going.
     fn render_counts(&self, frame: &mut Frame<'_>, area: Rect) {
+        if let Some(why) = &self.offline {
+            let line = Span::styled(format!(" {why}"), Style::new().fg(Color::Yellow));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
         // Nothing's planned until the text has loaded once.
         if self.wanted.is_empty() {
             return;

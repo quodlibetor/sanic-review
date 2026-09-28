@@ -46,16 +46,14 @@ use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
-pub(crate) use self::config::discover;
+pub(crate) use self::config::standalone;
 pub use self::layout::Sizes;
 use self::{
-    config::{Checker, ConfigEditor, counts::Counter},
+    config::{ConfigEditor, counts::Counter, host::Host},
     ignore::{IgnoreEditor, Outcome},
     layout::Size,
 };
-use crate::{
-    chat, config_doc::ConfigDoc, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes,
-};
+use crate::{chat, config_edit, logging::LogLines, poll::Progress, schedule::DueTimes};
 
 mod config;
 mod ignore;
@@ -64,7 +62,7 @@ mod layout;
 /// How often the store is reread.
 const REFRESH: Duration = Duration::from_secs(1);
 /// How long to wait for a key before redrawing.
-const TICK: Duration = Duration::from_millis(100);
+pub(crate) const TICK: Duration = Duration::from_millis(100);
 const ACTIVITY_ROWS: u32 = 200;
 
 /// The running UI. Dropping it stops the UI and restores the terminal.
@@ -115,7 +113,7 @@ impl Tui {
 /// Like [`ratatui::try_init`], but a panic on a runtime worker thread
 /// leaves the terminal alone: the worker records a panicking review as
 /// crashed and `serve` carries on.
-fn init_terminal() -> std::io::Result<DefaultTerminal> {
+pub(crate) fn init_terminal() -> std::io::Result<DefaultTerminal> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if matches!(std::thread::current().name(), Some("main" | "tui")) {
@@ -330,7 +328,7 @@ fn run(
     let mut load_failed = false;
     let launcher = Launcher::new(Arc::clone(&shared.opener));
     // Check, save and count the config editor's edits while it's open.
-    let mut editing: Option<Editing> = None;
+    let mut editing: Option<Host> = None;
     // Counts for the config editor. It outlives each opening, so what it
     // knows, its budget and a rate limit GitHub set it carry over.
     let mut counter: Option<Counter> = None;
@@ -339,7 +337,10 @@ fn run(
             app.set_notice(failure);
         }
         match (&editing, &counter, app.editor_mut()) {
-            (Some(editing), Some(counter), Some(editor)) => editing.tend(editor, counter, shared),
+            (Some(editing), counter, Some(editor)) => {
+                editor.set_serve_window(*shared.window.borrow());
+                editing.tend(editor, counter.as_ref(), shared.clock.now());
+            }
             // Closed: its checks stop with it, and counting stops until
             // it opens again.
             (Some(_), _, None) => {
@@ -414,7 +415,7 @@ fn run(
                 | Flow::SaveConfig { .. }
                 | Flow::FindForConfig(_)) => {
                     if let Some(editing) = &editing {
-                        editing.act(flow, app, shared, store);
+                        act_for_editor(editing, flow, app, shared, store);
                     }
                 }
                 Flow::TurnOffManualReviews(told) => {
@@ -429,118 +430,34 @@ fn run(
     Ok(())
 }
 
-/// What runs beside the config editor while it's open: checks and saves
-/// off the UI thread.
-struct Editing {
-    checker: Checker,
-    found_tx: std_mpsc::Sender<config::Found>,
-    found: std_mpsc::Receiver<config::Found>,
-}
-
-impl Editing {
-    fn new(checker: Checker) -> Self {
-        let (found_tx, found) = std_mpsc::channel();
-        Self {
-            checker,
-            found_tx,
-            found,
-        }
-    }
-
-    /// Does what the editor asked of the loop.
-    fn act(&self, flow: Flow, app: &mut App, shared: &Shared, store: &Store) {
-        match flow {
-            Flow::CheckConfig { generation, text } => self.checker.start(generation, text),
-            Flow::SaveConfig { told } => save_config(app, &self.checker, shared, store, told),
-            Flow::FindForConfig(find) => self.find(find, shared),
-            _ => {}
-        }
-    }
-
-    /// Starts finding what the editor suggests, off the UI thread.
-    fn find(&self, find: config::Find, shared: &Shared) {
-        let path = shared.config_path.clone();
-        let resolver = Arc::clone(&shared.resolver);
-        let found = self.found_tx.clone();
-        let spawned = std::thread::Builder::new()
-            .name("config find".into())
-            .spawn(move || {
-                // Only fails once the editor has closed.
-                let _ = found.send(discover::find(find, &path, &*resolver));
-            });
-        if let Err(err) = spawned {
-            let _ = self
-                .found_tx
-                .send(config::Found::Failed(format!("couldn't look: {err}")));
-        }
-    }
-
-    /// Hands the editor what's come in, and `counter` what it wants.
-    fn tend(&self, editor: &mut ConfigEditor, counter: &Counter, shared: &Shared) {
-        if let Some((generation, checked)) = self.checker.finished() {
-            editor.checked(generation, checked);
-        }
-        if let Some(saved) = self.checker.saved() {
-            if let Err(err) = &saved {
-                warn!("saving the config failed: {err:?}");
-            }
-            editor.saved(saved);
-        }
-        for found in self.found.try_iter() {
-            editor.found(found);
-        }
-        editor.set_serve_window(*shared.window.borrow());
-        editor.counted(counter.counted());
-        counter.want(editor.want(shared.clock.now()));
-    }
-}
-
 /// `e`: opens the config editor, or says why it can't.
-fn open_editor(app: &mut App, shared: &Shared) -> Option<Editing> {
-    let (opened, notice) = read_editor(&shared.config_path);
-    if let Some(notice) = notice {
-        app.set_notice(notice);
+fn open_editor(app: &mut App, shared: &Shared) -> Option<Host> {
+    match Host::open(&shared.config_path, Arc::clone(&shared.resolver)) {
+        Ok((editor, host)) => {
+            app.overlay = Some(Overlay::Config(Box::new(editor)));
+            Some(host)
+        }
+        Err(notice) => {
+            app.set_notice(notice);
+            None
+        }
     }
-    let mut editor = opened?;
-    let checker = Checker::new(shared.config_path.clone(), Arc::clone(&shared.resolver));
-    if let config::Outcome::Check { generation, text } = editor.check_now() {
-        checker.start(generation, text);
-    }
-    let model =
-        crate::config_doc::Key::new(crate::config_doc::Table::Runner, "model").and_then(|key| {
-            match editor.doc().scalar(&key) {
-                crate::config_doc::Setting::Set(crate::config_doc::Scalar::Text(model)) => {
-                    Some(model)
-                }
-                _ => None,
-            }
-        });
-    editor.set_models(discover::known_models(model.as_deref()));
-    app.overlay = Some(Overlay::Config(Box::new(editor)));
-    Some(Editing::new(checker))
 }
 
-/// The editor on the config file, or why it can't open.
-fn read_editor(path: &Path) -> (Option<ConfigEditor>, Option<String>) {
-    let opened = sanic_core::config::Config::read_text(path).and_then(|text| {
-        let doc = ConfigDoc::parse(text.as_deref())?;
-        let target = config_edit::resolve_links(path)?;
-        Ok(ConfigEditor::new(
-            path,
-            (target != path).then_some(target),
-            doc,
-        ))
-    });
-    match opened {
-        Ok(editor) => (Some(editor), None),
-        Err(err) => (None, Some(format!("can't edit the config: {err:#}"))),
+/// Does what the config editor asked of the loop.
+fn act_for_editor(host: &Host, flow: Flow, app: &mut App, shared: &Shared, store: &Store) {
+    match flow {
+        Flow::CheckConfig { generation, text } => host.check(generation, text),
+        Flow::SaveConfig { told } => save_config(app, host, shared, store, told),
+        Flow::FindForConfig(find) => host.find(find),
+        _ => {}
     }
 }
 
 /// Starts writing the config editor's edits, off the UI thread since it
 /// loads them first, asking first when they turn manual reviews off with
 /// more reviews held than it was `told` of.
-fn save_config(app: &mut App, checker: &Checker, shared: &Shared, store: &Store, told: u32) {
+fn save_config(app: &mut App, host: &Host, shared: &Shared, store: &Store, told: u32) {
     let on = *shared.manual_reviews.borrow();
     let Some(editor) = app.editor_mut() else {
         return;
@@ -555,8 +472,7 @@ fn save_config(app: &mut App, checker: &Checker, shared: &Shared, store: &Store,
             }
         }
     }
-    checker.save(editor.doc().clone());
-    editor.saving();
+    host.save(editor);
 }
 
 /// Adds `pattern` to the config file's `skip_titles`, and says how that
@@ -2473,9 +2389,8 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('e'))), Flow::EditConfig);
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let (editor, notice) = read_editor(&path);
-        assert_eq!(notice, None, "a missing file opens as a new one");
-        let mut editor = editor.unwrap();
+        let (mut editor, _host) =
+            Host::open(&path, Arc::new(NoCheckouts)).expect("a missing file opens as a new one");
         let config::Outcome::Check { generation, .. } = editor.check_now() else {
             panic!("no check");
         };
@@ -2499,9 +2414,10 @@ mod tests {
         assert!(app.editor_mut().is_none());
 
         std::fs::write(&path, "[runner").unwrap();
-        let (editor, notice) = read_editor(&path);
-        assert!(editor.is_none());
-        assert!(notice.unwrap().contains("isn't valid TOML"));
+        let Err(notice) = Host::open(&path, Arc::new(NoCheckouts)) else {
+            panic!("opened a file that isn't TOML");
+        };
+        assert!(notice.contains("isn't valid TOML"), "{notice}");
     }
 
     #[test]

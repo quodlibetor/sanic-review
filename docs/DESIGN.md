@@ -97,8 +97,9 @@ empties as it goes. There's no network listener. A request made while
 `serve` isn't running is handled when it next starts.
 
 `serve` watches its config file, and when it's a symlink, say into a
-dotfiles repo, the file it points to as well. Edits from `setup`, the TUI
-and the dashboard replace that file, so the link stays a link. A valid
+dotfiles repo, the file it points to as well. Edits from the config
+editor (`setup` or the TUI's `e`), the TUI and the dashboard replace that
+file, so the link stays a link. A valid
 edit applies between poll cycles and
 starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
@@ -198,43 +199,14 @@ globs, with no unscoped entry for the repo, matches nothing and is ignored.
 provide the default auto-fix checkout for that repo. The review runner still
 uses its own bare mirror and never touches your checkout.
 
-**`sanic-review setup`** writes or updates the config interactively:
-- **Teams:** pick which of your teams' review requests count. Unpicked teams
-  are written as `!org/slug` after `*`, so teams you join later count until
-  you exclude them.
-- **Checkouts:** scan a directory for jj and git checkouts with a GitHub
-  remote, then pick which to watch, listed by repo name.
-- **Orgs:** pick orgs to watch, suggested from your orgs, your teams and the
-  checkouts found, plus any others you type.
-- **Model:** the default review model (`runner.model`), defaulting to its
-  current value or `auto`. Answering `auto` when it's unset leaves the file
-  unchanged. Suggests `auto`, the current value, the `opus`/`sonnet`/`haiku`/
-  `fable` aliases, the `model` and `availableModels` in your user-level
-  Claude settings (`settings.json` in `$CLAUDE_CONFIG_DIR`, else
-  `~/.claude`), and the `ANTHROPIC_*MODEL` variables from that file's `env`
-  block and your environment; any other id is accepted too.
-- **Skills and instructions:** for each profile, including ones just
-  created, asks whether to change its `skills` and `instructions`. Each list
-  offers the profile's current entries, pre-selected, so deselecting one
-  removes it; then what's found for it. Skills are the `SKILL.md`
-  directories under `.claude/skills` in the profile's local checkouts and
-  in your user-level Claude directory, listed with the `name` and
-  `description` from their frontmatter; skills already covered by an entry,
-  or by an entry for their parent directory, aren't offered again.
-  Instructions are `CLAUDE.md`, `AGENTS.md` and `.claude/CLAUDE.md` in
-  those checkouts. A path-scoped checkout is searched first in the
-  directories its globs name up to the first wildcard, and their parents,
-  nearest first, then at its root. A chosen skill is written as its own
-  directory, so the agent can't read the other skills beside it. Then you
-  can type more paths, with tab completion and `~`, until a blank answer:
-  a skill path must be a directory holding a `SKILL.md`, itself or in a
-  subdirectory, and an instruction path a file. Paths are written with
-  `~/` when under home, and one already listed isn't added again.
-
-Current config values are pre-selected. Entries setup doesn't manage
-(`owner/name`, path-scoped or remote-override entries) are never removed.
-It shows a diff, validates the result, and writes only after you confirm.
-Choices that match the current config leave the file unchanged.
+**`sanic-review setup`** opens the config editor (see Terminal UI) on
+its own, without `serve`, on the config file or `--config`'s, which it
+creates if it's missing, and says when it leaves whether it wrote it. It
+needs a terminal on stdin and stdout, and says so otherwise. It's how to
+reach the editor when `serve` runs where there's no terminal, such as
+under systemd. With no GitHub token it still edits, but counts nothing
+and finds nothing on GitHub, and says to `gh auth login`. Nothing logs
+while it has the terminal.
 
 ## GitHub ingestion
 
@@ -1209,7 +1181,7 @@ fonttools (run through `uv`, which only this task needs) to
   could hold, in a list to pick from:
   - on `review_requests.teams`, your teams, ticked where the filter lets
     their requests count; writing it makes the filter `*` then `!org/slug`
-    for each unticked team, as `setup` did, so teams you join later count
+    for each unticked team, so teams you join later count
     until you exclude them, and leaves hand-written patterns alone when
     the same teams count;
   - on a profile's `repos`, the orgs you're in and your teams' orgs, then,
@@ -1217,7 +1189,7 @@ fonttools (run through `uv`, which only this task needs) to
     another) to a depth `<` and `>` change, with the scanned checkouts'
     owners; what any profile already watches isn't offered;
   - on a `model`, `auto`, the aliases and the models your Claude settings
-    and environment name, as `setup` suggests them; Tab completes them as
+    and environment name; Tab completes them as
     they're typed;
   - on a profile's `skills` and `instructions`, the skills and instruction
     files in its checkouts (a path-scoped one's globbed directories

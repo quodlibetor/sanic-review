@@ -4,7 +4,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use sanic_core::config::{contract_path_in, expand_path_in};
+use sanic_core::config::expand_path_in;
 
 use crate::config_doc::RepoEntry;
 
@@ -27,11 +27,6 @@ impl Places {
     pub fn expand(&self, raw: &str, base: &Path) -> Option<PathBuf> {
         let path = expand_path_in(raw, base, self.home.as_deref()).ok()?;
         Some(path.components().collect())
-    }
-
-    /// `path` as it's shown and written: `~/` for paths under home.
-    pub fn contract(&self, path: &Path) -> String {
-        contract_path_in(path, self.home.as_deref())
     }
 }
 
@@ -141,16 +136,6 @@ pub fn find_instructions(dirs: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     found
-}
-
-/// Whether `dir` is a skill or holds skills, as `skills` entries may be.
-pub fn holds_skills(dir: &Path) -> bool {
-    dir.join("SKILL.md").is_file()
-        || std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| e.path().join("SKILL.md").is_file())
 }
 
 /// Where to look for a profile's skills and instructions: for each
@@ -346,9 +331,6 @@ mod tests {
         assert_eq!(names, ["alpha", "zeta", "unnamed"]);
         assert_eq!(skills[0].description.as_deref(), Some("A."));
         assert_eq!(skills[2].description, None);
-        assert!(holds_skills(&root.join("a")));
-        assert!(holds_skills(&root.join("a/zeta")));
-        assert!(!holds_skills(&root.join("a/notes")));
 
         write(root, "r/.claude/CLAUDE.md", "");
         assert_eq!(

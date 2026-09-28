@@ -6,8 +6,10 @@ mod check;
 mod complete;
 pub mod counts;
 pub mod discover;
+pub mod host;
 mod render;
 mod rows;
+pub mod standalone;
 mod suggest;
 
 use std::{
@@ -70,6 +72,10 @@ pub struct ConfigEditor {
     saving: bool,
     /// Models to suggest and complete.
     models: Vec<String>,
+    /// Why nothing's counted, when that's so from the start.
+    offline: Option<String>,
+    /// A save has been written.
+    wrote: bool,
 }
 
 /// The recency window `serve` shows, in days; `None` is any age.
@@ -179,6 +185,8 @@ impl ConfigEditor {
             serve_window: None,
             saving: false,
             models: Vec::new(),
+            offline: None,
+            wrote: false,
         }
     }
 
@@ -263,6 +271,23 @@ impl ConfigEditor {
     /// differs.
     pub fn set_serve_window(&mut self, days: Option<u32>) {
         self.serve_window = Some(Serving(days));
+    }
+
+    /// Nothing will be counted, and GitHub suggests nothing, for `why`.
+    pub fn set_offline(&mut self, why: &str) {
+        self.offline = Some(why.to_owned());
+    }
+
+    /// Whether a save has been written.
+    #[must_use]
+    pub fn wrote(&self) -> bool {
+        self.wrote
+    }
+
+    /// Whether a save has been sent and not yet come back.
+    #[must_use]
+    pub fn is_saving(&self) -> bool {
+        self.saving
     }
 
     /// The models `f` suggests and Tab completes for a `model`.
@@ -365,7 +390,11 @@ impl ConfigEditor {
         match (&row, key) {
             (_, Some(key)) if key.table == Table::ReviewRequests && key.name == "teams" => {
                 let Some(teams) = tally.teams() else {
-                    self.notice = Some("your teams aren't in yet".into());
+                    self.notice = Some(
+                        self.offline
+                            .clone()
+                            .unwrap_or_else(|| "your teams aren't in yet".into()),
+                    );
                     return Outcome::Open;
                 };
                 let patterns = match self.doc.list(&key) {
@@ -536,6 +565,7 @@ impl ConfigEditor {
             ConfigDoc::parse(self.doc.source())
                 .is_ok_and(|before| before.scalar(&key) != self.doc.scalar(&key))
         });
+        self.wrote = true;
         match ConfigDoc::parse(Some(&saved.text)) {
             Ok(doc) => self.doc = doc,
             Err(err) => {

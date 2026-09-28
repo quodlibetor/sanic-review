@@ -27,7 +27,6 @@ comrak = { version = "0.55", default-features = false }
 getrandom = "0.4"
 globset = "0.4"
 http-body-util = "0.1"
-inquire = "0.9"
 notify = "8.2"
 ratatui = "0.30"
 indexmap = { version = "2.14", features = ["serde"] }

@@ -4,7 +4,6 @@
 //! order, so the edits can be made again on the file as it is when they're
 //! saved, if someone else wrote it meanwhile.
 
-pub mod choices;
 mod entry;
 mod profiles;
 pub mod schema;

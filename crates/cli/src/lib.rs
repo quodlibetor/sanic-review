@@ -33,7 +33,8 @@ pub struct Cli {
 enum Command {
     /// Watch GitHub, run reviews, and serve the dashboard in the foreground.
     Serve(ServeArgs),
-    /// Write or update the config: pick teams, local checkouts and orgs.
+    /// Edit the config, or write a new one: every key, with suggestions and
+    /// live counts of what it watches.
     Setup(setup::SetupArgs),
     /// Stop reviewing a PR automatically, and hide it in the TUI.
     Archive(archive::PrArgs),
@@ -137,10 +138,8 @@ impl Cli {
     pub async fn run(self) -> Result<()> {
         match self.command {
             Command::Serve(args) => serve::run(args).await,
-            Command::Setup(args) => {
-                logging::init_stdout();
-                setup::run(args).await
-            }
+            // The editor has the terminal, so nothing logs there.
+            Command::Setup(args) => setup::run(args).await,
             Command::Archive(args) => {
                 logging::init_stdout();
                 archive::archive(&args, true)

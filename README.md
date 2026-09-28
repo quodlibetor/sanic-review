@@ -100,10 +100,11 @@ Then:
 sanic-review setup
 ```
 
-This asks which of your teams' review requests count, scans a directory for
-local checkouts to watch, suggests orgs, and asks for a default model. It
-shows a diff of the config and writes it only if you say yes. You can run it
-again later; it keeps what it doesn't manage.
+This opens the config editor: every key, with `f` to suggest your teams,
+orgs, local checkouts, models and skills, and live counts of the repos and
+PRs the config watches. It checks the config as you go, shows the diff, and
+writes it only once it loads and you say yes, keeping the file's comments
+and layout. Run it again whenever; `e` in the TUI opens the same editor.
 
 ```sh
 sanic-review serve
