@@ -208,6 +208,11 @@ file, each key commented with what it does, unset ones commented out with
 their default, and says under it what the config does: the repos it
 watches, the reviews you're asked for, your open PRs.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/config-editor-dark.png">
+  <img src="docs/images/config-editor.png" alt="The config editor in a terminal, on a profile's repo entries: each key under a comment saying what it does, unset ones commented out beside the default or setting they fall back to. The selected entry and the one above it each show the repos and PRs they match, and under the file, what the config does: the repos it watches, the reviews it matches and your open PRs, and the days a PR counts for.">
+</picture>
+
 | Key | Does |
 |-----|------|
 | `j`/`k`, `g`/`G` | move a row, jump to first/last |

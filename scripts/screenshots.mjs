@@ -1,6 +1,8 @@
-// Screenshots of the demo dashboard for the README: builds and starts the
-// `demo` example of sanic-web, drives headless Chrome over the DevTools
-// protocol, and writes docs/images/*.png. `mise run screenshots` runs it.
+// Screenshots of the demo dashboard and the config editor for the README:
+// builds and starts the `demo` example of sanic-web, has a test of
+// sanic-review draw the editor as a page, drives headless Chrome over the
+// DevTools protocol, and writes docs/images/*.png. `mise run screenshots`
+// runs it.
 //
 // Chrome is `$CHROME`, else `google-chrome` on PATH. PNGs go through
 // oxipng when it's installed.
@@ -9,6 +11,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -20,8 +23,11 @@ const SHOWCASE = "/pr/quodlibetor/frobnicator/42";
 // `prepare` runs in the page first; `until`, if it finds an element, is
 // where the shot stops, else it's the whole page. With `tall`, the window
 // is as tall as the page, so what's capped at its height, like the
-// index's filter sidebar, shows whole.
+// index's filter sidebar, shows whole. `fit`, instead, is the element
+// the shot is cropped to. `scale` is device pixels per CSS pixel, 1
+// unless given.
 const openQuiet = `document.querySelector("#owed-quiet").open = true`;
+const terminal = `document.querySelector("pre")`;
 const SHOTS = [
   { file: "index.png", path: "/", width: 1440, tall: true, prepare: openQuiet },
   { file: "index-dark.png", path: "/", width: 1440, tall: true, dark: true, prepare: openQuiet },
@@ -30,6 +36,10 @@ const SHOTS = [
   { file: "drafts.png", path: SHOWCASE, width: 1100, until: `document.querySelectorAll("article.draft")[4]` },
   // The first file, with its drafts and thread.
   { file: "files.png", path: `${SHOWCASE}?view=files`, width: 1400, until: `document.querySelectorAll("div.file")[1]` },
+  // The editor's page, rather than the dashboard's; doubled, so its
+  // terminal-sized text stays sharp.
+  { file: "config-editor.png", editor: true, width: 1440, scale: 2, fit: terminal },
+  { file: "config-editor-dark.png", editor: true, width: 1440, scale: 2, dark: true, fit: terminal },
 ];
 
 // Run last first, each whether or not the one before it failed. Whatever
@@ -38,9 +48,10 @@ const cleanups = [];
 
 async function main() {
   const demo = await startDemo();
+  const editor = drawEditor();
   const port = await startChrome();
   for (const shot of SHOTS) {
-    const png = await capture(port, new URL(shot.path, demo).href, shot);
+    const png = await capture(port, shot.editor ? editor : new URL(shot.path, demo).href, shot);
     const file = join(OUT, shot.file);
     writeFileSync(file, png);
     console.log(`wrote ${file}`);
@@ -68,6 +79,20 @@ async function startDemo() {
     child.once("exit", (code) => reject(new Error(`the demo exited with ${code}`)));
     createInterface({ input: child.stdout }).once("line", resolve);
   });
+}
+
+// Has the test in crates/cli/src/tui/config/tests/screenshot.rs write the
+// config editor as a page; returns its URL.
+function drawEditor() {
+  const tmp = mkdtempSync(join(tmpdir(), "sanic-editor-"));
+  cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+  const page = join(tmp, "config-editor.html");
+  run("cargo", [
+    "test", "--locked", "-p", "sanic-review", "--lib", "--",
+    "--exact", "tui::config::tests::screenshot::the_readme_screenshot_draws_the_demo_counted",
+  ], { ...process.env, CONFIG_EDITOR_HTML: page });
+  if (!existsSync(page)) throw new Error(`the editor's test wrote no ${page}`);
+  return pathToFileURL(page).href;
 }
 
 // Starts headless Chrome with a fresh profile; resolves with its DevTools
@@ -103,12 +128,12 @@ async function startChrome() {
 }
 
 // A PNG of `url` at `width`; see SHOTS.
-async function capture(port, url, { width, tall, dark, prepare, until }) {
+async function capture(port, url, { width, tall, dark, prepare, until, fit, scale = 1 }) {
   const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
   const page = await connect(target.webSocketDebuggerUrl);
   try {
     await page.send("Page.enable");
-    await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: scale, mobile: false });
     await page.send("Emulation.setEmulatedMedia", {
       features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }],
     });
@@ -122,31 +147,34 @@ async function capture(port, url, { width, tall, dark, prepare, until }) {
     // Fonts and deferred scripts.
     await sleep(500);
     // Only a page the demo served whole is worth a shot: not an error page
-    // for a path the seed no longer has.
+    // for a path the seed no longer has. A local page has no status, and
+    // was written whole.
     const { result, exceptionDetails } = await page.send("Runtime.evaluate", {
       returnByValue: true,
       expression: `(() => {
-        const status = performance.getEntriesByType("navigation")[0].responseStatus;
+        const status = location.protocol === "file:" ? 200 : performance.getEntriesByType("navigation")[0].responseStatus;
         if (status !== 200) return { status };
         ${prepare ?? ""};
+        const box = ${fit ?? "null"}?.getBoundingClientRect();
+        if (box) return { status, width: Math.ceil(box.width), height: Math.ceil(box.height) };
         const stop = ${until ?? "null"};
         const height = stop ? stop.getBoundingClientRect().top + window.scrollY : document.documentElement.scrollHeight;
-        return { status, height: Math.ceil(height) };
+        return { status, width: ${width}, height: Math.ceil(height) };
       })()`,
     });
     if (exceptionDetails) {
       throw new Error(`preparing ${url}: ${exceptionDetails.exception?.description ?? exceptionDetails.text}`);
     }
-    const { status, height } = result.value;
+    const { status, width: shown, height } = result.value;
     if (status !== 200) throw new Error(`${url} answered ${status}`);
     if (tall) {
-      await page.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+      await page.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: scale, mobile: false });
       await sleep(200);
     }
     const { data } = await page.send("Page.captureScreenshot", {
       format: "png",
       captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width, height, scale: 1 },
+      clip: { x: 0, y: 0, width: shown, height, scale: 1 },
     });
     return Buffer.from(data, "base64");
   } finally {
@@ -202,9 +230,12 @@ async function connect(ws) {
   };
 }
 
-// Runs `cmd` to completion, failing if it does; returns its stdout.
-function run(cmd, args) {
-  const result = spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 26 });
+// Runs `cmd` to completion, in `env` if given, failing if it does;
+// returns its stdout.
+function run(cmd, args, env) {
+  const result = spawnSync(cmd, args, {
+    encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 26, env,
+  });
   if (result.status !== 0) throw new Error(`${cmd} failed: ${result.error ?? `exit ${result.status}`}`);
   return result.stdout;
 }

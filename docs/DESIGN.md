@@ -1576,13 +1576,22 @@ which runs `scripts/screenshots.mjs` under a pinned Node:
   review seen. PNGs go through `oxipng` when it's installed.
 - The dashboard serves its own emoji font, so the shots need no emoji
   font installed and come out the same on every platform.
+- The config editor's shots come from a test of `sanic-review`,
+  `crates/cli/src/tui/config/tests/screenshot.rs`, which draws the editor on
+  an invented config with its counts answered, into ratatui's `TestBackend`.
+  With `$CONFIG_EDITOR_HTML` set, it writes that buffer there as a page: a
+  grid of cells of one whole-pixel size, in a light and a dark terminal
+  palette, with box-drawing characters drawn as CSS lines so the box joins
+  whatever font draws the text. Chrome captures it at twice the scale of the
+  dashboard's shots, so terminal-sized text stays sharp. Without the
+  variable, `mise run test` still draws it and checks what it shows.
 - A page that doesn't load with a 200 fails the run rather than being
   captured.
 - The script stops the demo and Chrome and removes their temp dirs when it
   ends, whether or not it succeeded.
 
-The example's test, run by `mise run test`, checks the seed still builds
-and the pages it shows render; it takes no screenshots.
+The demo example's test, run by `mise run test`, checks the seed still
+builds and the pages it shows render; it takes no screenshots.
 
 ### Dependency updates
 
