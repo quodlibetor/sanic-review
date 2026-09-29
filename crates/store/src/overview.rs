@@ -16,9 +16,10 @@ use crate::Store;
 /// The run whose drafts a PR's page shows, and so the one whose drafts the
 /// lists and counts count: the PR's latest review or regeneration that
 /// succeeded, as [`Store::review_runs`] orders them. `repo` and `number`
-/// are SQL for the PR's columns. A regeneration copies drafts it keeps, so
-/// counting every run's would count them again.
-fn current_run(repo: &str, number: &str) -> String {
+/// are SQL for the PR's columns. A regeneration copies drafts it keeps, and
+/// a review with no update the drafts of the run it resumed, so counting
+/// every run's would count them again.
+pub(crate) fn current_run(repo: &str, number: &str) -> String {
     format!(
         "(SELECT c.id FROM runs c
           WHERE c.repo = {repo} AND c.number = {number} AND c.status = 'succeeded'
@@ -87,6 +88,9 @@ pub struct LatestRun {
     pub status: String,
     /// Why a failed or crashed run ended.
     pub error: Option<String>,
+    /// It succeeded, resuming an earlier run's session, and found nothing
+    /// new since that run.
+    pub no_update: bool,
 }
 
 /// An open PR you authored.
@@ -199,7 +203,8 @@ impl Store {
                     p.body, p.head_sha, (
                         SELECT id FROM runs s
                         WHERE s.repo = p.repo AND s.number = p.number AND s.session_id IS NOT NULL
-                        ORDER BY coalesce(s.finished_at, s.queued_at) DESC, s.id DESC LIMIT 1)
+                        ORDER BY coalesce(s.finished_at, s.queued_at) DESC, s.id DESC LIMIT 1),
+                    latest.no_update IS NOT NULL
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -213,6 +218,7 @@ impl Store {
             .query_map(params![me, since], |row| {
                 let status: Option<String> = row.get(7)?;
                 let error: Option<String> = row.get(8)?;
+                let no_update: bool = row.get(13)?;
                 Ok(OwedReview {
                     key: key_columns(row)?,
                     title: row.get(2)?,
@@ -220,7 +226,11 @@ impl Store {
                     profile: row.get(4)?,
                     is_draft: row.get(5)?,
                     archived: row.get(6)?,
-                    latest_run: status.map(|status| LatestRun { status, error }),
+                    latest_run: status.map(|status| LatestRun {
+                        status,
+                        error,
+                        no_update,
+                    }),
                     pending_drafts: row.get(9)?,
                     body: row.get(10)?,
                     head_sha: row.get(11)?,
@@ -567,6 +577,7 @@ mod tests {
             comments: vec![],
             session_id: None,
             transcript_path: "t".into(),
+            resumed_from: None,
         }
     }
 
@@ -635,6 +646,7 @@ mod tests {
             Some(LatestRun {
                 status: "crashed".into(),
                 error: Some("index out of bounds".into()),
+                no_update: false,
             })
         );
     }

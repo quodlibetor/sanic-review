@@ -79,6 +79,15 @@ pub struct Invocation<'a> {
     pub resume: Option<&'a str>,
 }
 
+/// How a session ended, when it didn't fail.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ended {
+    Answered(Outcome),
+    /// The session to resume wasn't found, so none started: `claude` keeps
+    /// sessions for a while, not forever.
+    NoSession,
+}
+
 /// A session that ended with an answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
@@ -146,8 +155,9 @@ impl Claude {
         Ok(cmd)
     }
 
-    /// Runs a session to completion and returns its structured answer.
-    pub async fn run(&self, inv: &Invocation<'_>) -> Result<Outcome> {
+    /// Runs a session to completion and returns its structured answer, or
+    /// says the session to resume is gone.
+    pub async fn run(&self, inv: &Invocation<'_>) -> Result<Ended> {
         let program = self.program.display().to_string();
         let transcript = std::fs::File::create(inv.transcript)
             .wrap_err_with(|| format!("creating {}", inv.transcript.display()))?;
@@ -197,11 +207,37 @@ impl Claude {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .find(|msg| msg["type"] == "result");
         match result {
-            Some(result) => parse_result(&result).with_section(|| stderr_tail(inv.stderr)),
+            Some(result) if inv.resume.is_some() && never_started(&stream, &result) => {
+                Ok(Ended::NoSession)
+            }
+            Some(result) => parse_result(&result)
+                .map(Ended::Answered)
+                .with_section(|| stderr_tail(inv.stderr)),
             None => Err(eyre!("`{program}` exited with {status} and no result"))
                 .section(stderr_tail(inv.stderr)),
         }
     }
+}
+
+/// Whether a session failed before it started because the one to resume
+/// wasn't found: its only result is an error saying so, after no turns,
+/// and `stream`, its messages, never says it had started. That's how
+/// `claude` answers `--resume` with a session it doesn't have; any other
+/// failure before starting, such as one to log in, is an error like any.
+fn never_started(stream: &str, result: &Value) -> bool {
+    let not_found = result["errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|e| e.contains("No conversation found"))
+    });
+    result["is_error"].as_bool().unwrap_or(false)
+        && not_found
+        && result["num_turns"].as_u64() == Some(0)
+        && !stream
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|msg| msg["type"] == "system" && msg["subtype"] == "init")
 }
 
 /// Reads the final `result` message. The structured answer is in
@@ -379,6 +415,30 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(outcome.output, json!({ "a": 2 }));
+    }
+
+    #[test]
+    fn a_missing_session_never_starts() {
+        // As `claude -p --resume <gone> --output-format stream-json` says it.
+        let gone = json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "num_turns": 0, "session_id": "new",
+            "errors": ["No conversation found with session ID: old"]
+        });
+        assert!(never_started(&format!("{gone}\n"), &gone));
+        // One that started, then failed, is a failure.
+        let init = json!({ "type": "system", "subtype": "init", "session_id": "new" });
+        assert!(!never_started(&format!("{init}\n{gone}\n"), &gone));
+        let turned = json!({
+            "type": "result", "subtype": "error_max_turns", "is_error": true, "num_turns": 3
+        });
+        assert!(!never_started(&format!("{turned}\n"), &turned));
+        // Failing before it starts for another reason isn't a missing session.
+        let logged_out = json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "num_turns": 0, "errors": ["Invalid API key · Please run /login"]
+        });
+        assert!(!never_started(&format!("{logged_out}\n"), &logged_out));
     }
 
     #[test]

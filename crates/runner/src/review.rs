@@ -7,6 +7,7 @@
 //! the same working directory.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,16 +16,16 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use sanic_core::{
     config::{Profile, RunnerSettings},
     run::{
-        BaselineDraft, Basis, DraftComment, DraftOutput, DraftRevision, PrContext, QueuedRun,
-        ReviewOutput, ReviewResult, RevisedOutput,
+        BaselineDraft, Basis, Carried, DraftComment, DraftOutput, DraftRevision, PrContext,
+        QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput, Side, Verdict,
     },
 };
 use serde_json::{Value, json};
 
 use crate::{
     chat,
-    claude::{Claude, Invocation, Outcome},
-    diff::DiffIndex,
+    claude::{Claude, Ended, Invocation, Outcome},
+    diff::{DiffIndex, LineMap},
     mirror::{Mirrors, Step, Worktree},
     prompt,
 };
@@ -153,13 +154,12 @@ impl ReviewRunner {
             .await;
     }
 
-    /// Where `run` checks out, for its review or a chat. A revision uses its
-    /// source run's path: Claude Code finds the session it resumes by
-    /// directory.
+    /// Where `run` checks out, for its review or a chat. A run that resumes
+    /// a session uses the path of the run it lives under: Claude Code finds
+    /// sessions by directory. See [`QueuedRun::worktree`].
     #[must_use]
     pub fn worktree_path(&self, run: &QueuedRun) -> PathBuf {
-        let id = run.revision.as_ref().map_or(run.id, |r| r.source_run);
-        chat::worktree_path(&self.data_dir, id)
+        chat::worktree_path(&self.data_dir, run.worktree_run())
     }
 
     /// Checks `run`'s head out again where the review ran, for a chat that
@@ -205,16 +205,11 @@ impl ReviewRunner {
     }
 
     /// The directories besides the worktree that `run`'s agent could read,
-    /// as a chat should get them again: its run dir, skills and the
+    /// as a chat should get them again: its run dirs, skills and the
     /// reference checkouts that exist.
     fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
-        let runs = self.data_dir.join("runs");
-        std::iter::once(runs.join(run.id.to_string()))
-            .chain(
-                run.revision
-                    .as_ref()
-                    .map(|r| runs.join(r.source_run.to_string())),
-            )
+        run_dirs(run, &self.data_dir.join("runs").join(run.id.to_string()))
+            .into_iter()
             .chain(settings.profile.skills.iter().cloned())
             .chain(
                 existing_dirs(&settings.reference_dirs)
@@ -248,27 +243,45 @@ impl ReviewRunner {
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
         let target = target(run)?;
-        let brief = match (&run.revision, target) {
-            (Some(revision), Some(target)) => {
+        let brief = match (&run.revision, target, &run.resume) {
+            (Some(revision), Some(target), _) => {
                 prompt::draft_revision(&revision.instruction, target, ctx)
             }
-            (Some(revision), None) => {
+            (Some(revision), None, _) => {
                 prompt::revision(&revision.instruction, &revision.baseline, ctx)
             }
-            (None, _) => prompt::brief(&run.request, ctx, &diff, &diff_path),
+            (None, _, Some(resume)) => {
+                let Some(interdiff) = worktree
+                    .interdiff(&resume.head_sha, &resume.base_sha)
+                    .await?
+                else {
+                    return Ok(Reviewed::NotResumed {
+                        why: format!(
+                            "the mirror no longer has {} or {}",
+                            resume.head_sha, resume.base_sha
+                        ),
+                    });
+                };
+                let interdiff_path = run_dir.join("interdiff.diff");
+                write(&interdiff_path, interdiff.text()).await?;
+                prompt::update(
+                    &run.request,
+                    ctx,
+                    resume,
+                    &interdiff,
+                    &interdiff_path,
+                    &diff_path,
+                )
+            }
+            (None, _, None) => prompt::brief(&run.request, ctx, &diff, &diff_path),
         };
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
 
         // The run dir holds the diff; skills and reference checkouts are
         // read in place.
-        // A revision's session knows the source run's dir by path.
-        let source_dir = run
-            .revision
-            .as_ref()
-            .map(|r| run_dir.with_file_name(r.source_run.to_string()));
-        let add_dirs: Vec<PathBuf> = std::iter::once(run_dir.to_owned())
-            .chain(source_dir)
+        let add_dirs: Vec<PathBuf> = run_dirs(run, run_dir)
+            .into_iter()
             .chain(profile.skills.iter().cloned())
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
@@ -276,6 +289,8 @@ impl ReviewRunner {
         let schema = match (&run.revision, target) {
             (Some(_), Some(target)) => draft_revision_schema(&target.kind),
             (Some(_), None) => revision_schema(),
+            // It names the drafts it keeps, as a regeneration does.
+            (None, _) if run.resume.is_some() => revision_schema(),
             (None, _) => review_schema(),
         };
         let outcome = claude
@@ -288,16 +303,60 @@ impl ReviewRunner {
                 model: profile.model.as_deref(),
                 transcript: &transcript,
                 stderr: &run_dir.join("stderr.log"),
-                resume: run.revision.as_ref().map(|r| r.session_id.as_str()),
+                resume: run
+                    .revision
+                    .as_ref()
+                    .map(|r| r.session_id.as_str())
+                    .or(run.resume.as_ref().map(|r| r.session_id.as_str())),
             })
             .await?;
+        let outcome = match outcome {
+            Ended::Answered(outcome) => outcome,
+            Ended::NoSession => {
+                return Ok(Reviewed::NotResumed {
+                    why: "its agent session is gone".into(),
+                });
+            }
+        };
         let index = DiffIndex::parse(&diff);
-        match target {
-            Some(target) => Self::draft_revised(outcome, target, &index, &transcript),
-            None => Self::reviewed(outcome, &index, run, &transcript),
-        }
+        let reviewed = match target {
+            Some(target) => Self::draft_revised(outcome, target, &index, &transcript)?,
+            None => Self::reviewed(outcome, &index, run, &transcript)?,
+        };
+        resumed(reviewed, run, worktree, &index).await
     }
+}
 
+/// `reviewed`, `run`'s answer, with, when `run` resumed a session, where
+/// the lines of that session's drafts went at the new head: carried, for
+/// a review with no update, or to tell which it kept, for one with drafts
+/// of its own.
+async fn resumed(
+    reviewed: Reviewed,
+    run: &QueuedRun,
+    worktree: &Worktree,
+    index: &DiffIndex,
+) -> Result<Reviewed> {
+    let Some(resume) = &run.resume else {
+        return Ok(reviewed);
+    };
+    let carried = carry(worktree, &run.request.head_sha, resume, index).await?;
+    match reviewed {
+        Reviewed::NoUpdate { result, .. } => Ok(Reviewed::NoUpdate { result, carried }),
+        Reviewed::Review {
+            result,
+            basis: Some(basis),
+        } => Ok(Reviewed::Resumed {
+            result,
+            basis,
+            resume: resume.clone(),
+            moved: carried,
+        }),
+        reviewed => Ok(reviewed),
+    }
+}
+
+impl ReviewRunner {
     /// A regeneration of one draft's answer, `target`'s revision checked
     /// against the diff, or its drop.
     fn draft_revised(
@@ -331,7 +390,7 @@ impl ReviewRunner {
         run: &QueuedRun,
         transcript: &Path,
     ) -> Result<Reviewed> {
-        let (output, basis) = if run.revision.is_some() {
+        let (output, basis) = if run.revision.is_some() || run.resume.is_some() {
             let revised: RevisedOutput = serde_json::from_value(outcome.output)
                 .wrap_err("the agent's answer doesn't match the revision schema")?;
             let (output, basis) = revised.split();
@@ -356,7 +415,16 @@ impl ReviewRunner {
                 .collect(),
             session_id: outcome.session_id,
             transcript_path: transcript.display().to_string(),
+            resumed_from: run.resume.as_ref().map(|r| r.run),
         };
+        // Resumed, `none` with nothing to say is nothing new: the prompt
+        // asks for that.
+        if run.resume.is_some() && result.verdict == Verdict::None && result.comments.is_empty() {
+            return Ok(Reviewed::NoUpdate {
+                result,
+                carried: Vec::new(),
+            });
+        }
         Ok(Reviewed::Review { result, basis })
     }
 }
@@ -389,6 +457,102 @@ pub enum Reviewed {
         session_id: Option<String>,
         transcript_path: String,
     },
+    /// A resumed review that found nothing new since the run it resumed:
+    /// `result` has no comments, and its summary says what it checked.
+    /// `carried` are that run's drafts, but those posted, on their lines
+    /// at the new head.
+    NoUpdate {
+        result: ReviewResult,
+        carried: Vec<Carried>,
+    },
+    /// A resumed push review, and which of the drafts of the run it
+    /// resumed, `resume`'s, each of its own is based on; `moved` says where
+    /// their lines went at the new head.
+    Resumed {
+        result: ReviewResult,
+        basis: Basis,
+        resume: Resume,
+        moved: Vec<Carried>,
+    },
+    /// The session it was to resume couldn't be, and nothing ran: `why`
+    /// says why. A push review can start afresh instead.
+    NotResumed { why: String },
+}
+
+/// The run dirs `run`'s agent may read: its own, `run_dir`, and those of
+/// the runs whose sessions it continues, which it knows by path.
+fn run_dirs(run: &QueuedRun, run_dir: &Path) -> Vec<PathBuf> {
+    std::iter::once(run_dir.to_owned())
+        .chain(
+            run.lineage
+                .iter()
+                .map(|id| run_dir.with_file_name(id.to_string())),
+        )
+        .collect()
+}
+
+/// `resume`'s drafts, but those posted, carried to `head`, checked out in
+/// `worktree`: each comment on the lines its own are at there, found by
+/// diffing its file between the heads (or, on the old side, between the
+/// merge bases), and unanchored where any of its lines changed or they
+/// aren't in `index`, the new diff.
+async fn carry(
+    worktree: &Worktree,
+    head: &str,
+    resume: &Resume,
+    index: &DiffIndex,
+) -> Result<Vec<Carried>> {
+    let from_merge_base = worktree
+        .merge_base_of(&resume.base_sha, &resume.head_sha)
+        .await?;
+    let mut maps: HashMap<(Side, String), LineMap> = HashMap::new();
+    let mut carried = Vec::new();
+    for draft in resume.drafts.iter().filter(|d| d.status != "posted") {
+        let as_it_was = Carried {
+            draft: draft.id,
+            start_line: draft.start_line,
+            line: draft.line,
+            unanchored: false,
+        };
+        let side = match draft.side.as_deref() {
+            Some("LEFT") => Side::Left,
+            _ => Side::Right,
+        };
+        let (Some(path), Some(line)) = (&draft.path, draft.line) else {
+            carried.push(as_it_was);
+            continue;
+        };
+        let key = (side, path.clone());
+        if !maps.contains_key(&key) {
+            let map = match side {
+                Side::Left => {
+                    worktree
+                        .line_map(&from_merge_base, worktree.merge_base(), path)
+                        .await?
+                }
+                Side::Right => worktree.line_map(&resume.head_sha, head, path).await?,
+            };
+            maps.insert(key.clone(), map);
+        }
+        let map = &maps[&key];
+        // A range is unanchored if anything in it changed, not only its ends.
+        let moved = map
+            .map_range(draft.start_line.unwrap_or(line), line)
+            .map(|(start, line)| (draft.start_line.map(|_| start), line));
+        carried.push(match moved {
+            Some((start_line, line)) => Carried {
+                draft: draft.id,
+                start_line,
+                line: Some(line),
+                unanchored: !index.anchors_at(path, start_line, line, side),
+            },
+            None => Carried {
+                unanchored: true,
+                ..as_it_was
+            },
+        });
+    }
+    Ok(carried)
 }
 
 /// The directories in `dirs` that exist; a missing one is only a warning,

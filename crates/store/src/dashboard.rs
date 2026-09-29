@@ -49,6 +49,10 @@ pub struct ReviewRun {
     /// How many comments of your pending review on GitHub its agent was
     /// shown, when it was shown the review.
     pub in_progress_comments: Option<u32>,
+    /// For a resumed review that found nothing new since the run it
+    /// resumed, whose drafts it carries: the agent's word on what it
+    /// checked.
+    pub no_update: Option<String>,
 }
 
 /// A stored draft with everything the dashboard shows and edits.
@@ -274,7 +278,7 @@ impl Store {
             "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
                     source_run, instruction, draft_id,
                     (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id),
-                    in_progress_comments
+                    in_progress_comments, no_update
              FROM runs
              WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
@@ -296,6 +300,7 @@ impl Store {
                         draft_id: row.get(9)?,
                         draft_run: row.get(10)?,
                         in_progress_comments: row.get(11)?,
+                        no_update: row.get(12)?,
                     })
                 },
             )?
@@ -649,6 +654,7 @@ mod tests {
             }],
             session_id: None,
             transcript_path: "t".into(),
+            resumed_from: None,
         }
     }
 

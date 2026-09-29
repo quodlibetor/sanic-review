@@ -8,14 +8,25 @@ use sanic_core::{
     pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread, is_login},
     repo::RepoName,
     run::{
-        BaselineDraft, Basis, DraftRevision, InlineComment, PrContext, QueuedRun, ReviewRequest,
-        ReviewResult, ReviewTrigger, Revision, RunKind, Side,
+        BaselineDraft, Basis, Carried, DraftRevision, InlineComment, PrContext, QueuedRun, Resume,
+        ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind, Side,
     },
 };
 
 use crate::{NOW, Posted, Store, posted::same_body};
 
 const REVIEW: &str = RunKind::Review.as_str();
+
+/// The run whose worktree path the run in `runs` row `r` checks out at, as
+/// SQL: see [`QueuedRun::worktree`]. A resumed review records it; a
+/// regeneration uses its source's.
+fn worktree_run(r: &str) -> String {
+    format!(
+        "coalesce({r}.worktree_run,
+                  (SELECT coalesce(s.worktree_run, s.id) FROM runs s WHERE s.id = {r}.source_run),
+                  {r}.id)"
+    )
+}
 
 /// A run's current state, as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,7 +199,8 @@ impl Store {
                 &format!(
                     "UPDATE runs SET trigger = ?2, profile = ?3, base_sha = ?4, from_sha = ?5,
                          status = 'queued', error = NULL, suggested_verdict = NULL,
-                         session_id = NULL, transcript_path = NULL,
+                         session_id = NULL, transcript_path = NULL, resumed_from = NULL,
+                         worktree_run = NULL, no_update = NULL,
                          queued_at = {NOW}, started_at = NULL, finished_at = NULL
                      WHERE id = ?1"
                 ),
@@ -228,6 +240,9 @@ impl Store {
             id,
             request: req.clone(),
             revision: None,
+            resume: None,
+            worktree: None,
+            lineage: Vec::new(),
         }))
     }
 
@@ -237,8 +252,9 @@ impl Store {
     ///
     /// Revising a regeneration resumes its session, but the new run's
     /// source is the original review: every revision's session lives in
-    /// that review's worktree path. `worktree_in_use` says whether that
-    /// review's worktree exists.
+    /// that review's worktree path. `worktree_in_use` says whether the
+    /// worktree of the run it names exists: that review's, or the one
+    /// whose session that review resumed.
     pub fn queue_regeneration(
         &mut self,
         source: i64,
@@ -273,7 +289,7 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some((repo, number, profile, head_sha, base_sha, session_id, pr_head, original)) =
+        let Some((repo, number, profile, head_sha, base_sha, session_id, pr_head, original, home)) =
             source_row(&tx, source)?
         else {
             return Ok(Regeneration::Refused(Refusal::NoSuchRun));
@@ -283,8 +299,9 @@ impl Store {
         {
             return Ok(Regeneration::Refused(why));
         }
-        // It checks out where the review ran, which a chat may be using.
-        if worktree_in_use(original) {
+        // It checks out where the review's session lives, which a chat may
+        // be using.
+        if worktree_in_use(home) {
             return Ok(Regeneration::Refused(Refusal::WorktreeInUse));
         }
         let Some(session_id) = session_id else {
@@ -308,9 +325,9 @@ impl Store {
             &format!(
                 "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
                                    base_sha, status, queued_at, source_run, instruction,
-                                   draft_id, in_progress_comments)
+                                   draft_id, in_progress_comments, resumed_from)
                  VALUES (?1, ?2, ?3, 'regenerate', ?4, ?5, ?6, ?7, 'queued', {NOW}, ?8, ?9,
-                         ?10, (SELECT in_progress_comments FROM runs WHERE id = ?11))"
+                         ?10, (SELECT in_progress_comments FROM runs WHERE id = ?11), ?11)"
             ),
             params![
                 repo,
@@ -328,6 +345,7 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         let baseline = baseline(&tx, source)?;
+        let lineage = lineage(&tx, id)?;
         tx.commit()
             .wrap_err_with(|| format!("queueing a regeneration of run {source}"))?;
         Ok(Regeneration::Queued(Box::new(QueuedRun {
@@ -350,6 +368,9 @@ impl Store {
                 baseline,
                 draft,
             }),
+            resume: None,
+            worktree: Some(home),
+            lineage,
         })))
     }
 
@@ -402,7 +423,33 @@ impl Store {
         revision: &Revision,
         basis: &Basis,
     ) -> Result<()> {
-        self.finish(id, result, Some((revision, basis)))
+        let source = Source {
+            run: revision.revises,
+            baseline: &revision.baseline,
+            moved: &[],
+        };
+        self.finish(id, result, Some((&source, basis)))
+    }
+
+    /// Stores a finished push review that resumed `resume`'s session, and
+    /// marks it succeeded. Its drafts start from that run's as `basis`
+    /// says, as a regeneration's do, each compared with where its lines
+    /// went at the new head, `moved`: one that's word for word what it was,
+    /// there, keeps its status, edit and thread choice.
+    pub fn finish_resumed(
+        &mut self,
+        id: i64,
+        result: &ReviewResult,
+        resume: &Resume,
+        basis: &Basis,
+        moved: &[Carried],
+    ) -> Result<()> {
+        let source = Source {
+            run: resume.run,
+            baseline: &resume.drafts,
+            moved,
+        };
+        self.finish(id, result, Some((&source, basis)))
     }
 
     /// Stores a finished regeneration of one draft, `revision.draft`, and
@@ -466,7 +513,12 @@ impl Store {
                     )
                 }
             };
-            let base = Base::find(&tx, revision, Some(target))?;
+            let source = Source {
+                run: revision.revises,
+                baseline: &revision.baseline,
+                moved: &[],
+            };
+            let base = Base::find(&tx, &source, Some(target))?;
             let stored = Stored::new(
                 kind,
                 &anchor,
@@ -484,32 +536,20 @@ impl Store {
         &mut self,
         id: i64,
         result: &ReviewResult,
-        revision: Option<(&Revision, &Basis)>,
+        revision: Option<(&Source<'_>, &Basis)>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            &format!(
-                "UPDATE runs SET status = 'succeeded', suggested_verdict = ?2, session_id = ?3,
-                     transcript_path = ?4, finished_at = {NOW}
-                 WHERE id = ?1"
-            ),
-            params![
-                id,
-                result.verdict.as_str(),
-                result.session_id,
-                result.transcript_path
-            ],
-        )?;
+        succeed(&tx, id, result, None)?;
         let base = |based_on: Option<i64>| -> Result<Option<Base>> {
             match revision {
-                Some((revision, _)) => Base::find(&tx, revision, based_on),
+                Some((source, _)) => Base::find(&tx, source, based_on),
                 None => Ok(None),
             }
         };
         // Base drafts already carried over whole, so a repeat is pending.
         let mut kept = HashSet::new();
         let none = (None, None, None, None);
-        let summary_based_on = revision.and_then(|(_, basis)| basis.summary);
+        let summary_based_on = revision.as_ref().and_then(|(_, basis)| basis.summary);
         let summary = Stored::new(
             "summary",
             &none,
@@ -520,7 +560,9 @@ impl Store {
         insert_draft(&tx, (id, "summary"), &none, None, &summary)?;
         for (i, draft) in result.comments.iter().enumerate() {
             let c = &draft.comment;
-            let based_on = revision.and_then(|(_, basis)| basis.comments.get(i).copied().flatten());
+            let based_on = revision
+                .as_ref()
+                .and_then(|(_, basis)| basis.comments.get(i).copied().flatten());
             let anchor = (
                 Some(c.path.clone()),
                 Some(c.line),
@@ -546,6 +588,76 @@ impl Store {
             .wrap_err_with(|| format!("storing drafts for run {id}"))
     }
 
+    /// Records a resumed review that found nothing new since the run it
+    /// resumed, and marks it succeeded. Its summary is kept as the run's
+    /// `no_update`, and its drafts are `carried`, that run's, as they stand
+    /// now, on their lines at its head; any posted since are left out.
+    pub fn finish_no_update(
+        &mut self,
+        id: i64,
+        result: &ReviewResult,
+        carried: &[Carried],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        succeed(&tx, id, result, Some(&result.summary))?;
+        // Its `none` means nothing new, not no verdict: the drafts it
+        // carries keep the verdict of the run they're from.
+        tx.execute(
+            "UPDATE runs SET suggested_verdict =
+                 coalesce((SELECT f.suggested_verdict FROM runs f WHERE f.id = runs.resumed_from),
+                          suggested_verdict)
+             WHERE id = ?1",
+            [id],
+        )?;
+        for draft in carried {
+            tx.execute(
+                &format!(
+                    "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
+                                         confidence, original_body, edited_body, status,
+                                         unanchored, based_on, thread_choice, thread_id,
+                                         react_to, note, drop_reason, created_at, updated_at)
+                     SELECT ?1, kind, path, ?3, ?4, side, severity, confidence, original_body,
+                            edited_body, status, ?5, id, thread_choice, thread_id, react_to,
+                            note, drop_reason, {NOW}, {NOW}
+                     FROM drafts WHERE id = ?2 AND status != 'posted'"
+                ),
+                params![
+                    id,
+                    draft.draft,
+                    draft.line,
+                    draft.start_line,
+                    draft.unanchored
+                ],
+            )?;
+        }
+        tx.commit().wrap_err_with(|| format!("recording run {id}"))
+    }
+
+    /// Run `id`'s drafts as they stand, as a review that resumes its
+    /// session is shown them, and the runs whose sessions its continues.
+    pub fn resumable(&self, id: i64) -> Result<(Vec<BaselineDraft>, Vec<i64>)> {
+        Ok((baseline(&self.conn, id)?, lineage(&self.conn, id)?))
+    }
+
+    /// Whether a run other than `except` that's queued or running checks
+    /// out at run `worktree`'s path: a regeneration waiting to start, say.
+    pub fn worktree_busy(&self, worktree: i64, except: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM runs r
+                     WHERE r.status IN ('queued', 'running') AND r.id != ?2
+                       AND {} = ?1",
+                    worktree_run("r")
+                ),
+                params![worktree, except],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Marks a run that was stopped for a newer head as superseded.
     pub fn supersede_run(&self, id: i64) -> Result<()> {
         self.conn.execute(
@@ -568,6 +680,16 @@ impl Store {
         )
     }
 
+    /// `key`'s current run, its latest review or regeneration that
+    /// succeeded, whose drafts its page shows, if it has a session to
+    /// resume.
+    pub fn current_session_run(&self, key: &PrKey) -> Result<Option<SessionRun>> {
+        self.session_run_where(
+            &format!("id = {}", crate::overview::current_run("?1", "?2")),
+            params![key.repo.to_string(), key.number],
+        )
+    }
+
     fn session_run_where(
         &self,
         filter: &str,
@@ -578,9 +700,10 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
-                            status, source_run, instruction
+                            status, source_run, instruction, {worktree}
                      FROM runs WHERE {filter} AND session_id IS NOT NULL
-                     ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1"
+                     ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1",
+                    worktree = worktree_run("runs")
                 ),
                 values,
                 |row| {
@@ -590,27 +713,32 @@ impl Store {
                         row.get::<_, String>(8)?,
                         row.get::<_, Option<i64>>(9)?,
                         row.get::<_, Option<String>>(10)?,
+                        row.get::<_, i64>(11)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(queued, session_id, status, source_run, instruction)| {
-            let mut run = queued_run(queued)?;
-            // A regeneration's session lives where its source review ran.
-            run.revision = source_run.map(|source_run| Revision {
-                source_run,
-                revises: run.id,
-                session_id: session_id.clone(),
-                instruction: instruction.unwrap_or_default(),
-                baseline: Vec::new(),
-                draft: None,
-            });
-            Ok(SessionRun {
-                run,
-                session_id,
-                status,
-            })
-        })
+        row.map(
+            |(queued, session_id, status, source_run, instruction, worktree)| {
+                let mut run = queued_run(queued)?;
+                run.worktree = Some(worktree).filter(|&w| w != run.id);
+                run.lineage = lineage(&self.conn, run.id)?;
+                // A regeneration's session lives where its source review ran.
+                run.revision = source_run.map(|source_run| Revision {
+                    source_run,
+                    revises: run.id,
+                    session_id: session_id.clone(),
+                    instruction: instruction.unwrap_or_default(),
+                    baseline: Vec::new(),
+                    draft: None,
+                });
+                Ok(SessionRun {
+                    run,
+                    session_id,
+                    status,
+                })
+            },
+        )
         .transpose()
     }
 
@@ -1040,7 +1168,8 @@ impl Store {
 }
 
 /// What a regeneration of run `source` takes from it: its PR, profile,
-/// head, base and session, the PR's head now, and the review it's from.
+/// head, base and session, the PR's head now, the review it's from, and
+/// the run whose worktree path its session lives under.
 type SourceRow = (
     String,
     u32,
@@ -1050,15 +1179,19 @@ type SourceRow = (
     Option<String>,
     String,
     i64,
+    i64,
 );
 
 fn source_row(tx: &Transaction<'_>, source: i64) -> Result<Option<SourceRow>> {
     Ok(tx
         .query_row(
-            "SELECT r.repo, r.number, r.profile, r.head_sha, r.base_sha, r.session_id,
-                    p.head_sha, coalesce(r.source_run, r.id)
-             FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
-             WHERE r.id = ?1",
+            &format!(
+                "SELECT r.repo, r.number, r.profile, r.head_sha, r.base_sha, r.session_id,
+                        p.head_sha, coalesce(r.source_run, r.id), {}
+                 FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+                 WHERE r.id = ?1",
+                worktree_run("r")
+            ),
             [source],
             |row| {
                 Ok((
@@ -1070,6 +1203,7 @@ fn source_row(tx: &Transaction<'_>, source: i64) -> Result<Option<SourceRow>> {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -1169,9 +1303,28 @@ fn insert_draft(
     Ok(())
 }
 
+/// The runs whose sessions run `id`'s continues, latest first: the run
+/// each resumed, or for a regeneration from before that was recorded, its
+/// source.
+fn lineage(conn: &rusqlite::Connection, id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "WITH RECURSIVE chain(id, depth) AS (
+             SELECT coalesce(resumed_from, source_run), 1 FROM runs WHERE id = ?1
+             UNION
+             SELECT coalesce(r.resumed_from, r.source_run), c.depth + 1
+             FROM runs r JOIN chain c ON r.id = c.id
+         )
+         SELECT id FROM chain WHERE id IS NOT NULL ORDER BY depth",
+    )?;
+    let ids = stmt
+        .query_map([id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
 /// Run `run`'s drafts as a revision starts from them.
-fn baseline(tx: &Transaction<'_>, run: i64) -> Result<Vec<BaselineDraft>> {
-    let mut stmt = tx.prepare(
+fn baseline(conn: &rusqlite::Connection, run: i64) -> Result<Vec<BaselineDraft>> {
+    let mut stmt = conn.prepare(
         "SELECT id, kind, path, line, start_line, side, coalesce(edited_body, original_body),
                 status, edited_body IS NOT NULL, note
          FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
@@ -1216,21 +1369,30 @@ type Choice = (Option<String>, Option<String>, Option<String>);
 /// A draft's `path`, `line`, `start_line` and `side`.
 type Anchor = (Option<String>, Option<u32>, Option<u32>, Option<String>);
 
+/// The drafts a run's own start from: those of `run`, which a
+/// regeneration revises or a push review resumed, as the agent was shown
+/// them, and for a push review, where each one's lines went at its head.
+struct Source<'a> {
+    run: i64,
+    baseline: &'a [BaselineDraft],
+    moved: &'a [Carried],
+}
+
 impl Base {
-    /// The revised run's draft `id`, if it is one.
-    fn find(tx: &Transaction<'_>, revision: &Revision, id: Option<i64>) -> Result<Option<Self>> {
+    /// `source`'s draft `id`, if it is one, on its lines as they moved.
+    fn find(tx: &Transaction<'_>, source: &Source<'_>, id: Option<i64>) -> Result<Option<Self>> {
         let Some(id) = id else { return Ok(None) };
-        let shown = revision
+        let shown = source
             .baseline
             .iter()
             .find(|d| d.id == id)
             .map(|d| d.text.clone());
-        Ok(tx
+        let base = tx
             .query_row(
                 "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status,
                         thread_choice, thread_id, react_to, note
                  FROM drafts WHERE id = ?1 AND run_id = ?2",
-                params![id, revision.revises],
+                params![id, source.run],
                 |row| {
                     Ok(Self {
                         id: row.get(0)?,
@@ -1245,7 +1407,14 @@ impl Base {
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        Ok(base.map(|mut base| {
+            if let Some(moved) = source.moved.iter().find(|m| m.draft == base.id) {
+                base.anchor.1 = moved.line;
+                base.anchor.2 = moved.start_line;
+            }
+            base
+        }))
     }
 
     /// Whether `body` is this draft word for word: as it stands, or as the
@@ -1308,6 +1477,35 @@ impl Stored {
     }
 }
 
+/// Marks run `id` succeeded with `result`'s verdict and session, the run
+/// it resumed and, for one that found nothing new, `no_update`.
+fn succeed(
+    tx: &Transaction<'_>,
+    id: i64,
+    result: &ReviewResult,
+    no_update: Option<&str>,
+) -> Result<()> {
+    tx.execute(
+        &format!(
+            "UPDATE runs SET status = 'succeeded', suggested_verdict = ?2, session_id = ?3,
+                 transcript_path = ?4, resumed_from = coalesce(?5, resumed_from),
+                 worktree_run = coalesce((SELECT {} FROM runs f WHERE f.id = ?5), worktree_run),
+                 no_update = ?6, finished_at = {NOW}
+             WHERE id = ?1",
+            worktree_run("f")
+        ),
+        params![
+            id,
+            result.verdict.as_str(),
+            result.session_id,
+            result.transcript_path,
+            result.resumed_from,
+            no_update
+        ],
+    )?;
+    Ok(())
+}
+
 type QueuedRow = (i64, String, u32, String, String, String, Option<String>);
 
 fn queued_run(
@@ -1316,6 +1514,9 @@ fn queued_run(
     Ok(QueuedRun {
         id,
         revision: None,
+        resume: None,
+        worktree: None,
+        lineage: Vec::new(),
         request: ReviewRequest {
             key: PrKey {
                 repo: RepoName::parse(&repo)?,
@@ -1454,6 +1655,7 @@ mod tests {
             }],
             session_id: Some("sess".into()),
             transcript_path: "/data/runs/1/transcript.jsonl".into(),
+            resumed_from: None,
         }
     }
 
@@ -2534,6 +2736,158 @@ mod tests {
             .record(&polled("PRR_yours"), "me", "default", &[])
             .unwrap();
         assert!(store.in_progress_review(&key).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_resumed_review_lives_where_the_session_it_resumed_does() {
+        let mut store = store();
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        // Two pushes, each resuming the run before.
+        let mut previous = first.id;
+        let mut last = first.clone();
+        for head in ["h2", "h3"] {
+            let run = store.queue_review(&request(head)).unwrap().unwrap();
+            store.claim_run(run.id).unwrap();
+            let resumed = ReviewResult {
+                resumed_from: Some(previous),
+                ..result()
+            };
+            store.finish_review(run.id, &resumed).unwrap();
+            previous = run.id;
+            last = run;
+        }
+        let session = store.session_run(last.id).unwrap().unwrap();
+        assert_eq!(session.run.worktree_run(), first.id);
+        // Its whole chain of sessions, whose run dirs its agent may read.
+        assert_eq!(session.run.lineage, [last.id - 1, first.id]);
+        // Its regenerations check out there too.
+        let mut moved = snapshot();
+        moved.head_sha = "h3".into();
+        store.record(&moved, "me", "default", &[]).unwrap();
+        let mut asked = None;
+        let Regeneration::Queued(regen) = store
+            .queue_regeneration(last.id, "Terser.", |id| {
+                asked = Some(id);
+                false
+            })
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_eq!(asked, Some(first.id));
+        assert_eq!(regen.worktree_run(), first.id);
+        assert_eq!(regen.lineage, [last.id, last.id - 1, first.id]);
+    }
+
+    #[test]
+    fn a_review_with_no_update_carries_the_last_ones_drafts() {
+        let mut store = store();
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        let drafts = store.drafts(first.id).unwrap();
+        let (summary, comment) = (drafts[0].id, drafts[1].id);
+        store.edit_draft(comment, "off by two?").unwrap();
+        let run = store.queue_review(&request("h2")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        let nothing = ReviewResult {
+            summary: "Only a rebase.".into(),
+            verdict: Verdict::None,
+            comments: vec![],
+            resumed_from: Some(first.id),
+            ..result()
+        };
+        let carried = [
+            Carried {
+                draft: summary,
+                start_line: None,
+                line: None,
+                unanchored: false,
+            },
+            Carried {
+                draft: comment,
+                start_line: Some(5),
+                line: Some(7),
+                unanchored: false,
+            },
+        ];
+        // Posted while it ran: left out.
+        store.mark_posted(&[summary]).unwrap();
+        store.finish_no_update(run.id, &nothing, &carried).unwrap();
+        assert_eq!(status(&store, run.id), "succeeded");
+        let now = store.drafts(run.id).unwrap();
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert_eq!((now[0].start_line, now[0].line), (Some(5), Some(7)));
+        assert!(!now[0].unanchored);
+        // Your edit, as it stood, and what it's based on.
+        assert_eq!(now[0].body, "off by two?");
+        assert!(now[0].edited);
+        assert_eq!(now[0].based_on, Some(comment));
+        let runs = store.review_runs(&snapshot().key).unwrap();
+        assert_eq!(runs[0].no_update.as_deref(), Some("Only a rebase."));
+        assert_eq!(runs[1].no_update, None);
+        // The verdict of the drafts it carries, not its `none`.
+        assert_eq!(runs[0].suggested_verdict.as_deref(), Some("comment"));
+        let owed = &store.owed_reviews("me", None).unwrap()[0];
+        assert!(owed.latest_run.as_ref().unwrap().no_update);
+        // Counted once, from the run that carries it.
+        assert_eq!(owed.pending_drafts, 1);
+        // A head reviewed with no update is reviewed.
+        assert_eq!(store.queue_review(&request("h2")).unwrap(), None);
+    }
+
+    #[test]
+    fn the_current_session_run_is_the_one_the_page_shows() {
+        let mut store = store();
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        // A regeneration of the first head, then a review of a push, which
+        // finishes first.
+        let Regeneration::Queued(regen) = store
+            .queue_regeneration(first.id, "Terser.", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        let pushed = store.queue_review(&request("h2")).unwrap().unwrap();
+        store.claim_run(pushed.id).unwrap();
+        store.finish_review(pushed.id, &result()).unwrap();
+        store.claim_run(regen.id).unwrap();
+        store.finish_review(regen.id, &result()).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET finished_at = '9999-01-01T00:00:00.000Z' WHERE id = ?1",
+                [regen.id],
+            )
+            .unwrap();
+        let key = snapshot().key;
+        let latest = store.latest_session_run(&key).unwrap().unwrap();
+        assert_eq!(latest.run.id, regen.id);
+        let current = store.current_session_run(&key).unwrap().unwrap();
+        assert_eq!(current.run.id, pushed.id);
+    }
+
+    #[test]
+    fn a_queued_regeneration_keeps_its_worktree_busy() {
+        let mut store = store();
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        assert!(!store.worktree_busy(first.id, 0).unwrap());
+        let Regeneration::Queued(regen) = store
+            .queue_regeneration(first.id, "Terser.", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert!(store.worktree_busy(first.id, 0).unwrap());
+        assert!(!store.worktree_busy(first.id, regen.id).unwrap());
+        // Its session continues the review's, whose dir it may read.
+        assert_eq!(regen.lineage, [first.id]);
     }
 
     #[test]

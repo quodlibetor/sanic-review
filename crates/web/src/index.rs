@@ -161,6 +161,9 @@ pub fn owed_status(
         (None, Some("queued")) if manual_reviews => ("held".into(), "held"),
         (None, Some("queued")) => ("queued".into(), "held"),
         (None, Some("running")) => ("running".into(), "running"),
+        (None, Some("succeeded")) if pr.latest_run.as_ref().is_some_and(|r| r.no_update) => {
+            ("no update".into(), "ok")
+        }
         (None, Some("succeeded")) => ("drafted".into(), "ok"),
         (None, Some(status @ ("failed" | "crashed"))) => (status.into(), "bad"),
         (None, Some(other)) => (other.into(), "dim"),
@@ -761,6 +764,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
         // Only the latest run's error: an older failure a later run
         // replaced doesn't need attention.
         error: pr.latest_run.as_ref().and_then(|run| run.error.as_deref()),
+        no_update: pr.latest_run.as_ref().is_some_and(|run| run.no_update),
         skip: overview.skipped.get(&pr.key),
         waiting: waiting.as_deref(),
         manual_reviews,
@@ -812,6 +816,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
         facts,
         status: run.map(|run| run.status.as_str()),
         error: None,
+        no_update: false,
         skip: None,
         waiting: None,
         manual_reviews: app.manual_reviews(),

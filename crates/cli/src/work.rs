@@ -6,7 +6,7 @@
 
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
@@ -19,7 +19,7 @@ use color_eyre::eyre::{Result, eyre};
 use sanic_core::{
     config::{Config, RunnerSettings},
     pr::PrKey,
-    run::{DraftRevision, QueuedRun, ReviewResult, Revision},
+    run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use sanic_store::Store;
@@ -39,9 +39,32 @@ pub struct Worker {
     /// The review each PR has running, so a newer head can stop it, and
     /// apart from those, its running regeneration.
     active: Mutex<HashMap<ActiveKey, Active>>,
+    /// The worktree paths runs are using, so two never check out at one:
+    /// a review that resumes a session shares its path with the run it
+    /// resumes, and so with that run's regenerations.
+    worktrees: Mutex<HashSet<PathBuf>>,
+    /// Each run's resumed form while it tries resuming a session, so a
+    /// crash then discards the worktree at that session's path, not only
+    /// the one at the run's own.
+    resuming: Mutex<HashMap<i64, QueuedRun>>,
     /// Set by [`Worker::cancel_all`]: stopped runs are queued again rather
     /// than superseded, and nothing new starts.
     stopping: AtomicBool,
+}
+
+/// A worktree path a run is using, until it's dropped.
+struct Claim<'a> {
+    worktrees: &'a Mutex<HashSet<PathBuf>>,
+    path: PathBuf,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.worktrees
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.path);
+    }
 }
 
 /// A PR, and whether the run is a regeneration: one can run beside a
@@ -93,6 +116,8 @@ impl Worker {
             settings: RwLock::new(Settings::new(config)),
             limit: Arc::new(Semaphore::new(config.runner.max_concurrent)),
             active: Mutex::default(),
+            worktrees: Mutex::default(),
+            resuming: Mutex::default(),
             stopping: AtomicBool::new(false),
         }
     }
@@ -269,7 +294,7 @@ impl Worker {
         // Bound first so the store guard is dropped before the review awaits.
         let claimed = self.store().claim_run(run.id);
         let outcome = match claimed {
-            Ok(true) => self.review(&run, cancel.notified()).await,
+            Ok(true) => self.review(&run, &cancel).await,
             Ok(false) => {
                 self.finish(&run);
                 debug!("superseded before it started");
@@ -278,7 +303,16 @@ impl Worker {
             Err(err) => Err(err),
         };
         self.finish(&run);
-        let stored = match outcome {
+        let stored = self.record(&run, outcome);
+        if let Err(err) = stored {
+            warn!(url = %run.request.key.url(), "recording the run failed: {err:?}");
+        }
+        self.log_counts();
+    }
+
+    /// Stores how `run` ended, as `outcome` says, and logs it.
+    fn record(&self, run: &QueuedRun, outcome: Result<Option<Reviewed>>) -> Result<()> {
+        match outcome {
             // Started by hand, so not started again unasked.
             Ok(None) if self.stopping.load(Ordering::SeqCst) && run.revision.is_some() => {
                 info!("regeneration cancelled by shutdown");
@@ -305,6 +339,26 @@ impl Worker {
                 }
                 stored
             }
+            Ok(Some(Reviewed::Resumed {
+                result,
+                basis,
+                resume,
+                moved,
+            })) => self
+                .store()
+                .finish_resumed(run.id, &result, &resume, &basis, &moved)
+                .inspect(|()| log_result(&result)),
+            Ok(Some(Reviewed::NoUpdate { result, carried })) => self
+                .store()
+                .finish_no_update(run.id, &result, &carried)
+                .inspect(|()| log_no_update(&result)),
+            Ok(Some(Reviewed::NotResumed { why })) => {
+                warn!(url = %run.request.key.url(), "regeneration failed: {why}");
+                self.store().fail_run(
+                    run.id,
+                    &format!("couldn't resume the review's session: {why}; start a fresh review"),
+                )
+            }
             Ok(Some(Reviewed::Draft {
                 revised,
                 session_id,
@@ -329,11 +383,7 @@ impl Worker {
                 warn!(url = %run.request.key.url(), "review failed: {err:?}");
                 self.store().fail_run(run.id, &format!("{err:#}"))
             }
-        };
-        if let Err(err) = stored {
-            warn!(url = %run.request.key.url(), "recording the run failed: {err:?}");
         }
-        self.log_counts();
     }
 
     /// Cleans up after a run whose task panicked, as a failed run would
@@ -342,6 +392,14 @@ impl Worker {
         let url = run.request.key.url();
         error!(url = %url, "review crashed: {panic}");
         self.finish(&run);
+        let resumed = self
+            .resuming
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&run.id);
+        if let Some(resumed) = resumed {
+            self.runner.discard_worktree(&resumed).await;
+        }
         self.runner.discard_worktree(&run).await;
         let stored = self.store().crash_run(run.id, &panic);
         if let Err(err) = stored {
@@ -360,12 +418,10 @@ impl Worker {
         }
     }
 
-    /// `None` if `cancel` stopped it.
-    async fn review(
-        &self,
-        run: &QueuedRun,
-        cancel: impl Future<Output = ()>,
-    ) -> Result<Option<Reviewed>> {
+    /// `None` if `cancel` stopped it. A push review resumes the session
+    /// of the PR's current run, if it has one and it can, and otherwise
+    /// reviews the whole PR afresh.
+    async fn review(&self, run: &QueuedRun, cancel: &Notify) -> Result<Option<Reviewed>> {
         let req = &run.request;
         let settings = self.run_settings(&req.profile)?;
         let ctx = self
@@ -393,7 +449,97 @@ impl Worker {
             let shown = ctx.in_progress.as_ref().map_or(0, |r| r.comments.len());
             self.store().record_in_progress_shown(run.id, shown)?;
         }
-        self.runner.review(run, &ctx, &settings, cancel).await
+        if let Some((resumed, _claim)) = self.resumable(run)? {
+            let from = resumed.resume.as_ref().map(|r| r.run);
+            info!(
+                resumed_from = from,
+                "resuming the session of the last review"
+            );
+            self.resuming
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(run.id, resumed.clone());
+            let reviewed = self
+                .runner
+                .review(&resumed, &ctx, &settings, cancel.notified())
+                .await;
+            self.resuming
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&run.id);
+            match reviewed? {
+                Some(Reviewed::NotResumed { why }) => {
+                    info!("not resumed, reviewing afresh: {why}");
+                }
+                reviewed => return Ok(reviewed),
+            }
+        }
+        let _claim = self.claim(run).ok_or_else(|| {
+            eyre!(
+                "{} is in use by another run",
+                self.runner.worktree_path(run).display()
+            )
+        })?;
+        self.runner
+            .review(run, &ctx, &settings, cancel.notified())
+            .await
+    }
+
+    /// For a push review, `run` resuming the session of the PR's current
+    /// run, and its claim on that session's worktree path:
+    /// `None` if there's no such session, or its path is in use, by
+    /// another run, one queued to start there, or a chat.
+    fn resumable(&self, run: &QueuedRun) -> Result<Option<(QueuedRun, Claim<'_>)>> {
+        if run.revision.is_some() || !matches!(run.request.trigger, ReviewTrigger::Push { .. }) {
+            return Ok(None);
+        }
+        // The run whose drafts the PR's page shows, so the drafts it's told
+        // of, and carries with no update, are those you've been deciding on.
+        let Some(session) = self.store().current_session_run(&run.request.key)? else {
+            return Ok(None);
+        };
+        if session.run.request.head_sha == run.request.head_sha {
+            return Ok(None);
+        }
+        let worktree = session.run.worktree_run();
+        // A regeneration queued there would find it in use, or take it
+        // over.
+        if self.store().worktree_busy(worktree, run.id)? {
+            debug!("not resumed: another run is queued for the session's worktree");
+            return Ok(None);
+        }
+        let (drafts, lineage) = self.store().resumable(session.run.id)?;
+        let resumed = QueuedRun {
+            resume: Some(Resume {
+                run: session.run.id,
+                session_id: session.session_id,
+                head_sha: session.run.request.head_sha.clone(),
+                base_sha: session.run.request.base_sha.clone(),
+                drafts,
+            }),
+            worktree: Some(worktree),
+            lineage: std::iter::once(session.run.id).chain(lineage).collect(),
+            ..run.clone()
+        };
+        if self.runner.worktree_path(&resumed).exists() {
+            debug!("not resumed: the session's worktree is in use");
+            return Ok(None);
+        }
+        Ok(self.claim(&resumed).map(|claim| (resumed, claim)))
+    }
+
+    /// Claims the worktree path `run` checks out at, unless another run
+    /// has.
+    fn claim(&self, run: &QueuedRun) -> Option<Claim<'_>> {
+        let path = self.runner.worktree_path(run);
+        let mut claimed = self
+            .worktrees
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        claimed.insert(path.clone()).then(|| Claim {
+            worktrees: &self.worktrees,
+            path,
+        })
     }
 }
 
@@ -484,6 +630,11 @@ fn log_draft_revision(revision: &Revision, revised: &DraftRevision) {
     }
 }
 
+fn log_no_update(result: &ReviewResult) {
+    let headline = result.summary.lines().next().unwrap_or_default();
+    info!("no update since the review it resumed: {headline}");
+}
+
 fn log_result(result: &ReviewResult) {
     let unanchored = result.comments.iter().filter(|c| c.unanchored).count();
     let headline = result.summary.lines().next().unwrap_or_default();
@@ -537,6 +688,9 @@ mod tests {
                 trigger: ReviewTrigger::Requested,
             },
             revision: None,
+            resume: None,
+            worktree: None,
+            lineage: vec![],
         }
     }
 
@@ -774,6 +928,7 @@ mod tests {
             comments: vec![],
             session_id: Some("sess-0".into()),
             transcript_path: "t".into(),
+            resumed_from: None,
         };
         store.finish_review(source.id, &original).unwrap();
         let sanic_store::Regeneration::Queued(run) = store
@@ -806,6 +961,253 @@ mod tests {
         assert_eq!(store.drafts(source.id).unwrap()[0].body, "Original.");
         let sent = briefs(&fake);
         assert!(sent.contains("Be terser."), "{sent}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_review_resumes_the_last_reviews_session() {
+        let pushed = review_a_push(Some(&nothing_new())).await;
+        let store = pushed.store.lock().unwrap();
+        let record = store.run(pushed.run).unwrap().unwrap();
+        assert_eq!(record.status, "succeeded");
+        // Nothing new: the drafts of the review it resumed, carried to the
+        // new head. The line the comment was on changed.
+        let drafts = store.drafts(pushed.run).unwrap();
+        let bodies: Vec<&str> = drafts.iter().map(|d| d.body.as_str()).collect();
+        assert_eq!(bodies, ["Original.", "On the old line."]);
+        assert!(drafts[1].unanchored);
+        assert_eq!(drafts[1].status, "accepted");
+        assert_eq!(drafts[1].based_on, Some(pushed.source_comment));
+        let runs = store.review_runs(&queued(0).request.key).unwrap();
+        assert_eq!(runs[0].no_update.as_deref(), Some("fine"));
+        let args = std::fs::read_to_string(pushed.fake.join("args")).unwrap();
+        assert!(args.contains("--resume\nsess-0\n--fork-session"), "{args}");
+        // Where the session lives.
+        let cwd = std::fs::read_to_string(pushed.fake.join("cwd")).unwrap();
+        assert!(
+            cwd.trim()
+                .ends_with(&format!("worktrees/{}", pushed.source)),
+            "{cwd}"
+        );
+        let sent = briefs(&pushed.fake);
+        assert!(sent.contains("# New commits on"), "{sent}");
+        assert!(sent.contains("## What changed since"), "{sent}");
+        assert!(sent.contains("## Your last review's drafts"), "{sent}");
+        assert!(sent.contains("On the old line."), "{sent}");
+        // A chat with it resumes its session there too.
+        let chat = store
+            .latest_session_run(&queued(0).request.key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chat.run.id, pushed.run);
+        assert_eq!(chat.run.worktree_run(), pushed.source);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_review_whose_session_is_gone_reviews_afresh() {
+        let pushed = review_a_push(None).await;
+        let store = pushed.store.lock().unwrap();
+        assert_eq!(store.run(pushed.run).unwrap().unwrap().status, "succeeded");
+        // A fresh review's `none` is a review, with its summary to post.
+        assert_eq!(store.drafts(pushed.run).unwrap()[0].body, "fine");
+        let runs = store.review_runs(&queued(0).request.key).unwrap();
+        assert_eq!(runs[0].no_update, None);
+        let sent = briefs(&pushed.fake);
+        assert!(sent.contains("# New commits on"), "{sent}");
+        assert!(
+            sent.contains("Review the whole PR as it now stands"),
+            "{sent}"
+        );
+        let cwd = std::fs::read_to_string(pushed.fake.join("cwd")).unwrap();
+        assert!(
+            cwd.trim().ends_with(&format!("worktrees/{}", pushed.run)),
+            "{cwd}"
+        );
+        let chat = store
+            .latest_session_run(&queued(0).request.key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chat.run.worktree_run(), pushed.run);
+    }
+
+    struct Pushed {
+        _dir: tempfile::TempDir,
+        store: Arc<Mutex<Store>>,
+        fake: PathBuf,
+        /// The review whose session the push review may resume.
+        source: i64,
+        /// The push review.
+        run: i64,
+        /// `source`'s comment draft.
+        source_comment: i64,
+    }
+
+    /// Reviews the first head, with session `sess-0`, then a push of the
+    /// second, answered `none` with no comments, by a fake `claude` that
+    /// says the session is gone when `gone`.
+    async fn review_a_push(resumed: Option<&serde_json::Value>) -> Pushed {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (base, first, second) = pushed_twice(&dir.path().join("github"));
+        let fake = dir.path().join("fake");
+        let script = resuming_fake(&fake, resumed);
+        let config = Config::parse(
+            &format!(
+                "[github]\ngit_url = \"{}\"\n[runner]\nclaude = \"{}\"\n\
+                 [profile.p]\nrepos = [{{ github = \"org\" }}]\n",
+                dir.path().join("github").display(),
+                script.display()
+            ),
+            Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let mut request = queued(0).request;
+        request.head_sha.clone_from(&second);
+        request.base_sha.clone_from(&base);
+        let mut store = Store::open_in_memory().unwrap();
+        let snapshot = sanic_core::pr::PrSnapshot {
+            key: request.key.clone(),
+            title: "t".into(),
+            body: String::new(),
+            url: request.key.url(),
+            author: "alice".into(),
+            head_sha: second.clone(),
+            base_sha: base.clone(),
+            is_draft: false,
+            review_requested: true,
+            requested_teams: vec![],
+            reviews: vec![],
+            threads: vec![],
+            files: None,
+            updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
+            in_progress: None,
+        };
+        store.record(&snapshot, "me", "p", &[]).unwrap();
+        let mut earlier = request.clone();
+        earlier.head_sha.clone_from(&first);
+        let source = store.queue_review(&earlier).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        let original = ReviewResult {
+            summary: "Original.".into(),
+            summary_note: None,
+            verdict: sanic_core::run::Verdict::Comment,
+            comments: vec![sanic_core::run::DraftComment {
+                comment: sanic_core::run::InlineComment {
+                    path: "lib.rs".into(),
+                    line: 1,
+                    start_line: None,
+                    side: sanic_core::run::Side::Right,
+                    body: "On the old line.".into(),
+                    severity: sanic_core::run::Severity::Nit,
+                    confidence: sanic_core::run::Confidence::High,
+                    note: None,
+                },
+                unanchored: false,
+            }],
+            session_id: Some("sess-0".into()),
+            transcript_path: "t".into(),
+            resumed_from: None,
+        };
+        store.finish_review(source.id, &original).unwrap();
+        let source_comment = store.drafts(source.id).unwrap()[1].id;
+        store
+            .set_draft_status(source_comment, sanic_store::DraftStatus::Accepted)
+            .unwrap();
+        request.trigger = ReviewTrigger::Push { from_sha: first };
+        let run = store.queue_review(&request).unwrap().unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let data = dir.path().join("data");
+        let worker = Arc::new(Worker::new(&data, Arc::clone(&store), &config, "me"));
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        runs.send(by_hand(&run)).unwrap();
+        drop(runs);
+        tokio::time::timeout(std::time::Duration::from_secs(20), worker.work(runs_rx))
+            .await
+            .unwrap();
+        Pushed {
+            _dir: dir,
+            store,
+            fake,
+            source: source.id,
+            run: run.id,
+            source_comment,
+        }
+    }
+
+    /// A fake `claude` in `fake` that answers `none` with no comments,
+    /// and says the session is gone when resuming one, if `gone`.
+    fn resuming_fake(fake: &Path, resumed: Option<&serde_json::Value>) -> PathBuf {
+        std::fs::create_dir(fake).unwrap();
+        let answering = |output: &serde_json::Value| {
+            serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": false, "num_turns": 2,
+                "session_id": "sess-1", "structured_output": output
+            })
+        };
+        let answer = answering(&nothing_new());
+        let missing = serde_json::json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "num_turns": 0, "errors": ["No conversation found with session ID: sess-0"]
+        });
+        let resumed = resumed.map_or(missing, answering);
+        std::fs::write(fake.join("answer.jsonl"), format!("{answer}\n")).unwrap();
+        std::fs::write(fake.join("resumed.jsonl"), format!("{resumed}\n")).unwrap();
+        let script = fake.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nd='{}'\ncat > \"$d/stdin.$$\"\npwd > \"$d/cwd\"\n\
+                 case \" $* \" in *\" --resume \"*) printf '%s\\n' \"$@\" > \"$d/args\"; \
+                 cat \"$d/resumed.jsonl\";; *) cat \"$d/answer.jsonl\";; esac\n",
+                fake.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        script
+    }
+
+    /// A resumed review's answer when nothing changed.
+    fn nothing_new() -> serde_json::Value {
+        serde_json::json!({ "summary": "fine", "suggested_verdict": "none", "comments": [] })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_review_keeps_an_accepted_draft_it_reissues_accepted() {
+        let reissued = |based_on: i64| {
+            serde_json::json!({
+                "summary": "Still one thing.", "suggested_verdict": "comment",
+                "comments": [
+                    { "path": "lib.rs", "line": 1, "side": "RIGHT", "body": "On the old line.",
+                      "severity": "nit", "confidence": "high", "based_on": based_on },
+                    { "path": "lib.rs", "line": 1, "side": "RIGHT", "body": "Something new.",
+                      "severity": "nit", "confidence": "high" }
+                ]
+            })
+        };
+        // The source's drafts are 1 and 2, the comment accepted.
+        let pushed = review_a_push(Some(&reissued(2))).await;
+        let store = pushed.store.lock().unwrap();
+        assert_eq!(pushed.source_comment, 2);
+        let drafts = store.drafts(pushed.run).unwrap();
+        let kept: Vec<(&str, &str, Option<i64>)> = drafts
+            .iter()
+            .map(|d| (d.body.as_str(), d.status.as_str(), d.based_on))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("Still one thing.", "pending", None),
+                ("On the old line.", "accepted", Some(2)),
+                ("Something new.", "pending", None),
+            ]
+        );
+        let runs = store.review_runs(&queued(0).request.key).unwrap();
+        assert_eq!(runs[0].no_update, None);
     }
 
     /// Every brief the fake `claude` in `fake` was sent.

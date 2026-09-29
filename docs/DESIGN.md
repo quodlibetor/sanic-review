@@ -327,7 +327,7 @@ against stored state, never from notification payloads.
 |-----------|---------|----------|
 | Someone else's PR, you're a requested reviewer, not yet reviewed | review requested | `review` (full) |
 | Someone else's PR you're requested on or have reviewed goes from draft to ready | ready for review | `review` (full) |
-| Someone else's PR you've reviewed, new head SHA | push | `review` (incremental from last reviewed SHA; full until milestone 4) |
+| Someone else's PR you've reviewed, new head SHA | push | `review` (resumes the last review's session with what changed since its head, if it can; else full) |
 | Any PR you've commented on (requested or not), new non-self comment in a thread you're in | reply | `reply` |
 | Your PR, new non-self review or comment | feedback | `respond` (draft replies, optionally a fix; see Auto-fix) |
 
@@ -383,7 +383,8 @@ Rules:
   failed, crashed or was superseded is queued again. A reply or respond
   run is keyed by `(pr, newest comment id covered)`.
 - **Force pushes.** If the last reviewed SHA isn't an ancestor of the new
-  head, the incremental review gets a range-diff instead of a plain diff.
+  head, the resumed review gets a range-diff instead of a plain diff; see
+  Push reviews under Runner.
 - **First sight is a baseline.** The first time a PR is seen, its existing
   comments and reviews are recorded without triggering. Only a pending review
   request triggers then, so starting the tool doesn't replay history.
@@ -549,10 +550,56 @@ Rules:
    a whole regeneration keeps one). A dropped draft is copied rejected,
    with the agent's reason, which the card shows until you decide on it
    again; restoring it puts it back to pending.
+   **Push reviews** resume the session of the PR's current run (its
+   latest review or regeneration that succeeded, whose drafts its page
+   shows), forked as a regeneration does, rather than reviewing the whole PR
+   afresh, so the agent keeps what it learned. The brief is short: the new
+   head, what changed since the head that run reviewed, that run's drafts
+   with what you did with each (as a regeneration is shown them), and the
+   threads and your pending review as they stand now, labelled as a
+   review's are. What changed is the diff between the heads when the old
+   one is an ancestor of the new on the same merge base, and otherwise, as
+   after a rebase or a merge of the base into the PR, a `git range-diff`
+   of the PR's commits then against its commits now; either is kept as
+   `interdiff.diff`, and the whole PR diff is in `pr.diff` as usual. The
+   agent is told not to repeat posted drafts, to keep accepted and edited
+   ones word for word unless the new commits address them, and not to
+   propose rejected ones again unless the new commits make one newly
+   relevant, saying so in its note. It answers with the whole review as it
+   now stands, naming for each draft the one it comes from, as a
+   regeneration does: one that's word for word its base, on the lines the
+   base's moved to at the new head, keeps the base's status, edit and
+   thread choice, so an accepted draft stays accepted, or, when nothing that changed calls for one, `none` with no
+   comments, which it's told to do for a rebase that leaves the PR's own
+   changes as they were. That's recorded as **no update**: the run
+   succeeds, keeps the agent's summary as its note, and carries the
+   resumed run's drafts, all but those posted, to the new head as they
+   stand when it finishes (status, edit, thread choice and note), each
+   based on the one it copies. A comment moves to where its lines are at
+   the new head, found by diffing its file between the heads (the old
+   side's between the merge bases), and is unanchored where those lines
+   changed or aren't in the new diff. So the PR's page shows them at the
+   new head, where they post and can be revised. A fresh review's `none`
+   is still a review, with a summary to post.
+   The session lives under the worktree path of the run it began in, so
+   the push review checks out there, and records that path's run: its
+   chats and regenerations use that path too. It falls back to a fresh
+   review in its own worktree when that run has no session, when that path is
+   in use (a chat, another run, or a run queued to start there, such as a
+   regeneration: the worker never lets two runs check out at one path),
+   when the mirror no longer has the old head, or when
+   `claude` says the session is gone: a resume that ends, before the
+   session starts, with its error that no such conversation was found, as
+   `claude` answers one it doesn't keep any more. Any other failure before
+   the session starts fails the run as usual. A regeneration whose session
+   is gone fails, saying so.
+   A run that continues a session, and a chat with one, can read the run
+   dir of every run along its chain of resumed and regenerated sessions,
+   since the agent knows them by path.
    Each run keeps `system.md`, `prompt.md`, `pr.diff`, `transcript.jsonl`
    and `stderr.log` under `runs/<id>/` in the data dir. Its worktree is
-   always `worktrees/<id>/`, since resuming a session needs the same working
-   directory.
+   `worktrees/<id>/`, unless it resumes a session, whose worktree path it
+   uses, since resuming a session needs the same working directory.
 
 A review whose task panics is recorded as `crashed`, with the panic message
 as its error, so it's distinguishable from an ordinary failure. Its worktree
@@ -612,7 +659,7 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
@@ -774,8 +821,8 @@ fonttools (run through `uv`, which only this task needs) to
   link to Settings. Pending drafts are counted, here, in
   the lists and in the TUI, only from each PR's current run: its latest
   review or regeneration that succeeded, the one its page shows. A
-  regeneration copies the drafts it keeps, so counting every run's would
-  count them again. The total, here and in the TUI's status bar, is of the
+  regeneration copies the drafts it keeps, and a review with no update
+  those it carries, so counting every run's would count them again. The total, here and in the TUI's status bar, is of the
   PRs the lists show: open, within the recency window, archived only
   while archived PRs are shown, and on a filtered index only those the
   filter leaves, as `N of M pending drafts`.
@@ -785,7 +832,8 @@ fonttools (run through `uv`, which only this task needs) to
   finished and the commit it reviewed). The list numbers the runs the same
   way, and a regeneration says which run it revises, linked, or for one
   draft, which draft of which run, and your instruction's first line,
-  which opens to all of it. Then a bar that stays in
+  which opens to all of it. A run with no update says so in place of its
+  status, with its note's first line, which opens to all of it. Then a bar that stays in
   view: the tally of accepted, pending and rejected drafts, the verdict
   and Preview. Then the drafts of the latest run that succeeded (or of any
   run you pick). Each comment draft shows the lines around its anchor from
@@ -1111,7 +1159,8 @@ fonttools (run through `uv`, which only this task needs) to
     here through both. The push and ready-for-review triggers use the same
     rule (`PrSnapshot::is_reviewer`). Each row has its PR state (below),
     then the latest run's status (queued, held by manual reviews,
-    running, drafted, failed, crashed) and the pending draft count. A review still waiting
+    running, drafted, no update, failed, crashed) and the pending draft
+    count. A review still waiting
     out the quiet period shows `waiting` with a countdown to when it's
     queued; the scheduler shares those due times with the TUI in memory.
     `waiting` without a countdown means no run and no known due time.

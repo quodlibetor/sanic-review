@@ -1475,6 +1475,7 @@ mod tests {
             comments: vec![],
             session_id: Some("sess".into()),
             transcript_path: "t".into(),
+            resumed_from: None,
         };
         store.finish_review(source.id, &result).unwrap();
         let store = Mutex::new(store);
@@ -1516,6 +1517,7 @@ mod tests {
             comments: vec![],
             session_id: Some("sess".into()),
             transcript_path: "t".into(),
+            resumed_from: None,
         };
         store.finish_review(source.id, &result).unwrap();
         let summary = store.drafts(source.id).unwrap()[0].id;

@@ -58,6 +58,9 @@ pub struct LeadPop<'a> {
     /// The latest run's status and error, if it has run.
     pub status: Option<&'a str>,
     pub error: Option<&'a str>,
+    /// The latest run succeeded finding nothing new since the one it
+    /// resumed.
+    pub no_update: bool,
     pub skip: Option<&'a Skip>,
     /// The status shown for a review waiting out the quiet period.
     pub waiting: Option<&'a str>,
@@ -89,6 +92,10 @@ impl LeadPop<'_> {
                     }
                     Some("running") => {
                         "started" (time(times.and_then(|t| t.started_at.as_ref())))
+                    }
+                    Some("succeeded") if self.no_update => {
+                        "no update since the review it resumed, finished"
+                        (time(times.and_then(|t| t.finished_at.as_ref())))
                     }
                     Some("succeeded") => {
                         "succeeded, finished" (time(times.and_then(|t| t.finished_at.as_ref())))

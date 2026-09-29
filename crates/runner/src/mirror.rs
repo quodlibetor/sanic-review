@@ -20,7 +20,7 @@ use color_eyre::{
 use sanic_core::{pr::PrKey, repo::RepoName};
 use tokio::process::Command;
 
-use crate::diff::CONTEXT;
+use crate::diff::{CONTEXT, LineMap};
 
 pub struct Mirrors {
     root: PathBuf,
@@ -87,6 +87,26 @@ pub enum Step {
     Fetching,
     /// Adding the worktree.
     CheckingOut,
+}
+
+/// What changed in a PR since an earlier head: see
+/// [`Worktree::interdiff`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interdiff {
+    /// The earlier head is an ancestor of the new one, on the same merge
+    /// base: the diff between them.
+    Diff(String),
+    /// It isn't, as after a rebase or a merge of the base: a `git
+    /// range-diff` of the PR's commits then against its commits now.
+    RangeDiff(String),
+}
+
+impl Interdiff {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        let (Self::Diff(text) | Self::RangeDiff(text)) = self;
+        text
+    }
 }
 
 /// A PR head checked out for one run.
@@ -286,6 +306,99 @@ impl Worktree {
         )
         .await
         .wrap_err("diffing the PR")
+    }
+
+    /// Where the PR branched from its base: the old side of its diff.
+    #[must_use]
+    pub fn merge_base(&self) -> &str {
+        &self.merge_base
+    }
+
+    /// Where a PR whose head was `head`, on `base`, branched from it: the
+    /// old side of its diff then.
+    pub async fn merge_base_of(&self, base: &str, head: &str) -> Result<String> {
+        Ok(git(&self.mirror, &["merge-base", base, head])
+            .await
+            .wrap_err_with(|| format!("finding where {head} left {base}"))?
+            .trim()
+            .to_owned())
+    }
+
+    /// Where `path`'s lines at `from` are at `to`.
+    pub async fn line_map(&self, from: &str, to: &str, path: &str) -> Result<LineMap> {
+        let diff = git(
+            &self.mirror,
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-renames",
+                "--unified=0",
+                from,
+                to,
+                "--",
+                path,
+            ],
+        )
+        .await
+        .wrap_err_with(|| format!("diffing {path} from {from} to {to}"))?;
+        Ok(LineMap::parse(&diff))
+    }
+
+    /// What changed in the PR since its head was `from_head`, on
+    /// `from_base`, for a review that resumes the session of one of that
+    /// head: the diff between the heads when the PR only gained commits on
+    /// the same merge base, and otherwise a range-diff. `None` if the
+    /// mirror no longer has both.
+    pub async fn interdiff(&self, from_head: &str, from_base: &str) -> Result<Option<Interdiff>> {
+        if !(has_commit(&self.mirror, from_head).await && has_commit(&self.mirror, from_base).await)
+        {
+            return Ok(None);
+        }
+        let from_merge_base = self.merge_base_of(from_base, from_head).await?;
+        // A merge of the base into the PR moves its merge base, and the
+        // diff between the heads would show the base's changes as the PR's.
+        let ancestor = from_merge_base == self.merge_base
+            && git(
+                &self.mirror,
+                &["merge-base", "--is-ancestor", from_head, &self.head_sha],
+            )
+            .await
+            .is_ok();
+        if ancestor {
+            let diff = git(
+                &self.mirror,
+                &[
+                    "-c",
+                    "core.quotePath=false",
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    &format!("--unified={CONTEXT}"),
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    from_head,
+                    &self.head_sha,
+                ],
+            )
+            .await
+            .wrap_err("diffing the PR since its last review")?;
+            return Ok(Some(Interdiff::Diff(diff)));
+        }
+        let range_diff = git(
+            &self.mirror,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "range-diff",
+                "--no-color",
+                &format!("{from_merge_base}..{from_head}"),
+                &format!("{}..{}", self.merge_base, self.head_sha),
+            ],
+        )
+        .await
+        .wrap_err("comparing the PR's commits with those of its last review")?;
+        Ok(Some(Interdiff::RangeDiff(range_diff)))
     }
 
     /// Removes the worktree, best effort: a later checkout at the same path

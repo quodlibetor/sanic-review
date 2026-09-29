@@ -122,8 +122,9 @@ pub struct Chat {
 
 impl Chat {
     /// Finds `target`'s session and checks its worktree out again. Refuses
-    /// while that worktree exists, since another chat has it. A run gets its
-    /// session when it finishes, so it's never still running.
+    /// while that worktree exists, since another chat has it, or a run
+    /// that resumed a session there. A run gets its session when it
+    /// finishes, so it's never still running itself.
     pub async fn prepare(paths: &Paths, target: &Target, allow_edits: bool) -> Result<Self> {
         let config = Config::load(&paths.config, &VcsResolver)?;
         let session = find(paths, target)?;
@@ -132,12 +133,13 @@ impl Chat {
         let dir = runner.worktree_path(run);
         if dir.exists() {
             return Err(eyre!(
-                "{} exists: another chat of run {} may be open",
+                "{} exists: another chat of run {} may be open, or a review or regeneration \
+                 that resumed its session may be running there",
                 dir.display(),
                 run.id
             ))
             .suggestion(format!(
-                "if it isn't, `sanic-review chat --cleanup {}` removes it",
+                "if neither is, `sanic-review chat --cleanup {}` removes it",
                 run.id
             ));
         }

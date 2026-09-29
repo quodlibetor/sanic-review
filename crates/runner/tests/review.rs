@@ -54,7 +54,7 @@ fn fake_claude(dir: &Path, script_body: &str, output: &str) -> PathBuf {
 fn review_result(reviewed: Reviewed) -> ReviewResult {
     match reviewed {
         Reviewed::Review { result, .. } => result,
-        Reviewed::Draft { revised, .. } => panic!("revised a draft: {revised:?}"),
+        other => panic!("not a review: {other:?}"),
     }
 }
 
@@ -112,6 +112,9 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
             trigger: ReviewTrigger::Requested,
         },
         revision: None,
+        resume: None,
+        worktree: None,
+        lineage: vec![],
     };
     Setup {
         _remote: remote,
@@ -217,6 +220,8 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
     }));
     let mut s = setup("", &output, Duration::from_secs(30));
     s.run.id = 4;
+    s.run.worktree = Some(3);
+    s.run.lineage = vec![3];
     s.run.revision = Some(Revision {
         source_run: 3,
         revises: 3,
@@ -318,6 +323,8 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
 fn revising_one_draft(answer: &serde_json::Value, note: &str) -> Setup {
     let mut s = setup("", &success(answer), Duration::from_secs(30));
     s.run.id = 4;
+    s.run.worktree = Some(3);
+    s.run.lineage = vec![3];
     s.run.revision = Some(Revision {
         source_run: 3,
         revises: 3,

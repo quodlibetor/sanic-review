@@ -187,13 +187,91 @@ impl DiffIndex {
     /// Whether GitHub would accept `comment`'s anchor.
     #[must_use]
     pub fn anchors(&self, comment: &InlineComment) -> bool {
-        let hunks = self.hunks(&comment.path);
-        let start = comment.start_line.unwrap_or(comment.line);
-        start <= comment.line
-            && hunks.iter().any(|h| {
-                let lines = h.lines(comment.side);
-                lines.contains(&start) && lines.contains(&comment.line)
+        self.anchors_at(
+            &comment.path,
+            comment.start_line,
+            comment.line,
+            comment.side,
+        )
+    }
+
+    /// Whether GitHub would accept an inline comment on `path`, from
+    /// `start` (or only `line`) to `line`, on `side`.
+    #[must_use]
+    pub fn anchors_at(&self, path: &str, start: Option<u32>, line: u32, side: Side) -> bool {
+        let start = start.unwrap_or(line);
+        start <= line
+            && self.hunks(path).iter().any(|h| {
+                let lines = h.lines(side);
+                lines.contains(&start) && lines.contains(&line)
             })
+    }
+}
+
+/// Where a file's lines went between two commits, from `git diff -U0` of
+/// it: a line a hunk changed or removed went nowhere, and the rest moved
+/// by what the hunks before them added and removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineMap {
+    /// Each hunk's old and new start and length, in order.
+    hunks: Vec<(u32, u32, u32, u32)>,
+}
+
+impl LineMap {
+    #[must_use]
+    pub fn parse(diff: &str) -> Self {
+        let range = |r: &str| -> Option<(u32, u32)> {
+            let (start, len) = r.split_once(',').unwrap_or((r, "1"));
+            Some((start.parse().ok()?, len.parse().ok()?))
+        };
+        let hunks = diff
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.strip_prefix("@@ ")?.split(' ');
+                let (a, b) = range(words.next()?.strip_prefix('-')?)?;
+                let (c, d) = range(words.next()?.strip_prefix('+')?)?;
+                Some((a, b, c, d))
+            })
+            .collect();
+        Self { hunks }
+    }
+
+    /// Where old line `line` is now, if it's still there unchanged.
+    #[must_use]
+    pub fn map(&self, line: u32) -> Option<u32> {
+        let mut shift = 0i64;
+        for &(a, b, c, d) in &self.hunks {
+            // A hunk without old lines adds after line `a`; one without
+            // new lines removes, leaving line `c` just before the gap.
+            if b > 0 && (a..a + b).contains(&line) {
+                return None;
+            }
+            let old_after = if b == 0 { a + 1 } else { a + b };
+            if line < old_after {
+                break;
+            }
+            let new_after = if d == 0 { c + 1 } else { c + d };
+            shift = i64::from(new_after) - i64::from(old_after);
+        }
+        u32::try_from(i64::from(line) + shift).ok()
+    }
+
+    /// Where old lines `start` to `end` are now, if none of them, nor
+    /// what's between them, changed.
+    #[must_use]
+    pub fn map_range(&self, start: u32, end: u32) -> Option<(u32, u32)> {
+        let touched = self.hunks.iter().any(|&(a, b, _, _)| {
+            if b == 0 {
+                // Added after line `a`: inside the range unless after its end.
+                (start..end).contains(&a)
+            } else {
+                a <= end && start < a + b
+            }
+        });
+        if touched {
+            return None;
+        }
+        Some((self.map(start)?, self.map(end)?))
     }
 }
 
@@ -361,6 +439,38 @@ fn parse_range(spec: &str) -> Option<Range<u32>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_line_map_follows_lines_around_changes() {
+        // Two lines added after 2, line 5 changed, lines 8-9 removed.
+        let map = LineMap::parse(
+            "@@ -2,0 +3,2 @@\n+a\n+b\n@@ -5 +7 @@\n-x\n+y\n@@ -8,2 +9,0 @@\n-p\n-q\n",
+        );
+        let mapped: Vec<Option<u32>> = (1..=11).map(|l| map.map(l)).collect();
+        assert_eq!(
+            mapped,
+            [
+                Some(1),
+                Some(2),
+                Some(5),
+                Some(6),
+                None,
+                Some(8),
+                Some(9),
+                None,
+                None,
+                Some(10),
+                Some(11)
+            ]
+        );
+        assert_eq!(LineMap::parse("").map(4), Some(4));
+        // A range moves whole, or not at all when anything in it changed.
+        assert_eq!(map.map_range(3, 4), Some((5, 6)));
+        assert_eq!(map.map_range(4, 6), None);
+        assert_eq!(map.map_range(1, 3), None);
+        assert_eq!(map.map_range(2, 2), Some((2, 2)));
+        assert_eq!(map.map_range(6, 7), Some((8, 9)));
+    }
+
     use sanic_core::run::{Confidence, Severity};
 
     use super::*;

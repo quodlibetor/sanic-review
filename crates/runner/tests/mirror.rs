@@ -8,7 +8,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{git, key, remote};
-use sanic_runner::mirror::{Mirrors, Step, lock_file};
+use sanic_runner::mirror::{Interdiff, Mirrors, Step, lock_file};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -286,4 +286,155 @@ async fn a_checkout_says_when_it_waits_for_one_in_this_process() {
         *second_steps.lock().unwrap(),
         [Step::Waiting, Step::CheckingOut]
     );
+}
+
+#[tokio::test]
+async fn an_interdiff_is_a_diff_after_new_commits_and_a_range_diff_after_a_rebase() {
+    let remote = remote();
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::new(data.path().join("mirrors"));
+    let url = remote.root.path().to_string_lossy();
+    let work = remote.root.path().join("work");
+    let github_arg = remote.root.path().join("org/repo.git");
+    let github_arg = github_arg.to_string_lossy();
+    // The head reviewed first is in the mirror.
+    mirrors
+        .checkout(
+            &url,
+            &key(),
+            &remote.head,
+            &remote.base,
+            &data.path().join("wt/1"),
+            |_| {},
+        )
+        .await
+        .unwrap()
+        .remove()
+        .await;
+
+    git(&work, &["checkout", "-q", "pr"]);
+    let added = common::commit(&work, "new.rs", "added\n");
+    git(
+        &work,
+        &["push", "-q", "-f", &github_arg, "pr:refs/pull/7/head"],
+    );
+    let worktree = mirrors
+        .checkout(
+            &url,
+            &key(),
+            &added,
+            &remote.base,
+            &data.path().join("wt/2"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let Some(Interdiff::Diff(diff)) = worktree
+        .interdiff(&remote.head, &remote.base)
+        .await
+        .unwrap()
+    else {
+        panic!("not a diff");
+    };
+    assert!(diff.contains("+++ b/new.rs"), "{diff}");
+    assert!(!diff.contains("lib.rs"), "{diff}");
+    worktree.remove().await;
+
+    // Rebased onto the moved base, the PR's own change unchanged.
+    git(&work, &["rebase", "-q", "main"]);
+    let rebased = git(&work, &["rev-parse", "HEAD"]);
+    git(
+        &work,
+        &["push", "-q", "-f", &github_arg, "pr:refs/pull/7/head"],
+    );
+    let worktree = mirrors
+        .checkout(
+            &url,
+            &key(),
+            &rebased,
+            &remote.base,
+            &data.path().join("wt/3"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let Some(Interdiff::RangeDiff(range)) = worktree.interdiff(&added, &remote.base).await.unwrap()
+    else {
+        panic!("not a range-diff");
+    };
+    assert_eq!(
+        range.lines().filter(|l| l.contains(" = ")).count(),
+        2,
+        "{range}"
+    );
+    // Without the earlier head, there's none.
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(worktree.interdiff(gone, &remote.base).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_interdiff_after_merging_the_base_in_is_a_range_diff() {
+    let remote = remote();
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::new(data.path().join("mirrors"));
+    let url = remote.root.path().to_string_lossy();
+    let work = remote.root.path().join("work");
+    let github_arg = remote.root.path().join("org/repo.git");
+    let github_arg = github_arg.to_string_lossy();
+    mirrors
+        .checkout(
+            &url,
+            &key(),
+            &remote.head,
+            &remote.base,
+            &data.path().join("wt/1"),
+            |_| {},
+        )
+        .await
+        .unwrap()
+        .remove()
+        .await;
+
+    // The old head is an ancestor, but the merge base moved, so the diff
+    // between the heads would be the base's.
+    git(&work, &["checkout", "-q", "main"]);
+    let base = common::commit(&work, "more.rs", "base again\n");
+    git(&work, &["checkout", "-q", "pr"]);
+    git(&work, &["merge", "-q", "--no-edit", "main"]);
+    let merged = git(&work, &["rev-parse", "HEAD"]);
+    git(
+        &work,
+        &[
+            "push",
+            "-q",
+            "-f",
+            &github_arg,
+            "main",
+            "pr:refs/pull/7/head",
+        ],
+    );
+    let worktree = mirrors
+        .checkout(
+            &url,
+            &key(),
+            &merged,
+            &base,
+            &data.path().join("wt/2"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        worktree
+            .interdiff(&remote.head, &remote.base)
+            .await
+            .unwrap(),
+        Some(Interdiff::RangeDiff(_))
+    ));
+    // The PR's own lines are where they were.
+    let map = worktree
+        .line_map(&remote.head, &merged, "lib.rs")
+        .await
+        .unwrap();
+    assert_eq!(map.map(2), Some(2));
 }

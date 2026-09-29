@@ -262,7 +262,11 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                         a href={ (href) "?run=" (run.id) } { "run " (number(run.id)) }
                         " at " code { (short(&run.head_sha)) } " · "
                         (when(run.finished_at.as_deref().unwrap_or(&run.queued_at))) " · "
-                        span.(run_class(&run.status)) { (run.status) }
+                        @if run.no_update.is_some() {
+                            span.dim { "no update" }
+                        } @else {
+                            span.(run_class(&run.status)) { (run.status) }
+                        }
                         @if let (Some(draft), Some(of)) = (run.draft_id, run.draft_run) {
                             " · revises "
                             a href={ (href) "?run=" (of) "#draft-" (draft) } { "draft #" (draft) }
@@ -273,6 +277,16 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                         }
                         @if let Some(error) = &run.error {
                             " — " span.error { (first_line(error)) }
+                        }
+                        // What the agent checked, which opens to all of it.
+                        @if let Some(note) = &run.no_update {
+                            details.instruction {
+                                summary {
+                                    (first_line(note))
+                                    @if note.trim_end().contains('\n') { "…" }
+                                }
+                                (markdown::render(note, &markdown::Context::default()))
+                            }
                         }
                         // Its first line, which opens to all of it.
                         @if let Some(instruction) = &run.instruction {

@@ -9,8 +9,10 @@ use std::{fmt::Write as _, path::Path};
 
 use sanic_core::{
     pr::{Comment, InProgressReview, Thread, is_login},
-    run::{BaselineDraft, PrContext, ReviewRequest, ReviewTrigger, Side},
+    run::{BaselineDraft, PrContext, Resume, ReviewRequest, ReviewTrigger, Side},
 };
+
+use crate::mirror::Interdiff;
 
 /// Diffs larger than this are left in the file rather than inlined.
 const MAX_INLINE_DIFF: usize = 200 * 1024;
@@ -186,6 +188,108 @@ pub fn brief(req: &ReviewRequest, ctx: &PrContext, diff: &str, diff_path: &Path)
             diff_path.display()
         );
     }
+    out
+}
+
+/// The prompt for a push review that resumes the session of `resume`, an
+/// earlier run: the new head, what changed since the head that run
+/// reviewed (inline, or where to read it if it's too large), and the PR's
+/// threads and your pending review as they stand now. It asks for the
+/// whole review as it now stands, or for nothing, if nothing new calls for
+/// one.
+#[must_use]
+pub fn update(
+    req: &ReviewRequest,
+    ctx: &PrContext,
+    resume: &Resume,
+    interdiff: &Interdiff,
+    interdiff_path: &Path,
+    diff_path: &Path,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# New commits on {} ({})
+
+\
+         The PR has moved from {}, the head you last reviewed, to {}; the working \
+         directory is now a checkout of {}. Its base is {}.",
+        req.key, ctx.url, resume.head_sha, req.head_sha, req.head_sha, req.base_sha
+    );
+    let (what, info) = match interdiff {
+        Interdiff::Diff(_) => (
+            format!(
+                "\n## What changed since {}\n\nThe diff from the head you reviewed to the new \
+                 one.\n",
+                resume.head_sha
+            ),
+            "diff",
+        ),
+        Interdiff::RangeDiff(_) => (
+            format!(
+                "\n## What changed since {}\n\nThe PR's history was rewritten, as by a rebase, \
+                 so this is a `git range-diff` of its commits then against its commits now: `=` \
+                 marks a commit whose change is the same, `!` one whose change differs, shown as \
+                 a diff of the two diffs, `<` one that's gone and `>` one that's new. Changes to \
+                 the base that a rebase brings in aren't the PR's.\n",
+                resume.head_sha
+            ),
+            "text",
+        ),
+    };
+    let text = interdiff.text();
+    out.push_str(&what);
+    if text.len() <= MAX_INLINE_DIFF {
+        out.push_str(&fenced(text, info));
+    } else {
+        let _ = writeln!(
+            out,
+            "It's too large to include here. Read it from {}.",
+            interdiff_path.display()
+        );
+    }
+    if !resume.drafts.is_empty() {
+        let drafts = serde_json::to_string_pretty(&resume.drafts).unwrap_or_else(|_| "[]".into());
+        let _ = write!(
+            out,
+            "\n## Your last review's drafts\n\n\
+             What the reviewer did with each, one entry per draft: its `id`, `kind` \
+             (`summary` or `comment`), anchor at {}, current `text` (the reviewer's edit if \
+             `edited`), `status`, and your private `note` if you wrote one:\n\n{}\n\
+             - `posted` drafts are already on GitHub: don't repeat them.\n\
+             - `rejected` drafts were turned down: don't propose them again, unless the new \
+             commits make one newly relevant, and then say in its `note` what changed.\n\
+             - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, \
+             word for word, unless the new commits address them.\n\
+             - `pending` and `stale` ones are yours to keep, change or drop.\n",
+            resume.head_sha,
+            fenced(&drafts, "json")
+        );
+    }
+    let in_progress = ctx.in_progress.as_ref().filter(|r| !r.comments.is_empty());
+    out.push_str(&discussion(ctx, in_progress));
+    if let Some(review) = in_progress {
+        out.push_str(&in_progress_review(review));
+    }
+    let _ = write!(
+        out,
+        "\n## What to answer\n\n\
+         The whole PR diff as it now stands is in {}; inline comments must be on lines it \
+         shows, which may have moved since your last review.\n\n\
+         If nothing that changed calls for a new review, for example a rebase that leaves \
+         the PR's own changes as they were, answer `suggested_verdict` `none` with no \
+         `comments`, and say in `summary` what you checked. The reviewer sees that as no \
+         update: your drafts that aren't posted carry over to the new head as they stand, and \
+         nothing new is drafted.\n\n\
+         Otherwise, answer with the whole review as it now stands, in the same format as \
+         before: the comments of your last whole review that still apply, as you last revised \
+         them, on their lines in the new diff; not those the new commits address; and any the \
+         new commits call for. \
+         Don't repeat points the discussion already makes. Give each comment you keep or \
+         revise the `id` of the draft it comes from as `based_on`, and the summary's as \
+         `summary_based_on`; leave them out for anything new.\n",
+        diff_path.display()
+    );
     out
 }
 
@@ -609,6 +713,61 @@ mod tests {
         assert!(one.contains("This isn't a whole review"), "{one}");
         let one = draft_revision("Reword.", &draft, &context());
         assert!(!one.contains("This isn't a whole review"), "{one}");
+    }
+
+    #[test]
+    fn an_update_after_a_rebase_asks_for_the_whole_review_or_nothing() {
+        let mut ctx = context();
+        ctx.threads.truncate(2);
+        ctx.threads[1].comments.truncate(1);
+        let resume = Resume {
+            run: 3,
+            session_id: "sess-0".into(),
+            head_sha: "h1".into(),
+            base_sha: "b0".into(),
+            drafts: vec![BaselineDraft {
+                id: 11,
+                kind: "comment".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(2),
+                start_line: None,
+                side: Some("RIGHT".into()),
+                text: "This can overflow.".into(),
+                status: "rejected".into(),
+                edited: false,
+                note: None,
+            }],
+        };
+        let range = "1:  aaaa = 1:  bbbb Add retries\n";
+        insta::assert_snapshot!(update(
+            &request(ReviewTrigger::Push {
+                from_sha: "h1".into(),
+            }),
+            &ctx,
+            &resume,
+            &Interdiff::RangeDiff(range.into()),
+            Path::new("/data/runs/4/interdiff.diff"),
+            Path::new("/data/runs/4/pr.diff"),
+        ));
+        // A plain diff is fenced as one, and a huge one left in its file.
+        let text = update(
+            &request(ReviewTrigger::Requested),
+            &ctx,
+            &resume,
+            &Interdiff::Diff(DIFF.into()),
+            Path::new("/i"),
+            Path::new("/d"),
+        );
+        assert!(text.contains("```diff\ndiff --git"), "{text}");
+        let text = update(
+            &request(ReviewTrigger::Requested),
+            &ctx,
+            &resume,
+            &Interdiff::Diff("+x\n".repeat(MAX_INLINE_DIFF)),
+            Path::new("/i"),
+            Path::new("/d"),
+        );
+        assert!(text.contains("Read it from /i."), "{text}");
     }
 
     #[test]

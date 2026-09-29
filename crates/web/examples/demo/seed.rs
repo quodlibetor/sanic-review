@@ -340,6 +340,7 @@ fn showcase_review() -> ReviewResult {
         ],
         session_id: Some("demo-session".into()),
         transcript_path: "transcript.jsonl".into(),
+        resumed_from: None,
     }
 }
 
@@ -882,6 +883,7 @@ fn finished(
             comments,
             session_id: Some(format!("demo-{}", pr.key.number)),
             transcript_path: "transcript.jsonl".into(),
+            resumed_from: None,
         },
     )?;
     Ok(run)

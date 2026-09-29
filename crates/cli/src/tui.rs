@@ -1483,6 +1483,9 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview) -> ListItem<'a> {
         (None, Some("queued")) if overview.manual_reviews => ("held".into(), Color::Yellow),
         (None, Some("queued")) => ("queued".into(), Color::Yellow),
         (None, Some("running")) => ("running".into(), Color::Cyan),
+        (None, Some("succeeded")) if latest.is_some_and(|r| r.no_update) => {
+            ("no update".into(), Color::Green)
+        }
         (None, Some("succeeded")) => ("drafted".into(), Color::Green),
         (None, Some(status @ ("failed" | "crashed"))) => (status.into(), Color::Red),
         (None, Some(other)) => (other.into(), Color::DarkGray),
@@ -1770,6 +1773,7 @@ mod tests {
         LatestRun {
             status: status.into(),
             error: error.map(Into::into),
+            no_update: false,
         }
     }
 

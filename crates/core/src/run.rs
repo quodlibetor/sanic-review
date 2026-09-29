@@ -33,7 +33,8 @@ pub enum ReviewTrigger {
     /// Your review was requested: a full review.
     Requested,
     /// New commits on a PR you've reviewed; `from_sha` is the head you last
-    /// saw. Reviews are still full until incremental reviews exist.
+    /// saw. The review resumes the session of the PR's current run, if it
+    /// can; see [`Resume`].
     Push { from_sha: String },
 }
 
@@ -103,6 +104,49 @@ pub struct QueuedRun {
     pub request: ReviewRequest,
     /// Set for a `regenerate` run.
     pub revision: Option<Revision>,
+    /// Set for a push review that resumes an earlier run's session.
+    pub resume: Option<Resume>,
+    /// The run whose worktree path this one checks out at, when it isn't
+    /// its own: Claude Code finds a session by its directory, so a run
+    /// that resumes one, or chats with one, works where it lives.
+    pub worktree: Option<i64>,
+    /// The runs whose sessions this one's continues, latest first: its
+    /// agent knows their run dirs by path, so it may read them.
+    pub lineage: Vec<i64>,
+}
+
+impl QueuedRun {
+    /// The run whose worktree path this one checks out at: see
+    /// [`QueuedRun::worktree`].
+    #[must_use]
+    pub fn worktree_run(&self) -> i64 {
+        self.worktree.unwrap_or(self.id)
+    }
+}
+
+/// An earlier run whose agent session a push review resumes, to review
+/// what changed since the head that run reviewed rather than the whole PR
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    pub run: i64,
+    pub session_id: String,
+    /// The head and base it reviewed.
+    pub head_sha: String,
+    pub base_sha: String,
+    /// Its drafts as they stand, with what you did with them.
+    pub drafts: Vec<BaselineDraft>,
+}
+
+/// A draft of the run a review resumed, carried to that review when it
+/// found nothing new: on its lines at the new head, or, where those
+/// changed, on the lines it had, unanchored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub draft: i64,
+    pub start_line: Option<u32>,
+    pub line: Option<u32>,
+    pub unanchored: bool,
 }
 
 /// What a `regenerate` run revises: an earlier review, whose agent session
@@ -427,6 +471,8 @@ pub struct ReviewResult {
     /// Lets "regenerate with instruction" resume the conversation.
     pub session_id: Option<String>,
     pub transcript_path: String,
+    /// The run whose session it resumed, for a push review that did.
+    pub resumed_from: Option<i64>,
 }
 
 #[cfg(test)]

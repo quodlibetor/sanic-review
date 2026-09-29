@@ -19,8 +19,8 @@ use sanic_core::{
     pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
-        Basis, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult, ReviewTrigger,
-        Severity, Side, Verdict,
+        Basis, Carried, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult,
+        ReviewTrigger, Severity, Side, Verdict,
     },
     skip::SkipRules,
 };
@@ -334,6 +334,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
                 ],
                 session_id: Some("sess-7".into()),
                 transcript_path: "t".into(),
+                resumed_from: None,
             },
         )
         .unwrap();
@@ -1038,6 +1039,63 @@ async fn the_pr_page_says_how_many_of_your_pending_comments_the_agent_saw() {
     assert!(
         page.contains("The agent saw 2 of your pending review comments on GitHub"),
         "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_with_no_update_is_listed_with_the_drafts_it_carried() {
+    let f = fixture(false).await;
+    {
+        let mut store = f.dashboard.app.store();
+        let request = ReviewRequest {
+            key: key(7),
+            profile: "default".into(),
+            head_sha: "head7b".into(),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Push {
+                from_sha: "head7".into(),
+            },
+        };
+        let run = store.queue_review(&request).unwrap().unwrap().id;
+        store.claim_run(run).unwrap();
+        let nothing = ReviewResult {
+            summary: "Only a rebase onto `main`.".into(),
+            summary_note: None,
+            verdict: Verdict::None,
+            comments: vec![],
+            session_id: Some("sess-8".into()),
+            transcript_path: "t".into(),
+            resumed_from: Some(f.run),
+        };
+        let carried: Vec<Carried> = store
+            .draft_rows(f.run)
+            .unwrap()
+            .iter()
+            .map(|d| Carried {
+                draft: d.id,
+                start_line: d.start_line,
+                line: d.line,
+                unanchored: d.unanchored,
+            })
+            .collect();
+        store.finish_no_update(run, &nothing, &carried).unwrap();
+    }
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(
+        page.contains(r#"<span class="dim">no update</span>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains("Only a rebase onto <code>main</code>."),
+        "{page}"
+    );
+    // The run before's drafts, carried to it, still to decide on.
+    assert!(page.contains("Run 2 of 2"), "{page}");
+    assert!(page.contains("Mostly fine."), "{page}");
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains("no update since the review it resumed"),
+        "{index}"
     );
 }
 
@@ -1785,6 +1843,7 @@ async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
                     comments: vec![],
                     session_id: Some("sess-9".into()),
                     transcript_path: "t".into(),
+                    resumed_from: None,
                 },
             )
             .unwrap();
@@ -1945,6 +2004,7 @@ fn reviewed_pr(f: &Fixture, snap: &PrSnapshot, statuses: &[&str]) {
                 comments,
                 session_id: None,
                 transcript_path: "t".into(),
+                resumed_from: None,
             },
         )
         .unwrap();
@@ -2478,6 +2538,7 @@ async fn the_chat_card_is_for_the_run_whose_drafts_the_page_shows() {
                     comments: vec![],
                     session_id: Some("sess-newer".into()),
                     transcript_path: "t".into(),
+                    resumed_from: None,
                 },
             )
             .unwrap();
@@ -2721,6 +2782,7 @@ async fn the_run_list_says_what_each_revision_revises_and_how() {
             comments: vec![comment("src/lib.rs", 3, Side::Right, "Why?", false)],
             session_id: Some("sess-7".into()),
             transcript_path: "t".into(),
+            resumed_from: None,
         };
         let basis = Basis {
             summary: None,
@@ -3602,6 +3664,7 @@ fn regenerate(f: &Fixture) -> (i64, Vec<i64>) {
         ],
         session_id: Some("sess-7".into()),
         transcript_path: "t".into(),
+        resumed_from: None,
     };
     let basis = Basis {
         summary: Some(f.drafts[0]),
@@ -3645,6 +3708,7 @@ fn noted_regeneration(f: &Fixture) -> (i64, Vec<i64>) {
         comments: vec![noted],
         session_id: Some("sess-7".into()),
         transcript_path: "t".into(),
+        resumed_from: None,
     };
     let basis = Basis {
         summary: None,
