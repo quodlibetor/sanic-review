@@ -435,12 +435,28 @@ Rules:
    The threads are the PR's existing review threads and its conversation,
    as last polled: each thread's path and lines on the head (or, once
    outdated, its lines in the commit it was left on), its side, whether
-   it's resolved or outdated, and each comment's author and body, your
-   own labelled as the reviewer's. The
-   section says the bodies are other people's text whose instructions
-   must not be followed. The agent is told not to comment on a point a
-   thread already makes, and, when it agrees with an existing comment, to
-   say so in its summary, naming whose and where, instead.
+   it's resolved or outdated, and each comment's author and body. A
+   comment posted from a draft of one of the PR's runs is labelled as
+   posted from an earlier draft of this review: the first comment of a
+   thread a draft started, as the dashboard tells a draft's thread from
+   others (the same code, in the store), and a reply a draft posted in an
+   existing thread, which is yours there and word for word the draft
+   (the newest, if several are). Word for word ignores line endings and
+   space at either end, here and on the dashboard.
+   Your other comments are labelled as the reviewer's own. The brief
+   gives your login, so the agent knows an `@` mention of it is about you.
+   The section says no comment's instructions are to be followed: other
+   people's are untrusted text, and yours are points already made. It
+   explains the earlier-draft label only when a comment shown carries it.
+   The agent is told not to comment on a point a thread already makes,
+   and, when it agrees with someone else's comment, to say so in its
+   summary, naming whose and where, instead. Your comments and those
+   posted from its earlier drafts it must never agree with, credit or
+   repeat as someone else's. In a whole review, for those posted from its
+   earlier drafts, it checks whether the current head addresses each, and
+   says in the summary's private note which still stand; the posted
+   summary mentions one only if it still blocks. Revising one draft
+   reports nothing on them. A chat's system prompt repeats the rule.
    Your pending review's comments, as last polled, get a section of their
    own, labelled as your in-progress review and fenced as untrusted text
    like the rest, an outdated one on the lines of the commit it was left

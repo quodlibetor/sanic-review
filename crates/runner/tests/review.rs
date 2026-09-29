@@ -6,6 +6,7 @@
 mod common;
 
 use std::{
+    collections::HashSet,
     future::pending,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -132,6 +133,7 @@ fn context() -> PrContext {
         threads: vec![],
         in_progress: None,
         viewer: "me".into(),
+        from_drafts: HashSet::new(),
     }
 }
 

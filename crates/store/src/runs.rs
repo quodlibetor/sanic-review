@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use color_eyre::eyre::{Result, WrapErr, bail};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
-    pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread},
+    pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread, is_login},
     repo::RepoName,
     run::{
         BaselineDraft, Basis, DraftRevision, InlineComment, PrContext, QueuedRun, ReviewRequest,
@@ -13,7 +13,7 @@ use sanic_core::{
     },
 };
 
-use crate::{NOW, Store};
+use crate::{NOW, Posted, Store, posted::same_body};
 
 const REVIEW: &str = RunKind::Review.as_str();
 
@@ -856,15 +856,66 @@ impl Store {
         else {
             return Ok(None);
         };
+        let threads = self.threads(key)?;
+        let from_drafts = self.posted_from_drafts(key, &threads, viewer)?;
         Ok(Some(PrContext {
             title,
             body,
             url,
             author,
-            threads: self.threads(key)?,
+            threads,
             in_progress: self.in_progress_review(key)?,
             viewer: viewer.to_owned(),
+            from_drafts,
         }))
+    }
+
+    /// The ids of `threads`' comments posted from comment drafts of
+    /// `key`'s runs: the first comment of each thread a draft started, as
+    /// [`Posted`] tells them for the dashboard, and each reply a draft
+    /// posted in an existing thread, which is `viewer`'s in that thread and
+    /// word for word the draft, the newest such when there are several. A
+    /// comment goes to one reply at most.
+    fn posted_from_drafts(
+        &self,
+        key: &PrKey,
+        threads: &[Thread],
+        viewer: &str,
+    ) -> Result<HashSet<String>> {
+        let posted = Posted::of(threads, &self.posted_drafts(key)?, viewer);
+        let mut ids: HashSet<String> = threads
+            .iter()
+            .filter(|t| posted.draft_of(t).is_some())
+            .filter_map(|t| t.comments.first())
+            .map(|c| c.id.clone())
+            .collect();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT d.thread_id, coalesce(d.edited_body, d.original_body)
+             FROM drafts d JOIN runs r ON r.id = d.run_id
+             WHERE r.repo = ?1 AND r.number = ?2 AND d.kind = 'comment'
+               AND d.status = 'posted' AND d.thread_choice = 'reply'
+               AND d.posted_comment IS NULL
+             ORDER BY d.id",
+        )?;
+        let replies = stmt
+            .query_map(params![key.repo.to_string(), key.number], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (thread, body) in replies {
+            let reply = threads
+                .iter()
+                .filter(|t| t.id == thread)
+                .flat_map(|t| &t.comments)
+                .rev()
+                .find(|c| {
+                    !ids.contains(&c.id) && is_login(&c.author, viewer) && same_body(&c.body, &body)
+                });
+            if let Some(reply) = reply {
+                ids.insert(reply.id.clone());
+            }
+        }
+        Ok(ids)
     }
 
     /// Your own review pending on GitHub for `key`, as last polled,
@@ -2483,6 +2534,106 @@ mod tests {
             .record(&polled("PRR_yours"), "me", "default", &[])
             .unwrap();
         assert!(store.in_progress_review(&key).unwrap().is_some());
+    }
+
+    #[test]
+    fn context_knows_which_comments_were_posted_from_drafts() {
+        let comment = |id: &str, author: &str, body: &str| Comment {
+            id: id.into(),
+            author: author.into(),
+            body: body.into(),
+            created_at: "2026-01-03T00:00:00Z".into(),
+            url: None,
+            by_bot: false,
+            reacted_at: None,
+            reactions: vec![],
+        };
+        let thread = |id: &str, start: u32, comments: Vec<Comment>| Thread {
+            id: id.into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(4),
+            resolved: false,
+            place: Placement {
+                start_line: Some(start),
+                side: Some(Side::Right),
+                head: Some("h1".into()),
+                ..Placement::default()
+            },
+            comments,
+        };
+        let mut snap = snapshot();
+        snap.threads = vec![
+            // Recorded as the comment GitHub made of the first draft.
+            thread("t1", 1, vec![comment("PRRC_1", "Me", "reworded on GitHub")]),
+            // Yours, word for word the second draft, on its lines; your
+            // reply in it isn't what the draft started.
+            thread(
+                "t2",
+                2,
+                vec![
+                    comment("c3", "me", "off by one?"),
+                    comment("c4", "me", "off by one?"),
+                ],
+            ),
+            // Word for word, on its lines, but someone else's.
+            thread("t3", 2, vec![comment("c5", "carol", "off by one?")]),
+            // Yours, word for word, but on other lines.
+            thread("t4", 3, vec![comment("c6", "me", "off by one?")]),
+            // Someone else's thread the third draft replied in, as yours
+            // word for word; your other comment in it isn't the draft.
+            thread(
+                "t5",
+                3,
+                vec![
+                    comment("c7", "alice", "Is this right?"),
+                    comment("c8", "me", "No, it's off by one."),
+                    comment("c9", "me", "Fixed now?"),
+                    // The same words again, later, as GitHub may send them:
+                    // the newest is the draft's.
+                    comment("c10", "me", "No, it's off by one.\r\n"),
+                ],
+            ),
+        ];
+        let mut store = Store::open_in_memory().unwrap();
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        let inline = |start: u32, body: &str| DraftComment {
+            comment: InlineComment {
+                path: "src/lib.rs".into(),
+                line: 4,
+                start_line: Some(start),
+                side: Side::Right,
+                body: body.into(),
+                severity: Severity::Minor,
+                confidence: Confidence::High,
+                note: None,
+            },
+            unanchored: false,
+        };
+        let posted = ReviewResult {
+            comments: vec![
+                inline(1, "recorded"),
+                inline(2, "off by one?"),
+                inline(3, "No, it's off by one."),
+            ],
+            ..result()
+        };
+        store.finish_review(run.id, &posted).unwrap();
+        let drafts = store.drafts(run.id).unwrap();
+        let reply = crate::ThreadChoice::Reply {
+            thread: "t5".into(),
+        };
+        assert!(store.choose_thread(drafts[3].id, &reply).unwrap());
+        let ids: Vec<i64> = drafts.iter().map(|d| d.id).collect();
+        store.mark_posted(&ids).unwrap();
+        store
+            .record_posted_comments(&[(drafts[1].id, "PRRC_1".into())])
+            .unwrap();
+        let ctx = store.pr_context(&snap.key, "me").unwrap().unwrap();
+        let mut from_drafts: Vec<_> = ctx.from_drafts.iter().map(String::as_str).collect();
+        from_drafts.sort_unstable();
+        assert_eq!(from_drafts, ["PRRC_1", "c10", "c3"]);
     }
 
     #[test]

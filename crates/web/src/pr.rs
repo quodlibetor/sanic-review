@@ -17,7 +17,7 @@ use sanic_core::{
     state::PrState,
 };
 use sanic_runner::diff::DiffIndex;
-use sanic_store::{DraftRow, DraftStatus, OwedReview, PrPage, ReviewRun, ThreadChoice};
+use sanic_store::{DraftRow, DraftStatus, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice};
 use serde::Deserialize;
 use tracing::info;
 
@@ -29,7 +29,7 @@ use crate::{
     links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href, submit,
-    threads::{self, Existing, Posted},
+    threads::{self, Existing},
 };
 
 #[derive(Debug, Deserialize)]

@@ -14,7 +14,7 @@ use sanic_core::{
     run::Side,
 };
 use sanic_runner::diff::{CONTEXT, Change, DiffFile, DiffIndex, DiffLine, Hunk};
-use sanic_store::{DraftRow, ReviewRun};
+use sanic_store::{DraftRow, Posted, ReviewRun};
 use serde::Deserialize;
 
 use crate::{
@@ -25,7 +25,7 @@ use crate::{
     pr::{self, short},
     pr_href,
     submit::RunPath,
-    threads::{self, Existing, Posted},
+    threads::{self, Existing},
 };
 
 /// Diff lines past which a file with nothing of yours on it is only

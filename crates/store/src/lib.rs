@@ -2,6 +2,7 @@
 
 mod dashboard;
 mod overview;
+mod posted;
 mod runs;
 
 use std::{collections::HashSet, path::Path, time::Duration};
@@ -58,6 +59,7 @@ pub use dashboard::{
 pub use overview::{
     Activity, ActivityKind, Decided, LatestRun, MyPr, OwedReview, RowFacts, RunTimes,
 };
+pub use posted::{Posted, draft_span};
 pub use runs::{Draft, Refusal, Regeneration, RunCounts, RunRecord, SessionRun};
 
 /// A connection to the database. The poller and the runner each open their

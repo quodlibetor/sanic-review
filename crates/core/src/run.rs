@@ -3,6 +3,8 @@
 //! Only `review` runs exist so far. `reply` and `respond` runs will add
 //! [`RunKind`] variants, their own triggers and their own output types.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::pr::{InProgressReview, PrKey, Thread};
@@ -88,6 +90,10 @@ pub struct PrContext {
     /// The login the review is drafted for, whose comments in `threads`
     /// the brief labels as the reviewer's own.
     pub viewer: String,
+    /// The ids of the comments in `threads` that were posted from drafts
+    /// of the PR's runs, which the brief labels as an earlier draft of
+    /// this review: the agent's own points, not someone else's.
+    pub from_drafts: HashSet<String>,
 }
 
 /// A run the store has accepted and the runner should pick up.
