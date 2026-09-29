@@ -85,7 +85,11 @@ Write and drops the `--add-dir`s, so only the worktree can change. The
 worktree is removed when the chat ends, however it ends; it's refused while
 that path exists (a running review or another chat). `--print-command`
 prints the `cd <worktree> && …` line instead and leaves the worktree for it
-until `sanic-review chat --cleanup <run id>`.
+until `sanic-review chat --cleanup <run id>`. Each step says what it's
+doing on stderr, one line apiece: waiting for the mirror, only when a
+review or another chat has it; fetching, only when the mirror lacks the
+run's head or base; checking out; starting `claude`; and removing the
+worktree afterwards. Only the chat prints them; `serve`'s checkouts don't.
 `sanic_runner::chat::ChatCommand` builds the command, and its
 `shell_line()` the line to copy, for the CLI, the TUI and the dashboard.
 
@@ -393,7 +397,10 @@ Rules:
    process, and an advisory file lock (`<name>.git.lock` beside it) across
    processes, so `sanic-review chat` and `serve` don't fetch into one mirror
    at once. Fetch `refs/pull/N/head`
-   and the base, then `git worktree add` at the head SHA under the data dir.
+   and the base, unless the mirror already has both SHAs (a re-review of the
+   same head, a chat), then `git worktree add` at the head SHA under the
+   data dir. A SHA always names the same commit, and nothing reads the pull
+   ref itself, so the skipped fetch changes nothing the run sees.
    Remove the worktree when the run finishes. Your own PRs with auto-fix are
    handled differently; see Auto-fix.
    The base is fetched by SHA, since that's what the PR snapshot records.

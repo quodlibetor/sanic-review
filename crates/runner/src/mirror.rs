@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    fs::TryLockError,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Output, Stdio},
@@ -44,27 +45,48 @@ fn lock_path(mirror: &Path) -> PathBuf {
 
 /// Takes an exclusive advisory lock (`flock`) on `path`, creating it and its
 /// directory as needed, and waits for any other holder, in this process or
-/// another. The lock is released when the file is dropped.
-pub async fn lock_file(path: &Path) -> Result<std::fs::File> {
+/// another, calling `on_wait` first if there is one. The lock is released
+/// when the file is dropped.
+pub async fn lock_file(path: &Path, on_wait: impl FnOnce()) -> Result<std::fs::File> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir)
             .await
             .wrap_err_with(|| format!("creating {}", dir.display()))?;
     }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .wrap_err_with(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => return Ok(file),
+        Err(TryLockError::WouldBlock) => on_wait(),
+        Err(TryLockError::Error(err)) => {
+            return Err(err).wrap_err_with(|| format!("locking {}", path.display()));
+        }
+    }
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .wrap_err_with(|| format!("opening {}", path.display()))?;
         file.lock()
             .wrap_err_with(|| format!("locking {}", path.display()))?;
         Ok(file)
     })
     .await
     .wrap_err("waiting for a mirror lock")?
+}
+
+/// What [`Mirrors::checkout`] is doing, for a caller that shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Another checkout from the mirror, in this process or another, has
+    /// it; this one waits for that to finish. Only reported when it does
+    /// have to wait.
+    Waiting,
+    /// Fetching the PR, because the mirror lacks its head or base.
+    Fetching,
+    /// Adding the worktree.
+    CheckingOut,
 }
 
 /// A PR head checked out for one run.
@@ -147,8 +169,9 @@ impl Mirrors {
     }
 
     /// Fetches `key`'s head and base into the mirror from
-    /// `<git_url>/<owner>/<name>.git`, then checks `head_sha` out at `dest`,
-    /// replacing anything a previous attempt left there.
+    /// `<git_url>/<owner>/<name>.git`, unless it has both already, then
+    /// checks `head_sha` out at `dest`, replacing anything a previous
+    /// attempt left there. Tells `progress` each [`Step`] as it starts.
     pub async fn checkout(
         &self,
         git_url: &str,
@@ -156,11 +179,24 @@ impl Mirrors {
         head_sha: &str,
         base_sha: &str,
         dest: &Path,
+        mut progress: impl FnMut(Step),
     ) -> Result<Worktree> {
         let lock = self.lock(&key.repo);
-        let _guard = lock.lock().await;
+        let mut waited = false;
+        let _guard = if let Ok(guard) = lock.try_lock() {
+            guard
+        } else {
+            waited = true;
+            progress(Step::Waiting);
+            lock.lock().await
+        };
         let mirror = self.mirror_path(&key.repo);
-        let _file_guard = lock_file(&lock_path(&mirror)).await?;
+        let _file_guard = lock_file(&lock_path(&mirror), || {
+            if !waited {
+                progress(Step::Waiting);
+            }
+        })
+        .await?;
         tokio::fs::create_dir_all(&mirror)
             .await
             .wrap_err_with(|| format!("creating {}", mirror.display()))?;
@@ -169,30 +205,30 @@ impl Mirrors {
         // directory would find and fetch into an enclosing repository.
         git(&mirror, &["init", "--bare", "--quiet"]).await?;
 
-        let url = format!(
-            "{}/{}/{}.git",
-            git_url.trim_end_matches('/'),
-            key.repo.owner,
-            key.repo.name
-        );
-        let pull_ref = format!("+refs/pull/{0}/head:refs/pull/{0}/head", key.number);
-        git(
-            &mirror,
-            &["fetch", "--quiet", "--no-tags", &url, &pull_ref, base_sha],
-        )
-        .await
-        .wrap_err_with(|| format!("fetching {} from {url}", key.url()))?;
-        if git(
-            &mirror,
-            &["cat-file", "-e", &format!("{head_sha}^{{commit}}")],
-        )
-        .await
-        .is_err()
-        {
-            return Err(eyre!(
-                "{} head {head_sha} is gone; it was probably force-pushed away",
-                key.url()
-            ));
+        // A SHA names the same commit forever, so a mirror that has both
+        // has everything the checkout and the merge base need; nothing
+        // reads the `refs/pull/N/head` a fetch updates.
+        if !(has_commit(&mirror, head_sha).await && has_commit(&mirror, base_sha).await) {
+            progress(Step::Fetching);
+            let url = format!(
+                "{}/{}/{}.git",
+                git_url.trim_end_matches('/'),
+                key.repo.owner,
+                key.repo.name
+            );
+            let pull_ref = format!("+refs/pull/{0}/head:refs/pull/{0}/head", key.number);
+            git(
+                &mirror,
+                &["fetch", "--quiet", "--no-tags", &url, &pull_ref, base_sha],
+            )
+            .await
+            .wrap_err_with(|| format!("fetching {} from {url}", key.url()))?;
+            if !has_commit(&mirror, head_sha).await {
+                return Err(eyre!(
+                    "{} head {head_sha} is gone; it was probably force-pushed away",
+                    key.url()
+                ));
+            }
         }
         let merge_base = git(&mirror, &["merge-base", base_sha, head_sha])
             .await?
@@ -205,6 +241,7 @@ impl Mirrors {
                 .await
                 .wrap_err_with(|| format!("creating {}", parent.display()))?;
         }
+        progress(Step::CheckingOut);
         let dest_arg = dest.to_string_lossy();
         git(
             &mirror,
@@ -269,6 +306,13 @@ async fn remove_worktree(mirror: &Path, path: &Path) {
         }
     }
     let _ = git(mirror, &["worktree", "prune"]).await;
+}
+
+/// Whether `mirror` has `commit` as a commit.
+async fn has_commit(mirror: &Path, commit: &str) -> bool {
+    git(mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")])
+        .await
+        .is_ok()
 }
 
 /// Whether `commit` looks like a SHA, so it can only ever name one.

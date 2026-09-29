@@ -4,6 +4,10 @@
 //! Claude Code keys sessions by directory, so the worktree is checked out
 //! again at the path the review used, `<data-dir>/worktrees/<run id>`. It's
 //! removed when the chat ends, however it ends.
+//!
+//! Each step before and after the agent's session says what it's doing on
+//! stderr, since checking out a large repo can take a while; stdout carries
+//! only what `--print-command` and `--cleanup` print.
 
 use std::path::PathBuf;
 
@@ -17,7 +21,7 @@ use sanic_core::{
 };
 use sanic_runner::{
     chat::ChatCommand,
-    mirror::Worktree,
+    mirror::{Step, Worktree},
     review::{AgentProfile, ReviewRunner, RunSettings},
     vcs::VcsResolver,
 };
@@ -153,8 +157,20 @@ impl Chat {
             &config.github.git_url,
             config.reference_dirs(),
         );
+        let req = &run.request;
         let worktree = runner
-            .chat_worktree(run, &settings.git_url)
+            .chat_worktree(run, &settings.git_url, |step| match step {
+                Step::Waiting => eprintln!(
+                    "waiting for the {} mirror, which a review or another chat is checking out from",
+                    req.key.repo
+                ),
+                Step::Fetching => eprintln!("fetching {}", req.key.url()),
+                Step::CheckingOut => eprintln!(
+                    "checking out {} into {}",
+                    req.head_sha.get(..8).unwrap_or(&req.head_sha),
+                    dir.display()
+                ),
+            })
             .await
             .wrap_err_with(|| format!("checking out run {}'s worktree", run.id))?;
         let command = runner.chat_command(run, &session.session_id, &settings, allow_edits);
@@ -170,6 +186,7 @@ impl Chat {
     pub async fn run(self) -> Result<()> {
         let mut command = tokio::process::Command::from(self.command.command());
         let program = self.command.program.display().to_string();
+        eprintln!("starting `{program}`");
         let ignore_interrupts =
             tokio::spawn(async { while tokio::signal::ctrl_c().await.is_ok() {} });
         let status = match command.spawn() {
@@ -180,6 +197,7 @@ impl Chat {
             Err(err) => Err(err).wrap_err_with(|| format!("starting `{program}`")),
         };
         ignore_interrupts.abort();
+        eprintln!("removing {}", self.worktree.path().display());
         self.worktree.remove().await;
         let status = status?;
         if !status.success() {

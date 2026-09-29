@@ -25,7 +25,7 @@ use crate::{
     chat,
     claude::{Claude, Invocation, Outcome},
     diff::DiffIndex,
-    mirror::{Mirrors, Worktree},
+    mirror::{Mirrors, Step, Worktree},
     prompt,
 };
 
@@ -130,6 +130,7 @@ impl ReviewRunner {
                 &req.head_sha,
                 &req.base_sha,
                 &dest,
+                |_| {},
             )
             .await?;
         let claude = Claude::new(settings.claude.clone(), settings.timeout);
@@ -162,8 +163,14 @@ impl ReviewRunner {
     }
 
     /// Checks `run`'s head out again where the review ran, for a chat that
-    /// resumes its session; see [`chat::ChatCommand`].
-    pub async fn chat_worktree(&self, run: &QueuedRun, git_url: &str) -> Result<Worktree> {
+    /// resumes its session; see [`chat::ChatCommand`]. Tells `progress`
+    /// each step of the checkout as it starts.
+    pub async fn chat_worktree(
+        &self,
+        run: &QueuedRun,
+        git_url: &str,
+        progress: impl FnMut(Step),
+    ) -> Result<Worktree> {
         let req = &run.request;
         self.mirrors
             .checkout(
@@ -172,6 +179,7 @@ impl ReviewRunner {
                 &req.head_sha,
                 &req.base_sha,
                 &self.worktree_path(run),
+                progress,
             )
             .await
     }
