@@ -67,6 +67,7 @@ pub struct Config {
     pub poll: PollSettings,
     pub review_requests: ReviewRequestSettings,
     pub runner: RunnerSettings,
+    pub tui: TuiSettings,
     /// In file order; earlier profiles win ties when matching.
     pub profiles: Vec<Profile>,
 }
@@ -180,6 +181,34 @@ pub struct RunnerSettings {
     /// doesn't review every outstanding request at once. On unless the
     /// config turns it off.
     pub manual_reviews: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct TuiSettings {
+    /// How text fields take keys; `None` leaves it to a guess from the
+    /// shell's settings.
+    pub keys: Option<Keys>,
+}
+
+/// Which editing keys a text field takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Keys {
+    /// Readline's defaults: Ctrl-A, Ctrl-E, Alt-F and the rest.
+    Emacs,
+    /// Typing inserts; Esc goes to normal mode for vi's motions.
+    Vi,
+}
+
+impl Keys {
+    /// As the config writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Emacs => "emacs",
+            Self::Vi => "vi",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -513,6 +542,7 @@ impl Config {
                 read_paths,
                 manual_reviews: raw.runner.manual_reviews.unwrap_or(DEFAULT_MANUAL_REVIEWS),
             },
+            tui: TuiSettings { keys: raw.tui.keys },
             profiles,
         })
     }
@@ -739,6 +769,8 @@ struct RawConfig {
     #[serde(default)]
     runner: RawRunner,
     #[serde(default)]
+    tui: RawTui,
+    #[serde(default)]
     profile: IndexMap<String, RawProfile>,
 }
 
@@ -759,6 +791,12 @@ struct RawRunner {
     read_paths: Vec<String>,
     model: Option<String>,
     manual_reviews: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawTui {
+    keys: Option<Keys>,
 }
 
 #[derive(Deserialize, Default)]
@@ -908,6 +946,16 @@ mod tests {
             ),
             "{why}"
         );
+    }
+
+    #[test]
+    fn tui_keys_are_emacs_or_vi_or_left_to_guess() {
+        assert_eq!(parse(EXAMPLE).unwrap().tui.keys, None);
+        let vi = format!("[tui]\nkeys = \"vi\"\n{EXAMPLE}");
+        assert_eq!(parse(&vi).unwrap().tui.keys, Some(Keys::Vi));
+        let vim = format!("[tui]\nkeys = \"vim\"\n{EXAMPLE}");
+        let err = format!("{:#}", parse(&vim).unwrap_err());
+        assert!(err.contains("expected `emacs` or `vi`"), "{err}");
     }
 
     #[test]

@@ -3,7 +3,7 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ manual_reviews = true                                                        │"
+"│ # keys = "emacs"                                                   (guessed) │"
 "│  ┌ Watch in [profile.ring] ───────────────────────────────────────────────┐  │"
 "│ [│ checkouts under /src, 2 deep                                           │  │"
 "│ #│                                                                        │  │"

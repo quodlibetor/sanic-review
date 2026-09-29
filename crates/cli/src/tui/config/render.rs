@@ -123,9 +123,7 @@ impl ConfigEditor {
     /// What's being typed into `into`, with a cursor, if it is.
     fn typed(&self, into: &Input) -> Option<Line<'static>> {
         match &self.typing {
-            Some(Typing { into: now, text }) if now == into => {
-                Some(Line::from(vec![Span::raw(text.clone()), "▏".slow_blink()]))
-            }
+            Some(Typing { into: now, field }) if now == into => Some(field.line()),
             _ => None,
         }
     }
@@ -433,6 +431,10 @@ impl ConfigEditor {
                     Fallback::Inherits(table, name) => format!("(from {table}.{name})"),
                     _ => "(default)".into(),
                 },
+            ),
+            Shown::Guessed => (
+                quoted(field.kind, self.guessed_keys.name()),
+                "(guessed)".into(),
             ),
             Shown::Required => {
                 return Line::from(Span::styled(
@@ -954,15 +956,24 @@ impl ConfigEditor {
             (Some(notice), _, _) => {
                 Line::from(Span::styled(notice.clone(), Style::new().fg(Color::Yellow)))
             }
-            (None, Some(_), _) => fitted_hints(
-                room,
-                &[
-                    ("↵", "set"),
-                    ("blank", "unsets"),
-                    ("Esc", "cancel"),
-                    ("Tab", "complete"),
-                ],
-            ),
+            (None, Some(typing), _) => {
+                let esc = typing.field.esc_does();
+                let mode = typing.field.mode().map(|mode| format!("-- {mode} --  "));
+                let label = mode.as_deref().map_or(0, |mode| mode.chars().count());
+                let mut hints = fitted_hints(
+                    room.saturating_sub(label),
+                    &[
+                        ("↵", "set"),
+                        ("blank", "unsets"),
+                        ("Esc", esc),
+                        ("Tab", "complete"),
+                    ],
+                );
+                if let Some(mode) = mode {
+                    hints.spans.insert(0, Span::raw(mode).bold());
+                }
+                hints
+            }
             (None, None, Some(_)) => fitted_hints(
                 room,
                 &[
@@ -1450,7 +1461,10 @@ fn render_help(frame: &mut Frame<'_>) {
         .collect();
     lines.push(Line::raw(""));
     lines.push(Line::raw(" Typing: Enter sets, a blank unsets or removes, Esc cancels,").dim());
-    lines.push(Line::raw(" Ctrl-U clears, Tab completes a path or a model.").dim());
+    lines.push(Line::raw(" Tab completes a path or a model. Fields take readline's emacs").dim());
+    lines
+        .push(Line::raw(" keys, or vi's with [tui] keys = \"vi\": Esc goes to normal mode,").dim());
+    lines.push(Line::raw(" and Esc there cancels.").dim());
     render_popup(frame, " Config editor keys ", lines);
 }
 

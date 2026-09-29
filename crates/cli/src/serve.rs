@@ -204,6 +204,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             Shared {
                 me: me.clone(),
                 manual_reviews: live.manual_reviews.subscribe(),
+                guessed_keys: crate::tui::guessed_keys(),
                 logs,
                 due,
                 skips: live.skips.subscribe(),

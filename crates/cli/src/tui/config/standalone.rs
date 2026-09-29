@@ -10,7 +10,7 @@ use sanic_core::config::CheckoutResolver;
 use sanic_github::Client;
 use tokio::sync::watch;
 
-use super::{Outcome, counts::Counter, host::Host};
+use super::{Outcome, counts::Counter, field::guessed_keys, host::Host};
 use crate::tui::{TICK, init_terminal};
 
 /// Whether the editor wrote the file before it closed.
@@ -40,11 +40,14 @@ pub fn edit(
     runtime: tokio::runtime::Handle,
     until: Until,
 ) -> Result<Edited> {
-    let (mut editor, host) = Host::open(path, resolver).map_err(|why| eyre!(why))?;
+    let path = path.to_owned();
     // Its own thread, named as the TUI's, so a panic restores the terminal.
+    // The editor's made there, as it can't be sent to it.
     let thread = std::thread::Builder::new()
         .name("tui".into())
         .spawn(move || -> Result<Edited> {
+            let (mut editor, host) =
+                Host::open(&path, resolver, guessed_keys()).map_err(|why| eyre!(why))?;
             // Nothing pauses these counts: no poller shares the token.
             let (_pause, paused) = watch::channel(None);
             let counter = github.map(|github| Counter::start(&runtime, github, paused));

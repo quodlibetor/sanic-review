@@ -32,12 +32,19 @@ pub enum Table {
     Poll,
     ReviewRequests,
     Runner,
+    Tui,
     Profile(String),
 }
 
 impl Table {
     /// The tables every config has, in the order the editor lists them.
-    pub const SECTIONS: [Self; 4] = [Self::Github, Self::Poll, Self::ReviewRequests, Self::Runner];
+    pub const SECTIONS: [Self; 5] = [
+        Self::Github,
+        Self::Poll,
+        Self::ReviewRequests,
+        Self::Runner,
+        Self::Tui,
+    ];
 
     #[must_use]
     pub fn fields(&self) -> &'static [Field] {
@@ -46,6 +53,7 @@ impl Table {
             Self::Poll => schema::POLL,
             Self::ReviewRequests => schema::REVIEW_REQUESTS,
             Self::Runner => schema::RUNNER,
+            Self::Tui => schema::TUI,
             Self::Profile(_) => schema::PROFILE,
         }
     }
@@ -56,6 +64,7 @@ impl Table {
             Self::Poll => Some("poll"),
             Self::ReviewRequests => Some("review_requests"),
             Self::Runner => Some("runner"),
+            Self::Tui => Some("tui"),
             Self::Profile(_) => None,
         }
     }
@@ -1231,7 +1240,9 @@ repos = [{ github = "org" }]
         for table in Table::SECTIONS.into_iter().chain([profile("p")]) {
             writeln!(text, "[{table}]").unwrap();
             for field in table.fields() {
+                let choice = field.choices.first().map(|c| format!("{c:?}"));
                 let value = match (field.name, field.kind) {
+                    _ if choice.is_some() => choice.as_deref().unwrap(),
                     ("model", _) => "\"auto\"",
                     ("repos", _) => "[{ github = \"org\" }]",
                     (_, Kind::Text) => "\"x\"",
@@ -1244,6 +1255,19 @@ repos = [{ github = "org" }]
         }
         Config::parse(&text, Path::new("/"), &NoCheckouts).unwrap();
         assert_eq!(Key::new(Table::Runner, "bogus"), None);
+        // Each choice loads, and only those do.
+        for table in Table::SECTIONS {
+            for field in table.fields().iter().filter(|f| !f.choices.is_empty()) {
+                for choice in field.choices.iter().chain(&["bogus"]) {
+                    let text = format!(
+                        "[{table}]\n{} = {choice:?}\n[profile.p]\nrepos = [{{ github = \"org\" }}]\n",
+                        field.name
+                    );
+                    let loads = Config::parse(&text, Path::new("/"), &NoCheckouts).is_ok();
+                    assert_eq!(loads, *choice != "bogus", "{text}");
+                }
+            }
+        }
     }
 
     #[test]

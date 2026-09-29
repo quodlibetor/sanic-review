@@ -49,8 +49,8 @@ fn ctrl(editor: &mut ConfigEditor, c: char) -> Outcome {
     editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
 }
 
-fn text(editor: &ConfigEditor) -> Option<&str> {
-    editor.typing.as_ref().map(|t| t.text.as_str())
+fn text(editor: &ConfigEditor) -> Option<String> {
+    editor.typing.as_ref().map(|t| t.field.text())
 }
 
 fn typed(editor: &mut ConfigEditor, text: &str) {
@@ -87,7 +87,7 @@ fn shows_every_key_with_defaults_for_the_unset_ones() {
     select(&mut editor, 1, 2);
     insta::assert_snapshot!(draw(&editor).backend());
     // A profile's unset keys show what they inherit.
-    select(&mut editor, 4, 2);
+    select(&mut editor, 5, 2);
     insta::assert_snapshot!("profile", draw(&editor).backend());
 }
 
@@ -96,10 +96,10 @@ fn numbers_are_typed_set_and_unset_then_checked() {
     let mut editor = editor(CONFIG);
     select(&mut editor, 1, 2);
     assert_eq!(press(&mut editor, KeyCode::Enter), Outcome::Open);
-    assert_eq!(text(&editor), Some("30"));
+    assert_eq!(text(&editor).as_deref(), Some("30"));
     let _ = ctrl(&mut editor, 'u');
     typed(&mut editor, "4x5");
-    assert_eq!(text(&editor), Some("45"), "only digits");
+    assert_eq!(text(&editor).as_deref(), Some("45"), "only digits");
     let Outcome::Check { text, .. } = press(&mut editor, KeyCode::Enter) else {
         panic!("no check");
     };
@@ -122,6 +122,55 @@ fn numbers_are_typed_set_and_unset_then_checked() {
     typed(&mut editor, "9");
     assert_eq!(press(&mut editor, KeyCode::Esc), Outcome::Open);
     assert_eq!(editor.doc.ops().len(), 2);
+}
+
+#[test]
+fn fields_take_vi_keys_when_the_config_or_the_guess_says_so() {
+    let screen = |editor: &ConfigEditor| draw(editor).backend().to_string();
+    // Unset, the guess counts.
+    let mut editor = editor(CONFIG);
+    editor.set_guessed_keys(Keys::Vi);
+    select(&mut editor, 1, 2);
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(
+        screen(&editor).contains("-- INSERT --"),
+        "{}",
+        screen(&editor)
+    );
+    assert!(screen(&editor).contains("Esc normal mode"));
+    // The first Esc is vi's, to normal mode; `0` then `x` edit there.
+    let _ = press(&mut editor, KeyCode::Esc);
+    assert!(screen(&editor).contains("-- NORMAL --"));
+    assert!(screen(&editor).contains("Esc cancel"));
+    typed(&mut editor, "0x");
+    assert_eq!(
+        text(&editor).as_deref(),
+        Some("0"),
+        "x deletes, not a digit"
+    );
+    insta::assert_snapshot!("vi_normal", draw(&editor).backend());
+    // The second Esc leaves, setting nothing.
+    let _ = press(&mut editor, KeyCode::Esc);
+    assert_eq!(text(&editor), None);
+    assert!(!editor.doc.is_changed());
+
+    // The config's own setting beats the guess, and takes effect on the
+    // next field typed into.
+    let mut editor = self::editor(&format!("[tui]\nkeys = \"emacs\"\n{CONFIG}"));
+    editor.set_guessed_keys(Keys::Vi);
+    select(&mut editor, 1, 2);
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert!(!screen(&editor).contains("-- INSERT --"));
+    let _ = ctrl(&mut editor, 'a');
+    typed(&mut editor, "1");
+    assert_eq!(text(&editor).as_deref(), Some("130"));
+    // A number field refuses letters, not Alt's moves.
+    let _ = press(&mut editor, KeyCode::End);
+    let _ = editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+    typed(&mut editor, "2");
+    assert_eq!(text(&editor).as_deref(), Some("2130"));
+    assert_eq!(press(&mut editor, KeyCode::Esc), Outcome::Open);
+    assert_eq!(text(&editor), None, "Esc cancels at once");
 }
 
 #[test]
@@ -321,7 +370,7 @@ fn list_items_are_added_edited_moved_and_removed() {
 fn repo_entries_open_switch_kind_and_take_globs() {
     let mut editor = editor(CONFIG);
     // profile.ring's repos, after its name and six keys.
-    select(&mut editor, 4, 7);
+    select(&mut editor, 5, 7);
     let _ = press(&mut editor, KeyCode::Enter);
     assert!(editor.entry.is_some());
     // github → checkout, which needs a path.
@@ -459,14 +508,14 @@ fn tab_completes_paths_as_they_are_typed() {
     std::fs::create_dir_all(dir.path().join("skills/review")).unwrap();
     let mut editor = editor(CONFIG);
     // profile.ring's skills.
-    select(&mut editor, 4, 2);
+    select(&mut editor, 5, 2);
     let _ = press(&mut editor, KeyCode::Char('+'));
     typed(&mut editor, &format!("{}/sk", dir.path().display()));
     let _ = press(&mut editor, KeyCode::Tab);
     let _ = press(&mut editor, KeyCode::Tab);
     assert_eq!(
         text(&editor),
-        Some(format!("{}/skills/review/", dir.path().display()).as_str())
+        Some(format!("{}/skills/review/", dir.path().display()))
     );
     // Only paths complete.
     let _ = press(&mut editor, KeyCode::Esc);
@@ -474,7 +523,7 @@ fn tab_completes_paths_as_they_are_typed() {
     let _ = press(&mut editor, KeyCode::Enter);
     typed(&mut editor, "/");
     let _ = press(&mut editor, KeyCode::Tab);
-    assert_eq!(text(&editor), Some("/"));
+    assert_eq!(text(&editor).as_deref(), Some("/"));
 }
 
 #[test]
@@ -505,7 +554,7 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
         "repos = [{ github = \"org\" }, { github = \"org/api\", paths = [\"v/**\"] }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 4, 7);
+    select(&mut editor, 5, 7);
     let now = SystemTime::UNIX_EPOCH;
     let wanted = editor.want(now);
     insta::assert_snapshot!("counting", draw(&editor).backend());
@@ -650,7 +699,7 @@ fn entry_counts_follow_their_entry_and_skip_ones_not_yet_loaded() {
         "repos = [{ github = \"org\" }, { github = \"else/api\" }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 4, 8);
+    select(&mut editor, 5, 8);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let covers = |editor: &ConfigEditor, n| {
         editor
@@ -714,7 +763,7 @@ fn entries_on_one_checkout_through_two_remotes_keep_their_own_counts() {
     };
     let path = Path::new("/c/config.toml");
     editor.checked(generation, check::check(&text, path, &ByRemote));
-    select(&mut editor, 4, 8);
+    select(&mut editor, 5, 8);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let scope = |n| {
         editor
@@ -769,7 +818,7 @@ fn f_on_repos_suggests_orgs_and_scans_for_checkouts() {
         Query::Orgs,
         Answer::Orgs(vec!["org".into(), "other".into()]),
     );
-    select(&mut editor, 4, 7);
+    select(&mut editor, 5, 7);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -827,13 +876,13 @@ fn models_are_suggested_and_complete_as_typed() {
     let _ = ctrl(&mut editor, 'u');
     typed(&mut editor, "Cl");
     let _ = press(&mut editor, KeyCode::Tab);
-    assert_eq!(text(&editor), Some("claude-sonnet-5"));
+    assert_eq!(text(&editor).as_deref(), Some("claude-sonnet-5"));
 }
 
 #[test]
 fn f_on_skills_asks_for_whats_in_the_checkouts_and_adds_what_you_pick() {
     let mut editor = editor(CONFIG);
-    select(&mut editor, 4, 2);
+    select(&mut editor, 5, 2);
     let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
         panic!("nothing to find");
     };
@@ -868,7 +917,7 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
         Answer::Orgs(vec!["ORG".into(), "Other".into()]),
     );
     // A profile's repos: orgs you're in are matched without case.
-    select(&mut editor, 4, 7);
+    select(&mut editor, 5, 7);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -900,7 +949,7 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
 
     // Skills a closed popup asked for don't land on another profile's.
     let _ = press(&mut editor, KeyCode::Esc);
-    select(&mut editor, 4, 2);
+    select(&mut editor, 5, 2);
     let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
         panic!("nothing to find");
     };

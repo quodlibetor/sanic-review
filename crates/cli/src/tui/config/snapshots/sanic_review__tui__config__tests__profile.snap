@@ -3,10 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # the `claude` executable; a bare name is looked up on PATH                  │"
-"│ # claude = "claude"                                                (default) │"
-"│ # agent runs at once, across all PRs                                         │"
-"│ # max_concurrent = 2                                               (default) │"
 "│ # seconds before a run is killed                                             │"
 "│ # timeout_secs = 1800                                              (default) │"
 "│ # more directories the agent may read                                        │"
@@ -15,6 +11,10 @@ expression: draw(&editor).backend()
 "│ # model = "auto"                                                   (default) │"
 "│ # hold queued reviews until you start them                                   │"
 "│ manual_reviews = true                                                        │"
+"│                                                                              │"
+"│ [tui]                                                                        │"
+"│ # `emacs` or `vi` keys in text fields; unset, guessed from readline and $EDI │"
+"│ # keys = "emacs"                                                   (guessed) │"
 "│                                                                              │"
 "│ [profile.ring]                                                               │"
 "│ # files whose text goes in the agent's system prompt                         │"

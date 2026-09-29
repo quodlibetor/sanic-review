@@ -24,6 +24,8 @@ clap = { version = "4.6", features = ["derive"] }
 color-eyre = "0.6"
 # Markdown only: the dashboard highlights code blocks itself.
 comrak = { version = "0.55", default-features = false }
+# The config editor's text fields: no system clipboard or highlighting.
+edtui = { version = "0.11", default-features = false }
 getrandom = "0.4"
 globset = "0.4"
 http-body-util = "0.1"

@@ -6,11 +6,13 @@ mod check;
 mod complete;
 pub mod counts;
 pub mod discover;
+pub mod field;
 pub mod host;
 mod render;
 mod rows;
 pub mod standalone;
 mod suggest;
+mod vi;
 
 use std::{
     collections::HashMap,
@@ -20,10 +22,11 @@ use std::{
 
 use color_eyre::eyre::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sanic_core::config::contract_path;
+use sanic_core::config::{Keys, contract_path};
 
 pub use self::check::{Checked, Checker};
 use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
+use self::field::{TextField, Took};
 use self::rows::{
     EntryEdit, EntryRow, KINDS, Row, Shown, all_rows, entries, items, scalar_text, shown,
 };
@@ -72,6 +75,8 @@ pub struct ConfigEditor {
     saving: bool,
     /// Models to suggest and complete.
     models: Vec<String>,
+    /// The keys text fields take when the config doesn't say.
+    guessed_keys: Keys,
     /// Why nothing's counted, when that's so from the start.
     offline: Option<String>,
     /// A save has been written.
@@ -94,7 +99,7 @@ pub enum Check {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Typing {
     into: Input,
-    text: String,
+    field: TextField,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +183,7 @@ impl ConfigEditor {
             serve_window: None,
             saving: false,
             models: Vec::new(),
+            guessed_keys: Keys::Emacs,
             offline: None,
             wrote: false,
         }
@@ -227,7 +233,7 @@ impl ConfigEditor {
             Table::Profile(name) => Showing::Profile(name),
             Table::ReviewRequests => Showing::ReviewRequests(&teams),
             Table::Poll => Showing::Poll,
-            Table::Github | Table::Runner => Showing::Other,
+            Table::Github | Table::Runner | Table::Tui => Showing::Other,
         };
         self.plan = Plan::new(watched, showing, now);
         self.wanted = self.plan.queries();
@@ -286,6 +292,12 @@ impl ConfigEditor {
     /// The models `f` suggests and Tab completes for a `model`.
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
+    }
+
+    /// The keys text fields take when the config doesn't say; see
+    /// [`guess_keys`].
+    pub fn set_guessed_keys(&mut self, keys: Keys) {
+        self.guessed_keys = keys;
     }
 
     /// What [`Outcome::Find`] found.
@@ -494,7 +506,7 @@ impl ConfigEditor {
             KeyCode::Char('d') if repos => {
                 let root = suggest.root.clone();
                 self.popup = Some(Popup::Suggest(suggest));
-                self.start_typing(Input::ScanRoot, root);
+                self.start_typing(Input::ScanRoot, &root);
                 return Outcome::Open;
             }
             KeyCode::Char('<') if repos => suggest.depth = suggest.depth.saturating_sub(1),
@@ -743,30 +755,30 @@ impl ConfigEditor {
         Outcome::Open
     }
 
-    fn start_typing(&mut self, into: Input, text: String) {
-        self.typing = Some(Typing { into, text });
+    fn start_typing(&mut self, into: Input, text: &str) {
+        let field = TextField::new(text, self.keys());
+        self.typing = Some(Typing { into, field });
+    }
+
+    /// The keys text fields take: the config's, as edited, or the guess.
+    fn keys(&self) -> Keys {
+        let set = Key::new(Table::Tui, "keys").and_then(|key| match self.doc.scalar(&key) {
+            Setting::Set(Scalar::Text(keys)) => match keys.as_str() {
+                "emacs" => Some(Keys::Emacs),
+                "vi" => Some(Keys::Vi),
+                _ => None,
+            },
+            _ => None,
+        });
+        set.unwrap_or(self.guessed_keys)
     }
 
     fn typing_key(&mut self, mut typing: Typing, key: KeyEvent) -> Outcome {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let number = matches!(&typing.into, Input::Scalar(k) if k.field().kind == Kind::Number);
         match key.code {
-            KeyCode::Esc => {
-                // The row being added goes, so step back onto the one before.
-                match typing.into {
-                    Input::NewItem(_) => self.row = self.row.saturating_sub(1),
-                    Input::Entry(EntryRow::NewGlob) => {
-                        self.with_entry(|edit| edit.row = edit.row.saturating_sub(1));
-                    }
-                    _ => {}
-                }
-                return Outcome::Open;
-            }
-            KeyCode::Enter => return self.commit(&typing.into, typing.text.trim()),
-            KeyCode::Char('u') if ctrl => typing.text.clear(),
             KeyCode::Tab if matches!(&typing.into, Input::Scalar(k) if k.name == "model") => {
-                if let Some(done) = complete_model(&self.models, &typing.text) {
-                    typing.text = done;
+                if let Some(done) = complete_model(&self.models, &typing.field.text()) {
+                    typing.field.set_text(&done);
                 }
             }
             KeyCode::Tab if self.completes_paths(&typing.into) => {
@@ -781,15 +793,34 @@ impl ConfigEditor {
                     self.path.parent().unwrap_or(Path::new("."))
                 };
                 let home = std::env::home_dir();
-                if let Some(done) = complete::complete_path(&typing.text, base, home.as_deref()) {
-                    typing.text = done;
+                let typed = typing.field.text();
+                if let Some(done) = complete::complete_path(&typed, base, home.as_deref()) {
+                    typing.field.set_text(&done);
                 }
             }
-            KeyCode::Char(c) if !ctrl && (!number || c.is_ascii_digit()) => typing.text.push(c),
-            KeyCode::Backspace => {
-                typing.text.pop();
-            }
-            _ => {}
+            // A tab is never part of a value.
+            KeyCode::Tab => {}
+            _ if number
+                && typing
+                    .field
+                    .inserts(key)
+                    .is_some_and(|c| !c.is_ascii_digit()) => {}
+            _ => match typing.field.key(key) {
+                Took::Edit => {}
+                Took::Commit => return self.commit(&typing.into, typing.field.text().trim()),
+                Took::Cancel => {
+                    // The row being added goes, so step back onto the one
+                    // before.
+                    match typing.into {
+                        Input::NewItem(_) => self.row = self.row.saturating_sub(1),
+                        Input::Entry(EntryRow::NewGlob) => {
+                            self.with_entry(|edit| edit.row = edit.row.saturating_sub(1));
+                        }
+                        _ => {}
+                    }
+                    return Outcome::Open;
+                }
+            },
         }
         self.typing = Some(typing);
         Outcome::Open
@@ -811,21 +842,21 @@ impl ConfigEditor {
     fn edit(&mut self) -> Outcome {
         match self.current_row() {
             Some(Row::Header(Table::Profile(name))) => {
-                self.start_typing(Input::Rename(name.clone()), name);
+                self.start_typing(Input::Rename(name.clone()), &name);
             }
             Some(Row::Header(_)) => self.move_by(1),
-            Some(Row::NewProfile) => self.start_typing(Input::NewProfile, String::new()),
+            Some(Row::NewProfile) => self.start_typing(Input::NewProfile, ""),
             Some(Row::Scalar(key)) if key.field().kind == Kind::Bool => return self.toggle(),
             Some(Row::Scalar(key)) => {
                 let text = match self.doc.scalar(&key) {
                     Setting::Set(value) => scalar_text(&value),
                     Setting::Unset | Setting::Invalid(_) => String::new(),
                 };
-                self.start_typing(Input::Scalar(key), text);
+                self.start_typing(Input::Scalar(key), &text);
             }
             Some(Row::Item(key, n)) => {
                 let text = items(&self.doc, &key).get(n).cloned().unwrap_or_default();
-                self.start_typing(Input::Item(key, n), text);
+                self.start_typing(Input::Item(key, n), &text);
             }
             Some(Row::List(_) | Row::NewItem(_) | Row::NoEntries(_)) => self.add(),
             Some(Row::Entry(profile, n)) => match entries(&self.doc, &profile).get(n) {
@@ -853,7 +884,7 @@ impl ConfigEditor {
     fn add(&mut self) {
         match self.current_row() {
             Some(Row::Item(key, _) | Row::List(key) | Row::NewItem(key)) => {
-                self.start_typing(Input::NewItem(key.clone()), String::new());
+                self.start_typing(Input::NewItem(key.clone()), "");
                 if let Some(at) = self
                     .rows()
                     .iter()
@@ -874,10 +905,10 @@ impl ConfigEditor {
                     set_aside: String::new(),
                     globs_aside: Vec::new(),
                 });
-                self.start_typing(Input::Entry(EntryRow::Target), String::new());
+                self.start_typing(Input::Entry(EntryRow::Target), "");
             }
             Some(Row::Header(Table::Profile(_)) | Row::NewProfile) => {
-                self.start_typing(Input::NewProfile, String::new());
+                self.start_typing(Input::NewProfile, "");
                 self.select(&Row::NewProfile);
             }
             _ => {
@@ -1088,7 +1119,7 @@ impl ConfigEditor {
                 Kind::Number => {
                     let Ok(n) = text.parse() else {
                         self.notice = Some(format!("{text} is too big for `{key}`"));
-                        self.start_typing(Input::Scalar(key), text.to_owned());
+                        self.start_typing(Input::Scalar(key), text);
                         return Outcome::Open;
                     };
                     Scalar::Number(n)
@@ -1113,7 +1144,7 @@ impl ConfigEditor {
         }
         let now = match shown(&self.doc, &key) {
             Shown::Set(value) | Shown::Default(value) => value == "true",
-            Shown::Invalid(_) | Shown::Required => false,
+            Shown::Guessed | Shown::Invalid(_) | Shown::Required => false,
         };
         self.apply(Op::Set {
             key,
@@ -1173,15 +1204,14 @@ impl ConfigEditor {
             }
             KeyCode::Enter => match current {
                 EntryRow::Target => {
-                    self.start_typing(Input::Entry(current), edit.target().to_owned());
+                    self.start_typing(Input::Entry(current), edit.target());
                 }
-                EntryRow::Remote => self.start_typing(
-                    Input::Entry(current),
-                    edit.remote().unwrap_or_default().to_owned(),
-                ),
+                EntryRow::Remote => {
+                    self.start_typing(Input::Entry(current), edit.remote().unwrap_or_default());
+                }
                 EntryRow::Glob(n) => self.start_typing(
                     Input::Entry(current),
-                    edit.globs().get(n).cloned().unwrap_or_default(),
+                    edit.globs().get(n).map_or("", String::as_str),
                 ),
                 EntryRow::NoGlobs | EntryRow::NewGlob => self.add_glob(&edit),
                 EntryRow::Kind => {}
@@ -1217,7 +1247,7 @@ impl ConfigEditor {
                 Some("a plain checkout has no globs: switch it to checkout + paths".into());
             return;
         }
-        self.start_typing(Input::Entry(EntryRow::NewGlob), String::new());
+        self.start_typing(Input::Entry(EntryRow::NewGlob), "");
         let rows = edit.rows(true);
         self.with_entry(|edit| edit.row = rows.len() - 1);
     }

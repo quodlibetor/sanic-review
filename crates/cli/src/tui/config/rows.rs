@@ -96,6 +96,8 @@ pub enum Shown {
     Set(String),
     /// Unset: what it means then, from its default or the key it inherits.
     Default(String),
+    /// Unset, and what it means then is the editor's guess.
+    Guessed,
     Invalid(String),
     Required,
 }
@@ -141,6 +143,7 @@ pub fn shown(doc: &ConfigDoc, key: &Key) -> Shown {
                 })
             }
             Fallback::Required => Shown::Required,
+            Fallback::Guessed => Shown::Guessed,
         },
     }
 }

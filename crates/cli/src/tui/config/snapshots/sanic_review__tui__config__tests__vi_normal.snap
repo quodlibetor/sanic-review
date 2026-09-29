@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: draw(&editor).backend()
+---
+"┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
+"│ [github]                                                                     │"
+"│ # GitHub's API, e.g. through a proxy; `serve` reads it only at startup       │"
+"│ # api_url = "https://api.github.com"                               (default) │"
+"│ # where repo mirrors fetch from                                              │"
+"│ # git_url = "https://github.com"                                   (default) │"
+"│                                                                              │"
+"│ # Mine.                                                                      │"
+"│ [poll]                                                                       │"
+"│ # seconds between the GraphQL searches that catch what notifications miss    │"
+"│ # reconcile_secs = 300                                             (default) │"
+"│ # fewest seconds between notification polls; GitHub can ask for more         │"
+"│ # min_notification_secs = 60                                       (default) │"
+"│ # seconds a PR must go quiet before its review starts                        │"
+"│ quiet_secs = 0                                                               │"
+"│ # ignore PRs quiet for longer; 0 is no limit                                 │"
+"│ # updated_within_days = 14                                         (default) │"
+"│                                                                              │"
+"│ poll.quiet_secs ─────────────────────────────────────────────────────────────│"
+"│ Seconds a PR must go quiet before its review starts.                         │"
+"│ Type a whole number; a blank unsets it.                                      │"
+"│──────────────────────────────────────────────────────────────────────────────│"
+"│ ✓ loads          -- NORMAL --  ↵ set  blank unsets  Esc cancel  Tab complete │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

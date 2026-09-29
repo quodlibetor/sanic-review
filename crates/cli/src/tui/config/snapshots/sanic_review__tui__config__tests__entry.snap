@@ -3,7 +3,7 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic. 4 unsaved ┐"
-"│ manual_reviews = true                                                        │"
+"│ # keys = "emacs"                                                   (guessed) │"
 "│                                                                              │"
 "│ [profile.ring]                                                               │"
 "│ # files whose text goes in the agent's system prompt                         │"

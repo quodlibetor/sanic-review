@@ -36,7 +36,7 @@ use ratatui::{
 };
 use sanic_core::{
     clock::{Clock, window_start},
-    config::{CheckoutResolver, Unloadable},
+    config::{CheckoutResolver, Keys, Unloadable},
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
     start::Why,
@@ -46,6 +46,7 @@ use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
+pub use self::config::field::guessed_keys;
 pub(crate) use self::config::standalone;
 pub use self::layout::Sizes;
 use self::{
@@ -194,6 +195,9 @@ pub struct Shared {
     pub me: String,
     /// `runner.manual_reviews`, as the config last loaded.
     pub manual_reviews: watch::Receiver<bool>,
+    /// The keys text fields take where the config doesn't say, guessed
+    /// once as `serve` starts.
+    pub guessed_keys: Keys,
     pub logs: LogLines,
     /// When the scheduler will queue each debounced review.
     pub due: watch::Receiver<DueTimes>,
@@ -437,7 +441,11 @@ fn run(
 
 /// `e`: opens the config editor, or says why it can't.
 fn open_editor(app: &mut App, shared: &Shared) -> Option<Host> {
-    match Host::open(&shared.config_path, Arc::clone(&shared.resolver)) {
+    match Host::open(
+        &shared.config_path,
+        Arc::clone(&shared.resolver),
+        shared.guessed_keys,
+    ) {
         Ok((editor, host)) => {
             app.overlay = Some(Overlay::Config(Box::new(editor)));
             Some(host)
@@ -2084,6 +2092,7 @@ mod tests {
         let shared = Shared {
             me: "me".into(),
             manual_reviews: watch::channel(false).1,
+            guessed_keys: Keys::Emacs,
             logs: LogLines::default(),
             due: watch::channel(DueTimes::new()).1,
             skips: watch::channel(SkipRules::default()).1,
@@ -2394,8 +2403,8 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('e'))), Flow::EditConfig);
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let (mut editor, _host) =
-            Host::open(&path, Arc::new(NoCheckouts)).expect("a missing file opens as a new one");
+        let (mut editor, _host) = Host::open(&path, Arc::new(NoCheckouts), Keys::Emacs)
+            .expect("a missing file opens as a new one");
         let config::Outcome::Check { generation, .. } = editor.check_now() else {
             panic!("no check");
         };
@@ -2419,7 +2428,7 @@ mod tests {
         assert!(app.editor_mut().is_none());
 
         std::fs::write(&path, "[runner").unwrap();
-        let Err(notice) = Host::open(&path, Arc::new(NoCheckouts)) else {
+        let Err(notice) = Host::open(&path, Arc::new(NoCheckouts), Keys::Emacs) else {
             panic!("opened a file that isn't TOML");
         };
         assert!(notice.contains("isn't valid TOML"), "{notice}");

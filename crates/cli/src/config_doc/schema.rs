@@ -32,6 +32,8 @@ pub enum Fallback {
     Inherits(Table, &'static str),
     /// The key has to be set.
     Required,
+    /// A guess from outside the file, which the editor makes.
+    Guessed,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,8 @@ pub struct Field {
     pub help: &'static str,
     /// Holds paths, which typing completes.
     pub paths: bool,
+    /// The only values it takes, when it's one of a few.
+    pub choices: &'static [&'static str],
 }
 
 impl Field {
@@ -52,11 +56,17 @@ impl Field {
             fallback,
             help,
             paths: false,
+            choices: &[],
         }
     }
 
     const fn paths(mut self) -> Self {
         self.paths = true;
+        self
+    }
+
+    const fn choices(mut self, choices: &'static [&'static str]) -> Self {
+        self.choices = choices;
         self
     }
 }
@@ -164,6 +174,14 @@ pub const RUNNER: &[Field] = &[
         "hold queued reviews until you start them",
     ),
 ];
+
+pub const TUI: &[Field] = &[Field::new(
+    "keys",
+    Kind::Text,
+    Fallback::Guessed,
+    "`emacs` or `vi` keys in text fields; unset, guessed from readline and $EDITOR",
+)
+.choices(&["emacs", "vi"])];
 
 pub const PROFILE: &[Field] = &[
     Field::new(

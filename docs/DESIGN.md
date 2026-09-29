@@ -167,6 +167,9 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # model = "auto"                       # default model; see Model below
 # manual_reviews = true                # hold queued reviews until you start them
 
+[tui]
+# keys = "emacs"                       # or "vi", for text fields; unset, guessed
+
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                            # skill dirs made available to the agent
@@ -1237,9 +1240,51 @@ fonttools (run through `uv`, which only this task needs) to
   it; a profile's `repos` are always an entry a line. `j`/`k` and `g`/`G`
   move by row, a header, a key or a list item each a row, and Tab or `]`
   and Shift-Tab or `[` step from table to table. Enter edits a text or
-  number (Enter sets it, a blank unsets it, Esc cancels, Ctrl-U clears; a
-  number takes only digits), Space or Enter flips a bool from what it
-  means now, set or not, and `u` unsets a key (a whole list at once).
+  number (Enter sets it, a blank unsets it, Esc cancels; a number takes
+  only digits), Space or Enter flips a bool from what it means now, set
+  or not, and `u` unsets a key (a whole list at once). Every typed field
+  is edtui's single-line editor, drawn by the file view, with the keys
+  `tui.keys` names: `emacs`, readline's, where Ctrl-U and Ctrl-W kill
+  back to the line's and the word's start, as readline's do, and undo is
+  readline's Ctrl-X Ctrl-U rather than edtui's Ctrl-U; or `vi`, where
+  typing starts in insert mode, Esc goes to normal mode, and Esc in
+  normal mode cancels the edit, with Ctrl-W also killing a word in
+  insert mode. In normal mode, a command of more than one key is the
+  field's to run or drop whole, and edtui only ever gets whole commands
+  of one key, so it's never left waiting on half of one. The field
+  runs: an operator (`d`, `c`, `y`) doubled, or with `gg`, `G` or `_`,
+  on the whole line; with a motion (`h`, `l`, `w`, `W`, `e`, `E`, `b`,
+  `B`, `0`, `^`, `$`, and `f`, `t`, `F`, `T` and their character); and
+  with a text object (`iw`, `aw`, `iW`, `aW`, a quote's or a bracket's
+  `i` and `a`, a count taking that many words or the pair that many
+  out); those motions alone, and `gg`; `r` and its character; `x` and
+  `X`, which yank what they delete; and a register's name, which the
+  field's one clipboard stands in for. It drops an operator's other
+  motions and objects (as `dj`, `dis`, `dap`) and `g`'s other commands.
+  A count repeats `p`, `P` and `u`, and does nothing to edtui's other
+  keys. `.` repeats the last change, the field's or edtui's, but for
+  the field's `c`, whose typing edtui keeps to itself: after one, `.`
+  does nothing. Their results are vim's,
+  a test checks each against what `nvim --clean` with `startofline`
+  makes of it, and what they change goes through edtui's edits, so `u`
+  undoes it, into the clipboard edtui pastes from. Esc drops a command
+  still waiting for more, and the footer says so. A completion typed
+  over the field is an edit `u` undoes too, and keeps what's yanked;
+  typed mid-insert on from what's typed, `.` repeats it with the insert,
+  and one that takes some of it back, or one outside insert mode, leaves
+  `.` nothing to repeat, as after the field's `c`.
+  Enter sets what's typed from any mode. A number refuses
+  only a non-digit that would be typed in, so vi's normal-mode commands
+  and emacs's Alt keys still work. edtui's search is left out: a field
+  of one line has nothing to search. Unset, `tui.keys` is guessed, and
+  shows as `(guessed)`: `vi` when readline's init file (`$INPUTRC`, else
+  `~/.inputrc`) last sets `editing-mode vi`, `emacs` when it sets
+  `emacs`, and otherwise `vi` when `$VISUAL`, or `$EDITOR` when that's
+  unset or blank, names a program whose name has `vi` in it. The guess
+  is a pure function of those texts, read once where the editor runs:
+  as `serve` starts, for every time `e` opens it, or as `setup` starts.
+  The keys are chosen as each field opens, so an edit of `tui.keys` applies
+  to the next one. The footer names vi's mode and what Esc does in it.
   While a field's typed into, what it's for in full, what it is unset and
   how it's typed replace what the config does, below. On a list item,
   Enter edits it (a blank removes it), `+` adds one after the rest, `-`

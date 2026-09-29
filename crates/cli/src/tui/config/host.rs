@@ -7,7 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use sanic_core::config::{CheckoutResolver, Config};
+use sanic_core::config::{CheckoutResolver, Config, Keys};
 
 use super::{Checker, ConfigEditor, Find, Found, Outcome, counts::Counter, discover};
 use crate::{
@@ -25,10 +25,13 @@ pub struct Host {
 
 impl Host {
     /// The editor on the config file at `path`, its first check started,
-    /// or why it can't open.
+    /// or why it can't open. Its fields take `keys` where the config
+    /// doesn't say: the guess made once where it runs, so it's the same
+    /// each time it opens.
     pub fn open(
         path: &Path,
         resolver: Arc<dyn CheckoutResolver + Send + Sync>,
+        keys: Keys,
     ) -> Result<(ConfigEditor, Self), String> {
         let opened = Config::read_text(path).and_then(|text| {
             let doc = ConfigDoc::parse(text.as_deref())?;
@@ -50,6 +53,7 @@ impl Host {
                 _ => None,
             });
         editor.set_models(discover::known_models(model.as_deref()));
+        editor.set_guessed_keys(keys);
         let (found_tx, found) = mpsc::channel();
         Ok((
             editor,
