@@ -293,6 +293,7 @@ impl Dashboard {
             )
             .route("/drafts/{id}/edit", post(pr::edit_draft))
             .route("/drafts/{id}/status", post(pr::set_draft_status))
+            .route("/drafts/{id}/obsolete", post(pr::clear_obsolete))
             .route("/drafts/{id}/thread", post(pr::choose_thread))
             .route("/drafts/{id}/revise", post(pr::revise_draft))
             .route("/assets/{file}", get(assets::asset))

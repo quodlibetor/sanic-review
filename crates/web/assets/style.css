@@ -1739,7 +1739,8 @@ p.seen {
 }
 
 .dc.rejected,
-.dc.posted {
+.dc.posted,
+.dc.dismissed {
   border-left-color: var(--dim);
   color: var(--dim);
 }
@@ -1946,8 +1947,25 @@ p.seen {
   padding-left: 0.5rem;
 }
 
-.dc .dropped .why {
+.dc .dropped .why,
+.dc .obsolete .why {
   margin-top: 0.15rem;
+}
+
+.dc .obsolete {
+  margin-top: 0.4rem;
+  font-size: 13px;
+  border-left: 2px solid var(--dim);
+  padding-left: 0.5rem;
+}
+
+.dc .obsolete.flagged {
+  color: var(--fg);
+  border-left-color: var(--bad);
+}
+
+.dc .obsolete form {
+  margin-top: 0.3rem;
 }
 
 /* A draft's box reads as the text it replaces: the same font, colours and
@@ -2098,6 +2116,16 @@ p.seen {
 .overlaps {
   margin: 0.4rem 0;
   font-size: 13px;
+}
+
+/* The agent no longer stands behind a draft you accepted or edited. */
+.tag-obsolete {
+  font-size: 12px;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  text-decoration: none;
 }
 
 .tag-overlap {

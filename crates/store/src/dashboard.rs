@@ -86,6 +86,10 @@ pub struct DraftRow {
     /// Why the agent dropped it when asked to revise it, until you decide
     /// on it again.
     pub drop_reason: Option<String>,
+    /// Why a resumed push review dismissed it as obsolete: `dismissed`
+    /// until you restore it, or, accepted or edited, flagged until you
+    /// clear it.
+    pub obsolete: Option<String>,
 }
 
 /// What an accepted draft that overlaps an existing review thread posts,
@@ -216,7 +220,7 @@ const DECIDABLE: &str = "('pending', 'accepted', 'rejected')";
 const DRAFT_COLUMNS: &str = "r.repo, r.number, d.id, d.run_id, d.kind, d.path, d.line,
     d.start_line, d.side, d.severity, d.confidence, d.original_body, d.edited_body,
     d.status, d.unanchored, d.based_on, d.thread_choice, d.thread_id, d.react_to, d.note,
-    d.drop_reason";
+    d.drop_reason, d.obsolete";
 
 fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     Ok(DraftRow {
@@ -242,6 +246,7 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
         ),
         note: row.get(19)?,
         drop_reason: row.get(20)?,
+        obsolete: row.get(21)?,
     })
 }
 
@@ -350,14 +355,17 @@ impl Store {
 
     /// Accepts or rejects a draft, or puts it back to pending. Accepted
     /// this way, a comment is posted on its own, whatever thread choice it
-    /// had. Either way, it forgets why the agent dropped it, if it did.
-    /// `false` if the draft doesn't exist or is stale or posted.
+    /// had. Either way, it forgets why the agent dropped it, if it did,
+    /// and a dismissed one why the agent dismissed it. `false` if the
+    /// draft doesn't exist or is stale or posted.
     pub fn set_draft_status(&self, id: i64, status: DraftStatus) -> Result<bool> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE drafts SET status = ?2, thread_choice = NULL, thread_id = NULL,
-                     react_to = NULL, drop_reason = NULL, updated_at = {NOW}
-                 WHERE id = ?1 AND status IN {DECIDABLE}"
+                     react_to = NULL, drop_reason = NULL,
+                     obsolete = CASE WHEN status = 'dismissed' THEN NULL ELSE obsolete END,
+                     updated_at = {NOW}
+                 WHERE id = ?1 AND (status IN {DECIDABLE} OR status = 'dismissed')"
             ),
             params![id, status.as_str()],
         )?;
@@ -385,6 +393,20 @@ impl Store {
                        WHERE r.id = drafts.run_id AND c.thread_id = ?3 AND c.id = ?4))"
             ),
             params![id, kind, thread, comment],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Clears the flag saying the agent thinks draft `id` obsolete, on
+    /// one it didn't set aside as `dismissed`. `false` if it has none, or
+    /// is posted.
+    pub fn clear_obsolete(&self, id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE drafts SET obsolete = NULL, updated_at = {NOW}
+                 WHERE id = ?1 AND obsolete IS NOT NULL AND status IN {DECIDABLE}"
+            ),
+            [id],
         )?;
         Ok(changed == 1)
     }

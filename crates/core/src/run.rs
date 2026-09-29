@@ -187,6 +187,18 @@ pub struct BaselineDraft {
     /// The agent's private note on it, if it wrote one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Why the agent dismissed it as obsolete, if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obsolete: Option<String>,
+}
+
+/// An earlier draft a resumed push review no longer stands behind, and why,
+/// for the reviewer: see [`Carried`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dismissal {
+    pub id: i64,
+    pub reason: String,
 }
 
 /// The structured output of a `regenerate` run: a review whose drafts may
@@ -202,6 +214,9 @@ pub struct RevisedOutput {
     pub suggested_verdict: Verdict,
     #[serde(default)]
     pub comments: Vec<RevisedComment>,
+    /// For a resumed push review, the earlier drafts it dismisses.
+    #[serde(default)]
+    pub dismiss: Vec<Dismissal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -253,6 +268,7 @@ impl RevisedOutput {
             Basis {
                 summary: self.summary_based_on,
                 comments: based_on,
+                dismissed: self.dismiss,
             },
         )
     }
@@ -338,6 +354,8 @@ pub enum DraftRevision {
 pub struct Basis {
     pub summary: Option<i64>,
     pub comments: Vec<Option<i64>>,
+    /// For a resumed push review, the drafts it dismisses.
+    pub dismissed: Vec<Dismissal>,
 }
 
 /// What the agent suggests you do with the review. There is deliberately no

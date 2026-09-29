@@ -19,8 +19,8 @@ use sanic_core::{
     pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
-        Basis, Carried, Confidence, DraftComment, InlineComment, ReviewRequest, ReviewResult,
-        ReviewTrigger, Severity, Side, Verdict,
+        Basis, Carried, Confidence, Dismissal, DraftComment, InlineComment, ReviewRequest,
+        ReviewResult, ReviewTrigger, Severity, Side, Verdict,
     },
     skip::SkipRules,
 };
@@ -1078,7 +1078,9 @@ async fn a_run_with_no_update_is_listed_with_the_drafts_it_carried() {
                 unanchored: d.unanchored,
             })
             .collect();
-        store.finish_no_update(run, &nothing, &carried).unwrap();
+        store
+            .finish_no_update(run, &nothing, &carried, &[])
+            .unwrap();
     }
     let page = f.get("/pr/org/repo/7").await.body;
     assert!(
@@ -1097,6 +1099,137 @@ async fn a_run_with_no_update_is_listed_with_the_drafts_it_carried() {
         index.contains("no update since the review it resumed"),
         "{index}"
     );
+}
+
+/// A no-update run of 7 resuming the fixture's, which dismissed its
+/// three drafts: the summary pending, the two comments accepted.
+fn dismissed_run(f: &Fixture) -> i64 {
+    let mut store = f.dashboard.app.store();
+    store
+        .set_draft_status(f.drafts[1], DraftStatus::Accepted)
+        .unwrap();
+    store
+        .set_draft_status(f.drafts[2], DraftStatus::Accepted)
+        .unwrap();
+    let request = ReviewRequest {
+        key: key(7),
+        profile: "default".into(),
+        head_sha: "head7b".into(),
+        base_sha: "base".into(),
+        trigger: ReviewTrigger::Push {
+            from_sha: "head7".into(),
+        },
+    };
+    let run = store.queue_review(&request).unwrap().unwrap().id;
+    store.claim_run(run).unwrap();
+    let nothing = ReviewResult {
+        summary: "Only a rebase.".into(),
+        summary_note: None,
+        verdict: Verdict::None,
+        comments: vec![],
+        session_id: Some("sess-8".into()),
+        transcript_path: "t".into(),
+        resumed_from: Some(f.run),
+    };
+    let carried: Vec<Carried> = store
+        .draft_rows(f.run)
+        .unwrap()
+        .iter()
+        .map(|d| Carried {
+            draft: d.id,
+            start_line: d.start_line,
+            line: d.line,
+            unanchored: d.unanchored,
+        })
+        .collect();
+    let dismissed = [
+        Dismissal {
+            id: f.drafts[0],
+            reason: "The concern it names was resolved.".into(),
+        },
+        Dismissal {
+            id: f.drafts[1],
+            reason: "Renamed since.".into(),
+        },
+        Dismissal {
+            id: f.drafts[2],
+            reason: "Gone since.".into(),
+        },
+    ];
+    store
+        .finish_no_update(run, &nothing, &carried, &dismissed)
+        .unwrap();
+    run
+}
+
+#[tokio::test]
+async fn drafts_the_agent_dismissed_are_set_aside_or_flagged_and_warned_of() {
+    let f = fixture(false).await;
+    let run = dismissed_run(&f);
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(page.contains("✕ dismissed by the agent"), "{page}");
+    // Counted on its own, not as rejected.
+    assert!(
+        page.contains(r#"<b data-count="dismissed">1</b> dismissed by the agent"#),
+        "{page}"
+    );
+    assert!(page.contains(r#"<b data-count="rejected">0</b>"#), "{page}");
+    assert!(
+        page.contains("The concern it names was resolved."),
+        "{page}"
+    );
+    assert!(page.contains(">probably obsolete</a>"), "{page}");
+    assert!(page.contains("Renamed since."), "{page}");
+    assert!(page.contains("Gone since."), "{page}");
+    // The accepted one is posted, with a warning; the dismissed one isn't.
+    let preview = f
+        .get(&format!("/pr/org/repo/7/runs/{run}/preview?event=COMMENT"))
+        .await
+        .body;
+    assert!(
+        preview.contains("2 accepted drafts are ones the agent now thinks obsolete."),
+        "{preview}"
+    );
+    assert!(!preview.contains("Mostly fine."), "{preview}");
+    // Clearing the flag keeps it, accepted, and drops the warning.
+    let flagged = f.dashboard.app.store().draft_rows(run).unwrap()[1].id;
+    let reply = f.post(&format!("/drafts/{flagged}/obsolete"), &[]).await;
+    assert!(
+        reply.status.is_success() || reply.status.is_redirection(),
+        "{}",
+        reply.body
+    );
+    let preview = f
+        .get(&format!("/pr/org/repo/7/runs/{run}/preview?event=COMMENT"))
+        .await
+        .body;
+    assert!(
+        preview.contains("1 accepted draft is one the agent"),
+        "{preview}"
+    );
+    // Restoring the dismissed one puts it back to pending.
+    let set_aside = f.dashboard.app.store().draft_rows(run).unwrap()[0].id;
+    f.post(
+        &format!("/drafts/{set_aside}/status"),
+        &[("status", "pending")],
+    )
+    .await;
+    let restored = f
+        .dashboard
+        .app
+        .store()
+        .draft_row(set_aside)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (restored.status.as_str(), restored.obsolete),
+        ("pending", None)
+    );
+    // Once posted, a flagged draft isn't marked obsolete any more.
+    let gone = f.dashboard.app.store().draft_rows(run).unwrap()[2].id;
+    f.dashboard.app.store().mark_posted(&[gone]).unwrap();
+    let page = f.get(&format!("/pr/org/repo/7?run={run}")).await.body;
+    assert!(!page.contains("Gone since."), "{page}");
 }
 
 #[tokio::test]
@@ -2787,6 +2920,7 @@ async fn the_run_list_says_what_each_revision_revises_and_how() {
         let basis = Basis {
             summary: None,
             comments: vec![Some(f.drafts[1])],
+            dismissed: vec![],
         };
         store
             .finish_revision(
@@ -3669,6 +3803,7 @@ fn regenerate(f: &Fixture) -> (i64, Vec<i64>) {
     let basis = Basis {
         summary: Some(f.drafts[0]),
         comments: vec![Some(f.drafts[1]), Some(f.drafts[1])],
+        dismissed: vec![],
     };
     let revision = run.revision.as_ref().unwrap();
     store
@@ -3713,6 +3848,7 @@ fn noted_regeneration(f: &Fixture) -> (i64, Vec<i64>) {
     let basis = Basis {
         summary: None,
         comments: vec![None],
+        dismissed: vec![],
     };
     store
         .finish_revision(run.id, &result, run.revision.as_ref().unwrap(), &basis)

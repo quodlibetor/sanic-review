@@ -581,6 +581,33 @@ Rules:
    changed or aren't in the new diff. So the PR's page shows them at the
    new head, where they post and can be revised. A fresh review's `none`
    is still a review, with a summary to post.
+   **Dismissing.** A push review's answer, with no update or not, may
+   also list earlier drafts it no longer stands behind, each with a
+   reason for you, and it's told to, above all for a summary about a
+   concern since resolved, rather than leave them standing. Resolving a
+   thread starts no run; the next push's review sees it. A dismissal
+   applies to the new run's copy of the draft: one pending and unedited
+   becomes `dismissed`, shown muted with the reason, never posted, until
+   you restore it to pending (or accept or reject it); one you accepted
+   or edited stays yours, status and all, flagged "probably obsolete"
+   with the reason until you clear the flag, and still posts if accepted,
+   the preview warning that it does; posted, it's settled, and loses the
+   flag's chrome. A dismissed draft counts as neither rejected nor
+   overlapping a thread, and has its own count in the PR page's tally and
+   the lists. With no update the copies are those carried, so a draft
+   dismissed before is carried as dismissed, and the next brief shows it
+   so, told not to propose it again unless it's newly relevant; one the
+   agent drafts again word for word is new and pending. A review with
+   drafts of its own copies the pending and accepted comments it
+   dismisses and doesn't keep, on their lines at the new head, so an
+   accepted one isn't lost, and drops a draft dismissed before, as it
+   does a rejected one; its new summary replaces the old one, so a
+   summary isn't dismissed then, and neither is a draft it keeps (names
+   as `based_on`). A posted or rejected draft is left alone. A draft a
+   regeneration keeps keeps its flag, and the regeneration's prompt says
+   what `dismissed` and `obsolete` mean and not to propose a dismissed
+   draft again; one a push review drafts again word for word loses the
+   flag, since the agent stands behind it again.
    The session lives under the worktree path of the run it began in, so
    the push review checks out there, and records that path's run: its
    chats and regenerations use that path too. It falls back to a fresh
@@ -660,7 +687,7 @@ invited to draft replies or fixes on someone else's PR.
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
 | `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded`), suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
-| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
+| `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted/dismissed`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, why a push review dismissed it as obsolete, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |

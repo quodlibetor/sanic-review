@@ -238,6 +238,7 @@ async fn a_revision_resumes_the_source_session_in_its_worktree() {
             status: "accepted".into(),
             edited: true,
             note: None,
+            obsolete: None,
         }],
         draft: None,
     });
@@ -342,6 +343,7 @@ fn revising_one_draft(answer: &serde_json::Value, note: &str) -> Setup {
                 status: "pending".into(),
                 edited: false,
                 note: None,
+                obsolete: None,
             },
             BaselineDraft {
                 id: 11,
@@ -354,6 +356,7 @@ fn revising_one_draft(answer: &serde_json::Value, note: &str) -> Setup {
                 status: "pending".into(),
                 edited: true,
                 note: Some("Checked the loop bounds.".into()),
+                obsolete: None,
             },
         ],
         draft: Some(11),

@@ -137,8 +137,11 @@ impl LeadPop<'_> {
         if d.accepted > 0 {
             parts.push(html! { span.sig.post { (d.accepted) " accepted, not posted" } });
         }
+        if d.dismissed > 0 {
+            parts.push(html! { span.sig.decided { (d.dismissed) " dismissed by the agent" } });
+        }
         if d.rejected > 0 {
-            let all = d.pending + d.accepted + d.posted == 0;
+            let all = d.pending + d.accepted + d.posted + d.dismissed == 0;
             parts.push(html! {
                 span.sig.decided { @if all && d.rejected > 1 { "all " } (d.rejected) " rejected" }
             });
@@ -161,7 +164,7 @@ impl LeadPop<'_> {
 }
 
 fn has_drafts(d: &Decided) -> bool {
-    d.pending + d.accepted + d.rejected + d.posted > 0
+    d.pending + d.accepted + d.rejected + d.posted + d.dismissed > 0
 }
 
 /// Why a PR isn't reviewed automatically, in a sentence.

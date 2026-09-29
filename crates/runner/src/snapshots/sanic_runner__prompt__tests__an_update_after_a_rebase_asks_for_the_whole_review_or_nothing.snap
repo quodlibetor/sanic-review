@@ -15,7 +15,7 @@ The PR's history was rewritten, as by a rebase, so this is a `git range-diff` of
 
 ## Your last review's drafts
 
-What the reviewer did with each, one entry per draft: its `id`, `kind` (`summary` or `comment`), anchor at h1, current `text` (the reviewer's edit if `edited`), `status`, and your private `note` if you wrote one:
+What the reviewer did with each, one entry per draft: its `id`, `kind` (`summary` or `comment`), anchor at h1, current `text` (the reviewer's edit if `edited`), `status`, your private `note` if you wrote one, and, if you dismissed it before, why, as `obsolete`:
 
 ```json
 [
@@ -35,8 +35,11 @@ What the reviewer did with each, one entry per draft: its `id`, `kind` (`summary
 
 - `posted` drafts are already on GitHub: don't repeat them.
 - `rejected` drafts were turned down: don't propose them again, unless the new commits make one newly relevant, and then say in its `note` what changed.
+- `dismissed` drafts you set aside before: the same.
 - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, word for word, unless the new commits address them.
 - `pending` and `stale` ones are yours to keep, change or drop.
+
+Dismiss each of these you no longer stand behind rather than leave it standing, above all a summary that describes a concern since resolved, by the new commits or in the discussion: list it in `dismiss`, with its `id` and a `reason` for the reviewer. A pending draft you dismiss is set aside; an accepted or edited one stays the reviewer's to post, flagged with your reason as probably obsolete. Don't dismiss a posted draft, or one you keep or revise. A new `summary` replaces the old one without dismissing it, so dismiss the summary only when you answer with no update.
 
 ## Existing discussion
 
@@ -63,6 +66,6 @@ why?
 
 The whole PR diff as it now stands is in /data/runs/4/pr.diff; inline comments must be on lines it shows, which may have moved since your last review.
 
-If nothing that changed calls for a new review, for example a rebase that leaves the PR's own changes as they were, answer `suggested_verdict` `none` with no `comments`, and say in `summary` what you checked. The reviewer sees that as no update: your drafts that aren't posted carry over to the new head as they stand, and nothing new is drafted.
+If nothing that changed calls for a new review, for example a rebase that leaves the PR's own changes as they were, answer `suggested_verdict` `none` with no `comments`, and say in `summary` what you checked. The reviewer sees that as no update: your drafts that aren't posted carry over to the new head as they stand, those you dismiss set aside or flagged, and nothing new is drafted.
 
 Otherwise, answer with the whole review as it now stands, in the same format as before: the comments of your last whole review that still apply, as you last revised them, on their lines in the new diff; not those the new commits address; and any the new commits call for. Don't repeat points the discussion already makes. Give each comment you keep or revise the `id` of the draft it comes from as `based_on`, and the summary's as `summary_based_on`; leave them out for anything new.

@@ -1,0 +1,48 @@
+---
+source: crates/runner/src/prompt.rs
+expression: "revision(\"Be terser.\",\n&[draft(1, \"dismissed\", \"Fixed upstream.\"),\ndraft(2, \"accepted\", \"Renamed since.\")], &quiet)"
+---
+The reviewer asked you to revise your review. Their request, in their own words:
+
+```text
+Be terser.
+```
+
+This is your review as it stands after the reviewer went through it, one entry per draft: its `id`, `kind` (`summary` or `comment`), anchor, current `text` (the reviewer's edit if `edited`), `status`, your private `note` if you wrote one, and, as `obsolete`, why you said it was obsolete if you did, in a review of a later push:
+
+```json
+[
+  {
+    "id": 1,
+    "kind": "comment",
+    "path": "src/lib.rs",
+    "line": 2,
+    "start_line": null,
+    "side": "RIGHT",
+    "text": "This can overflow.",
+    "status": "dismissed",
+    "edited": false,
+    "obsolete": "Fixed upstream."
+  },
+  {
+    "id": 2,
+    "kind": "comment",
+    "path": "src/lib.rs",
+    "line": 2,
+    "start_line": null,
+    "side": "RIGHT",
+    "text": "This can overflow.",
+    "status": "accepted",
+    "edited": false,
+    "obsolete": "Renamed since."
+  }
+]
+```
+
+- `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, word for word, unless the request asks otherwise, even if you said they were obsolete: the reviewer decides.
+- `rejected` drafts were turned down: don't propose them again.
+- `dismissed` drafts are ones you set aside as obsolete: don't propose them again.
+- `posted` drafts are already on GitHub: don't repeat them.
+- `pending` and `stale` ones are yours to keep, change or drop.
+
+Return the complete revised review in the same format as before, every comment you'd still make and not only what changed. Give each comment you keep or revise the `id` of the draft it comes from as `based_on`, and the summary's as `summary_based_on`; leave them out for anything new.

@@ -348,9 +348,13 @@ impl Worker {
                 .store()
                 .finish_resumed(run.id, &result, &resume, &basis, &moved)
                 .inspect(|()| log_result(&result)),
-            Ok(Some(Reviewed::NoUpdate { result, carried })) => self
+            Ok(Some(Reviewed::NoUpdate {
+                result,
+                carried,
+                dismissed,
+            })) => self
                 .store()
-                .finish_no_update(run.id, &result, &carried)
+                .finish_no_update(run.id, &result, &carried, &dismissed)
                 .inspect(|()| log_no_update(&result)),
             Ok(Some(Reviewed::NotResumed { why })) => {
                 warn!(url = %run.request.key.url(), "regeneration failed: {why}");
@@ -1169,6 +1173,36 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         script
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_review_with_no_update_can_dismiss_a_stale_summary() {
+        let answer = serde_json::json!({
+            "summary": "Only a rebase.", "suggested_verdict": "none", "comments": [],
+            "dismiss": [{ "id": 1, "reason": "The concern it describes was resolved." }]
+        });
+        let pushed = review_a_push(Some(&answer)).await;
+        let store = pushed.store.lock().unwrap();
+        let drafts = store.draft_rows(pushed.run).unwrap();
+        let states: Vec<(&str, &str, Option<&str>)> = drafts
+            .iter()
+            .map(|d| (d.body(), d.status.as_str(), d.obsolete.as_deref()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (
+                    "Original.",
+                    "dismissed",
+                    Some("The concern it describes was resolved.")
+                ),
+                ("On the old line.", "accepted", None),
+            ]
+        );
+        let runs = store.review_runs(&queued(0).request.key).unwrap();
+        assert_eq!(runs[0].no_update.as_deref(), Some("Only a rebase."));
+        let sent = briefs(&pushed.fake);
+        assert!(sent.contains("list it in `dismiss`"), "{sent}");
     }
 
     /// A resumed review's answer when nothing changed.

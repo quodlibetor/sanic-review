@@ -145,6 +145,8 @@ pub struct Decided {
     pub accepted: u32,
     pub rejected: u32,
     pub posted: u32,
+    /// Set aside by a push review as obsolete.
+    pub dismissed: u32,
     /// When the last of them was marked posted.
     pub posted_at: Option<String>,
     /// You left a submitted review on the commit the run reviewed.
@@ -155,11 +157,11 @@ pub struct Decided {
 }
 
 impl Decided {
-    /// Every draft rejected, nothing of yours on the commit, and no newer
-    /// review on its way: the review is yours to write.
+    /// Every draft rejected or dismissed, nothing of yours on the commit,
+    /// and no newer review on its way: the review is yours to write.
     #[must_use]
     pub fn submit_review(&self) -> bool {
-        self.rejected > 0
+        self.rejected + self.dismissed > 0
             && self.pending == 0
             && self.accepted == 0
             && self.posted == 0
@@ -400,6 +402,7 @@ impl Store {
                         count(*) FILTER (WHERE d.status = 'rejected'),
                         count(*) FILTER (WHERE d.status = 'posted'),
                         max(d.updated_at) FILTER (WHERE d.status = 'posted'),
+                        count(*) FILTER (WHERE d.status = 'dismissed'),
                         EXISTS (SELECT 1 FROM reviews v
                                 WHERE v.repo = r.repo AND v.number = r.number
                                       AND v.commit_sha = r.head_sha AND NOT v.by_bot
@@ -432,8 +435,9 @@ impl Store {
                         rejected: row.get(3)?,
                         posted: row.get(4)?,
                         posted_at: row.get(5)?,
-                        you_reviewed: row.get(6)?,
-                        newer: row.get(7)?,
+                        dismissed: row.get(6)?,
+                        you_reviewed: row.get(7)?,
+                        newer: row.get(8)?,
                     })
                 },
             )
@@ -750,6 +754,7 @@ mod tests {
                 &Basis {
                     summary: Some(kept[0]),
                     comments: vec![Some(kept[1]), None],
+                    dismissed: vec![],
                 },
             )
             .unwrap();

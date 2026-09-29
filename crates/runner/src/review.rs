@@ -16,8 +16,8 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use sanic_core::{
     config::{Profile, RunnerSettings},
     run::{
-        BaselineDraft, Basis, Carried, DraftComment, DraftOutput, DraftRevision, PrContext,
-        QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput, Side, Verdict,
+        BaselineDraft, Basis, Carried, Dismissal, DraftComment, DraftOutput, DraftRevision,
+        PrContext, QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput, Side, Verdict,
     },
 };
 use serde_json::{Value, json};
@@ -290,7 +290,7 @@ impl ReviewRunner {
             (Some(_), Some(target)) => draft_revision_schema(&target.kind),
             (Some(_), None) => revision_schema(),
             // It names the drafts it keeps, as a regeneration does.
-            (None, _) if run.resume.is_some() => revision_schema(),
+            (None, _) if run.resume.is_some() => resume_schema(),
             (None, _) => review_schema(),
         };
         let outcome = claude
@@ -342,7 +342,13 @@ async fn resumed(
     };
     let carried = carry(worktree, &run.request.head_sha, resume, index).await?;
     match reviewed {
-        Reviewed::NoUpdate { result, .. } => Ok(Reviewed::NoUpdate { result, carried }),
+        Reviewed::NoUpdate {
+            result, dismissed, ..
+        } => Ok(Reviewed::NoUpdate {
+            result,
+            carried,
+            dismissed,
+        }),
         Reviewed::Review {
             result,
             basis: Some(basis),
@@ -423,6 +429,7 @@ impl ReviewRunner {
             return Ok(Reviewed::NoUpdate {
                 result,
                 carried: Vec::new(),
+                dismissed: basis.map(|b| b.dismissed).unwrap_or_default(),
             });
         }
         Ok(Reviewed::Review { result, basis })
@@ -464,6 +471,7 @@ pub enum Reviewed {
     NoUpdate {
         result: ReviewResult,
         carried: Vec<Carried>,
+        dismissed: Vec<Dismissal>,
     },
     /// A resumed push review, and which of the drafts of the run it
     /// resumed, `resume`'s, each of its own is based on; `moved` says where
@@ -644,6 +652,26 @@ pub fn revision_schema() -> Value {
     schema
 }
 
+/// [`revision_schema`], plus what a resumed push review adds: the earlier
+/// drafts it dismisses, each with why.
+#[must_use]
+pub fn resume_schema() -> Value {
+    let mut schema = revision_schema();
+    schema["properties"]["dismiss"] = json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "reason"],
+            "properties": {
+                "id": { "type": "integer" },
+                "reason": { "type": "string" }
+            }
+        }
+    });
+    schema
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +702,29 @@ mod tests {
         assert_eq!(output.summary_note.as_deref(), Some("why"));
         assert_eq!(output.comments[0].note.as_deref(), Some("checked"));
         assert_eq!(output.comments[1].note, None);
+    }
+
+    #[test]
+    fn resume_schema_example_parses() {
+        let example = json!({
+            "summary": "s", "suggested_verdict": "none", "comments": [],
+            "dismiss": [{ "id": 4, "reason": "Resolved." }]
+        });
+        let schema = resume_schema();
+        assert_eq!(
+            schema["properties"]["dismiss"]["items"]["required"],
+            json!(["id", "reason"])
+        );
+        let (_, basis) = serde_json::from_value::<RevisedOutput>(example)
+            .unwrap()
+            .split();
+        assert_eq!(
+            basis.dismissed,
+            [Dismissal {
+                id: 4,
+                reason: "Resolved.".into()
+            }]
+        );
     }
 
     /// The schema and the serde types must accept the same shapes.

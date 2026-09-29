@@ -536,7 +536,7 @@ impl<'a> Rows<'a> {
                 && p == path
             {
                 ending.entry((side, last)).or_default().push(draft);
-                if draft.status != "rejected" {
+                if !matches!(draft.status.as_str(), "rejected" | "dismissed") {
                     marked.push((side, first, last));
                 }
             }

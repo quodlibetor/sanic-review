@@ -255,13 +255,23 @@ pub fn update(
             "\n## Your last review's drafts\n\n\
              What the reviewer did with each, one entry per draft: its `id`, `kind` \
              (`summary` or `comment`), anchor at {}, current `text` (the reviewer's edit if \
-             `edited`), `status`, and your private `note` if you wrote one:\n\n{}\n\
+             `edited`), `status`, your private `note` if you wrote one, and, if you \
+             dismissed it before, why, as `obsolete`:\n\n{}\n\
              - `posted` drafts are already on GitHub: don't repeat them.\n\
              - `rejected` drafts were turned down: don't propose them again, unless the new \
              commits make one newly relevant, and then say in its `note` what changed.\n\
+             - `dismissed` drafts you set aside before: the same.\n\
              - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, \
              word for word, unless the new commits address them.\n\
-             - `pending` and `stale` ones are yours to keep, change or drop.\n",
+             - `pending` and `stale` ones are yours to keep, change or drop.\n\n\
+             Dismiss each of these you no longer stand behind rather than leave it standing, \
+             above all a summary that describes a concern since resolved, by the new commits \
+             or in the discussion: list it in `dismiss`, with its `id` and a `reason` for the \
+             reviewer. A pending draft you dismiss is set aside; an accepted or edited one \
+             stays the reviewer's to post, flagged with your reason as probably obsolete. \
+             Don't dismiss a posted draft, or one you keep or revise. A new `summary` \
+             replaces the old one without dismissing it, so dismiss the summary only when you \
+             answer with no update.\n",
             resume.head_sha,
             fenced(&drafts, "json")
         );
@@ -279,8 +289,8 @@ pub fn update(
          If nothing that changed calls for a new review, for example a rebase that leaves \
          the PR's own changes as they were, answer `suggested_verdict` `none` with no \
          `comments`, and say in `summary` what you checked. The reviewer sees that as no \
-         update: your drafts that aren't posted carry over to the new head as they stand, and \
-         nothing new is drafted.\n\n\
+         update: your drafts that aren't posted carry over to the new head as they stand, \
+         those you dismiss set aside or flagged, and nothing new is drafted.\n\n\
          Otherwise, answer with the whole review as it now stands, in the same format as \
          before: the comments of your last whole review that still apply, as you last revised \
          them, on their lines in the new diff; not those the new commits address; and any the \
@@ -459,11 +469,15 @@ pub fn revision(instruction: &str, baseline: &[BaselineDraft], ctx: &PrContext) 
          words:\n\n{}\n\
          This is your review as it stands after the reviewer went through it, one entry \
          per draft: its `id`, `kind` (`summary` or `comment`), anchor, current `text` \
-         (the reviewer's edit if `edited`), `status`, and your private `note` if you \
-         wrote one:\n\n{}\n\
+         (the reviewer's edit if `edited`), `status`, your private `note` if you \
+         wrote one, and, as `obsolete`, why you said it was obsolete if you did, in a \
+         review of a later push:\n\n{}\n\
          - `accepted` drafts, and `edited` ones, are what the reviewer wants: keep them, \
-         word for word, unless the request asks otherwise.\n\
+         word for word, unless the request asks otherwise, even if you said they were \
+         obsolete: the reviewer decides.\n\
          - `rejected` drafts were turned down: don't propose them again.\n\
+         - `dismissed` drafts are ones you set aside as obsolete: don't propose them \
+         again.\n\
          - `posted` drafts are already on GitHub: don't repeat them.\n\
          - `pending` and `stale` ones are yours to keep, change or drop.\n\n\
          Return the complete revised review in the same format as before, every comment \
@@ -503,8 +517,9 @@ pub fn draft_revision(instruction: &str, draft: &BaselineDraft, ctx: &PrContext)
         "The reviewer asked you to revise one of your drafts, and only that one. Their \
          note on it, in their own words:\n\n{}\n\
          The draft as it stands after the reviewer went through it: its `id`, `kind`, \
-         anchor, current `text` (the reviewer's edit if `edited`), `status`, and your \
-         private `note` if you wrote one:\n\n{}\n\
+         anchor, current `text` (the reviewer's edit if `edited`), `status`, your \
+         private `note` if you wrote one, and, as `obsolete`, why you said it was obsolete \
+         if you did:\n\n{}\n\
          Apply the note without arguing it again. If the reviewer says the draft is \
          wrong, check that against the code: where they're right, or it can't stand \
          without what they rule out, drop it. Answer with exactly one of:\n\
@@ -708,6 +723,7 @@ mod tests {
             status: "pending".into(),
             edited: false,
             note: None,
+            obsolete: None,
         };
         let one = draft_revision("Reword.", &draft, &ctx);
         assert!(one.contains("This isn't a whole review"), "{one}");
@@ -736,6 +752,7 @@ mod tests {
                 status: "rejected".into(),
                 edited: false,
                 note: None,
+                obsolete: None,
             }],
         };
         let range = "1:  aaaa = 1:  bbbb Add retries\n";
@@ -896,6 +913,35 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_is_told_what_dismissed_and_obsolete_drafts_are() {
+        let draft = |id: i64, status: &str, obsolete: &str| BaselineDraft {
+            id,
+            kind: "comment".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(2),
+            start_line: None,
+            side: Some("RIGHT".into()),
+            text: "This can overflow.".into(),
+            status: status.into(),
+            edited: false,
+            note: None,
+            obsolete: Some(obsolete.into()),
+        };
+        let quiet = PrContext {
+            threads: vec![],
+            ..context()
+        };
+        insta::assert_snapshot!(revision(
+            "Be terser.",
+            &[
+                draft(1, "dismissed", "Fixed upstream."),
+                draft(2, "accepted", "Renamed since.")
+            ],
+            &quiet
+        ));
+    }
+
+    #[test]
     fn a_revision_gets_the_threads_as_they_stand() {
         let text = revision("Be terser.", &[], &context());
         let at = text.find("## Existing discussion").expect(&text);
@@ -960,6 +1006,7 @@ mod tests {
             status: "pending".into(),
             edited: false,
             note: None,
+            obsolete: None,
         };
         for text in [
             revision("Be terser.", &[], &ctx),

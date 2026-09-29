@@ -8,8 +8,8 @@ use sanic_core::{
     pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread, is_login},
     repo::RepoName,
     run::{
-        BaselineDraft, Basis, Carried, DraftRevision, InlineComment, PrContext, QueuedRun, Resume,
-        ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind, Side,
+        BaselineDraft, Basis, Carried, Dismissal, DraftRevision, InlineComment, PrContext,
+        QueuedRun, Resume, ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind, Side,
     },
 };
 
@@ -427,6 +427,7 @@ impl Store {
             run: revision.revises,
             baseline: &revision.baseline,
             moved: &[],
+            push: false,
         };
         self.finish(id, result, Some((&source, basis)))
     }
@@ -448,8 +449,37 @@ impl Store {
             run: resume.run,
             baseline: &resume.drafts,
             moved,
+            push: true,
         };
-        self.finish(id, result, Some((&source, basis)))
+        let tx = self.conn.transaction()?;
+        store_review(&tx, id, result, Some((&source, basis)))?;
+        // Those it dismisses and doesn't keep come along, dismissed, so an
+        // accepted one isn't lost; its own summary replaces the old one.
+        // One it keeps as its own draft isn't dismissed after all.
+        let kept: HashSet<i64> = basis.comments.iter().flatten().copied().collect();
+        let mut named = HashSet::new();
+        let dismissed: Vec<Dismissal> = basis
+            .dismissed
+            .iter()
+            .filter(|d| !kept.contains(&d.id))
+            .filter(|d| {
+                resume
+                    .drafts
+                    .iter()
+                    .any(|b| b.id == d.id && b.kind == "comment")
+            })
+            // Named twice, it's still copied once.
+            .filter(|d| named.insert(d.id))
+            .cloned()
+            .collect();
+        for dismissal in &dismissed {
+            if let Some(draft) = moved.iter().find(|m| m.draft == dismissal.id) {
+                carry_draft(&tx, id, draft, "status IN ('pending', 'accepted')")?;
+            }
+        }
+        dismiss(&tx, id, &dismissed)?;
+        tx.commit()
+            .wrap_err_with(|| format!("storing drafts for run {id}"))
     }
 
     /// Stores a finished regeneration of one draft, `revision.draft`, and
@@ -517,6 +547,7 @@ impl Store {
                 run: revision.revises,
                 baseline: &revision.baseline,
                 moved: &[],
+                push: false,
             };
             let base = Base::find(&tx, &source, Some(target))?;
             let stored = Stored::new(
@@ -539,51 +570,7 @@ impl Store {
         revision: Option<(&Source<'_>, &Basis)>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        succeed(&tx, id, result, None)?;
-        let base = |based_on: Option<i64>| -> Result<Option<Base>> {
-            match revision {
-                Some((source, _)) => Base::find(&tx, source, based_on),
-                None => Ok(None),
-            }
-        };
-        // Base drafts already carried over whole, so a repeat is pending.
-        let mut kept = HashSet::new();
-        let none = (None, None, None, None);
-        let summary_based_on = revision.as_ref().and_then(|(_, basis)| basis.summary);
-        let summary = Stored::new(
-            "summary",
-            &none,
-            (&result.summary, result.summary_note.as_deref()),
-            base(summary_based_on)?,
-            &mut kept,
-        );
-        insert_draft(&tx, (id, "summary"), &none, None, &summary)?;
-        for (i, draft) in result.comments.iter().enumerate() {
-            let c = &draft.comment;
-            let based_on = revision
-                .as_ref()
-                .and_then(|(_, basis)| basis.comments.get(i).copied().flatten());
-            let anchor = (
-                Some(c.path.clone()),
-                Some(c.line),
-                c.start_line,
-                Some(c.side.as_str().to_owned()),
-            );
-            let stored = Stored::new(
-                "comment",
-                &anchor,
-                (&c.body, c.note.as_deref()),
-                base(based_on)?,
-                &mut kept,
-            );
-            insert_draft(
-                &tx,
-                (id, "comment"),
-                &anchor,
-                Some((c, draft.unanchored)),
-                &stored,
-            )?;
-        }
+        store_review(&tx, id, result, revision)?;
         tx.commit()
             .wrap_err_with(|| format!("storing drafts for run {id}"))
     }
@@ -592,11 +579,14 @@ impl Store {
     /// resumed, and marks it succeeded. Its summary is kept as the run's
     /// `no_update`, and its drafts are `carried`, that run's, as they stand
     /// now, on their lines at its head; any posted since are left out.
+    ///
+    /// The copies of those it `dismissed` are dismissed; see [`dismiss`].
     pub fn finish_no_update(
         &mut self,
         id: i64,
         result: &ReviewResult,
         carried: &[Carried],
+        dismissed: &[Dismissal],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         succeed(&tx, id, result, Some(&result.summary))?;
@@ -610,26 +600,9 @@ impl Store {
             [id],
         )?;
         for draft in carried {
-            tx.execute(
-                &format!(
-                    "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
-                                         confidence, original_body, edited_body, status,
-                                         unanchored, based_on, thread_choice, thread_id,
-                                         react_to, note, drop_reason, created_at, updated_at)
-                     SELECT ?1, kind, path, ?3, ?4, side, severity, confidence, original_body,
-                            edited_body, status, ?5, id, thread_choice, thread_id, react_to,
-                            note, drop_reason, {NOW}, {NOW}
-                     FROM drafts WHERE id = ?2 AND status != 'posted'"
-                ),
-                params![
-                    id,
-                    draft.draft,
-                    draft.line,
-                    draft.start_line,
-                    draft.unanchored
-                ],
-            )?;
+            carry_draft(&tx, id, draft, "status != 'posted'")?;
         }
+        dismiss(&tx, id, dismissed)?;
         tx.commit().wrap_err_with(|| format!("recording run {id}"))
     }
 
@@ -1246,18 +1219,123 @@ fn copy_draft(tx: &Transaction<'_>, run: i64, id: i64, dropped: Option<&str>) ->
             "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
                                  confidence, original_body, edited_body, status, unanchored,
                                  based_on, thread_choice, thread_id, react_to, note,
-                                 drop_reason, created_at, updated_at)
+                                 drop_reason, obsolete, created_at, updated_at)
              SELECT ?1, kind, path, line, start_line, side, severity, confidence,
                     original_body, edited_body,
                     CASE WHEN ?3 IS NULL THEN status ELSE 'rejected' END, unanchored, id,
                     CASE WHEN ?3 IS NULL THEN thread_choice END,
                     CASE WHEN ?3 IS NULL THEN thread_id END,
                     CASE WHEN ?3 IS NULL THEN react_to END,
-                    note, coalesce(?3, drop_reason), {NOW}, {NOW}
+                    note, coalesce(?3, drop_reason), obsolete, {NOW}, {NOW}
              FROM drafts WHERE id = ?2"
         ),
         params![run, id, dropped],
     )?;
+    Ok(())
+}
+
+/// Stores `result`'s drafts for run `id`, which, for a regeneration or a
+/// resumed push review, start from `revision`'s as its basis says, and
+/// marks the run succeeded.
+fn store_review(
+    tx: &Transaction<'_>,
+    id: i64,
+    result: &ReviewResult,
+    revision: Option<(&Source<'_>, &Basis)>,
+) -> Result<()> {
+    succeed(tx, id, result, None)?;
+    let base = |based_on: Option<i64>| -> Result<Option<Base>> {
+        match revision {
+            Some((source, _)) => Base::find(tx, source, based_on),
+            None => Ok(None),
+        }
+    };
+    // Base drafts already carried over whole, so a repeat is pending.
+    let mut kept = HashSet::new();
+    let none = (None, None, None, None);
+    let summary_based_on = revision.as_ref().and_then(|(_, basis)| basis.summary);
+    let summary = Stored::new(
+        "summary",
+        &none,
+        (&result.summary, result.summary_note.as_deref()),
+        base(summary_based_on)?,
+        &mut kept,
+    );
+    insert_draft(tx, (id, "summary"), &none, None, &summary)?;
+    for (i, draft) in result.comments.iter().enumerate() {
+        let c = &draft.comment;
+        let based_on = revision
+            .as_ref()
+            .and_then(|(_, basis)| basis.comments.get(i).copied().flatten());
+        let anchor = (
+            Some(c.path.clone()),
+            Some(c.line),
+            c.start_line,
+            Some(c.side.as_str().to_owned()),
+        );
+        let stored = Stored::new(
+            "comment",
+            &anchor,
+            (&c.body, c.note.as_deref()),
+            base(based_on)?,
+            &mut kept,
+        );
+        insert_draft(
+            tx,
+            (id, "comment"),
+            &anchor,
+            Some((c, draft.unanchored)),
+            &stored,
+        )?;
+    }
+    Ok(())
+}
+
+/// The statuses [`dismiss`] acts on.
+const DISMISSABLE: &str = "('pending', 'accepted', 'dismissed')";
+
+/// Copies `carried`, a draft of the run a review resumed, to run `run`,
+/// on its lines at the new head, as it stands now, if it matches `only`,
+/// an SQL condition on it.
+fn carry_draft(tx: &Transaction<'_>, run: i64, carried: &Carried, only: &str) -> Result<()> {
+    tx.execute(
+        &format!(
+            "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
+                                 confidence, original_body, edited_body, status, unanchored,
+                                 based_on, thread_choice, thread_id, react_to, note,
+                                 drop_reason, obsolete, created_at, updated_at)
+             SELECT ?1, kind, path, ?3, ?4, side, severity, confidence, original_body,
+                    edited_body, status, ?5, id, thread_choice, thread_id, react_to, note,
+                    drop_reason, obsolete, {NOW}, {NOW}
+             FROM drafts WHERE id = ?2 AND {only}"
+        ),
+        params![
+            run,
+            carried.draft,
+            carried.line,
+            carried.start_line,
+            carried.unanchored
+        ],
+    )?;
+    Ok(())
+}
+
+/// Records `dismissed` on run `run`'s copies of the drafts they name: a
+/// pending one you haven't edited is set aside as `dismissed`, and one you
+/// accepted or edited keeps its status, flagged, since it's yours. Either
+/// way the agent's reason is kept. A rejected one is left alone.
+fn dismiss(tx: &Transaction<'_>, run: i64, dismissed: &[Dismissal]) -> Result<()> {
+    for dismissal in dismissed {
+        tx.execute(
+            &format!(
+                "UPDATE drafts SET obsolete = ?3,
+                     status = CASE WHEN status = 'pending' AND edited_body IS NULL
+                              THEN 'dismissed' ELSE status END
+                 WHERE run_id = ?1 AND based_on = ?2 AND status IN {DISMISSABLE}"
+            ),
+            params![run, dismissal.id, dismissal.reason],
+        )?;
+    }
     Ok(())
 }
 
@@ -1276,9 +1354,9 @@ fn insert_draft(
             "INSERT INTO drafts (run_id, kind, path, line, start_line, side, severity,
                                  confidence, original_body, edited_body, status, unanchored,
                                  based_on, thread_choice, thread_id, react_to, note,
-                                 created_at, updated_at)
+                                 obsolete, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, {NOW}, {NOW})"
+                     ?17, ?18, {NOW}, {NOW})"
         ),
         params![
             run,
@@ -1297,7 +1375,8 @@ fn insert_draft(
             stored.choice.0,
             stored.choice.1,
             stored.choice.2,
-            stored.note
+            stored.note,
+            stored.obsolete
         ],
     )?;
     Ok(())
@@ -1326,7 +1405,7 @@ fn lineage(conn: &rusqlite::Connection, id: i64) -> Result<Vec<i64>> {
 fn baseline(conn: &rusqlite::Connection, run: i64) -> Result<Vec<BaselineDraft>> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, path, line, start_line, side, coalesce(edited_body, original_body),
-                status, edited_body IS NOT NULL, note
+                status, edited_body IS NOT NULL, note, obsolete
          FROM drafts WHERE run_id = ?1 ORDER BY kind != 'summary', id",
     )?;
     let drafts = stmt
@@ -1342,6 +1421,7 @@ fn baseline(conn: &rusqlite::Connection, run: i64) -> Result<Vec<BaselineDraft>>
                 status: row.get(7)?,
                 edited: row.get(8)?,
                 note: row.get(9)?,
+                obsolete: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -1360,6 +1440,9 @@ struct Base {
     /// Its thread choice's columns, as stored.
     choice: Choice,
     note: Option<String>,
+    /// Why the agent flagged it as probably obsolete, which a regeneration
+    /// keeping it keeps, and a push review keeping it drops.
+    obsolete: Option<String>,
     shown: Option<String>,
 }
 
@@ -1376,6 +1459,9 @@ struct Source<'a> {
     run: i64,
     baseline: &'a [BaselineDraft],
     moved: &'a [Carried],
+    /// A push review's: one it drafts again word for word, it stands
+    /// behind again, so its flag as probably obsolete goes.
+    push: bool,
 }
 
 impl Base {
@@ -1390,7 +1476,7 @@ impl Base {
         let base = tx
             .query_row(
                 "SELECT id, kind, path, line, start_line, side, original_body, edited_body, status,
-                        thread_choice, thread_id, react_to, note
+                        thread_choice, thread_id, react_to, note, obsolete
                  FROM drafts WHERE id = ?1 AND run_id = ?2",
                 params![id, source.run],
                 |row| {
@@ -1403,6 +1489,7 @@ impl Base {
                         status: row.get(8)?,
                         choice: (row.get(9)?, row.get(10)?, row.get(11)?),
                         note: row.get(12)?,
+                        obsolete: row.get::<_, Option<String>>(13)?.filter(|_| !source.push),
                         shown,
                     })
                 },
@@ -1430,13 +1517,14 @@ impl Base {
 /// for word its base (as it stands, or as the agent was shown it), at the
 /// same anchor, keeps the base's edit, status and choice as they stand,
 /// and its note unless it brings its own, unless an earlier draft already
-/// kept them (`kept`); any other is pending.
+/// kept them (`kept`) or the base is dismissed; any other is pending.
 struct Stored {
     original_body: String,
     edited_body: Option<String>,
     status: String,
     choice: Choice,
     note: Option<String>,
+    obsolete: Option<String>,
     based_on: Option<i64>,
 }
 
@@ -1453,6 +1541,8 @@ impl Stored {
                 if base.kind == kind
                     && base.anchor == *anchor
                     && base.is(body)
+                    // One the agent set aside and now drafts again is new.
+                    && base.status != "dismissed"
                     && kept.insert(base.id) =>
             {
                 Self {
@@ -1461,6 +1551,7 @@ impl Stored {
                     status: base.status,
                     choice: base.choice,
                     note: note.map(str::to_owned).or(base.note),
+                    obsolete: base.obsolete,
                     based_on: Some(base.id),
                 }
             }
@@ -1471,6 +1562,7 @@ impl Stored {
                 status: "pending".into(),
                 choice: (None, None, None),
                 note: note.map(str::to_owned),
+                obsolete: None,
                 based_on: base.filter(|b| b.kind == kind).map(|b| b.id),
             },
         }
@@ -1959,6 +2051,7 @@ mod tests {
             let basis = Basis {
                 summary: None,
                 comments: vec![None; comments.len()],
+                dismissed: vec![],
             };
             let revised = ReviewResult {
                 session_id: Some(session.into()),
@@ -2010,6 +2103,7 @@ mod tests {
         let basis = Basis {
             summary: Some(summary),
             comments: vec![Some(b), Some(c)],
+            dismissed: vec![],
         };
         store
             .finish_revision(third.id, &revised, &revision, &basis)
@@ -2115,6 +2209,7 @@ mod tests {
                 Some(a),
                 Some(summary),
             ],
+            dismissed: vec![],
         };
         store
             .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
@@ -2218,6 +2313,7 @@ mod tests {
         let basis = Basis {
             summary: Some(ids[0]),
             comments: vec![Some(ids[1]), Some(ids[2]), Some(ids[3])],
+            dismissed: vec![],
         };
         store
             .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
@@ -2275,6 +2371,7 @@ mod tests {
         let basis = Basis {
             summary: None,
             comments: vec![Some(ids[1]), Some(ids[2])],
+            dismissed: vec![],
         };
         store
             .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
@@ -2317,6 +2414,7 @@ mod tests {
         let basis = Basis {
             summary: None,
             comments: vec![Some(a)],
+            dismissed: vec![],
         };
         store
             .finish_revision(run.id, &revised, run.revision.as_ref().unwrap(), &basis)
@@ -2781,6 +2879,351 @@ mod tests {
         assert_eq!(regen.lineage, [last.id, last.id - 1, first.id]);
     }
 
+    /// A review of `h1` with a summary and two comments, the first
+    /// accepted and the second edited, and a push review of `h2` that
+    /// resumed it, claimed; and the first run's drafts.
+    fn reviewed_then_pushed(store: &mut Store) -> (i64, i64, Vec<Draft>) {
+        let first = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        let mut two = result();
+        let mut other = two.comments[0].clone();
+        other.comment.body = "and here?".into();
+        two.comments.push(other);
+        store.finish_review(first.id, &two).unwrap();
+        let drafts = store.drafts(first.id).unwrap();
+        store
+            .set_draft_status(drafts[1].id, crate::DraftStatus::Accepted)
+            .unwrap();
+        store.edit_draft(drafts[2].id, "and here, too?").unwrap();
+        let run = store.queue_review(&request("h2")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        (first.id, run.id, store.drafts(first.id).unwrap())
+    }
+
+    fn carried(drafts: &[Draft]) -> Vec<Carried> {
+        drafts
+            .iter()
+            .map(|d| Carried {
+                draft: d.id,
+                start_line: d.start_line,
+                line: d.line,
+                unanchored: d.unanchored,
+            })
+            .collect()
+    }
+
+    fn dismissal(id: i64, reason: &str) -> Dismissal {
+        Dismissal {
+            id,
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn a_dismissed_draft_is_set_aside_if_pending_and_flagged_if_yours() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        let nothing = ReviewResult {
+            summary: "Only a rebase.".into(),
+            verdict: Verdict::None,
+            comments: vec![],
+            resumed_from: Some(first),
+            ..result()
+        };
+        let dismissed: Vec<Dismissal> = drafts
+            .iter()
+            .map(|d| dismissal(d.id, "Resolved in the thread."))
+            .collect();
+        store
+            .finish_no_update(run, &nothing, &carried(&drafts), &dismissed)
+            .unwrap();
+        let now = store.draft_rows(run).unwrap();
+        let states: Vec<(&str, Option<&str>)> = now
+            .iter()
+            .map(|d| (d.status.as_str(), d.obsolete.as_deref()))
+            .collect();
+        let why = Some("Resolved in the thread.");
+        // The pending summary set aside; your accepted and edited ones kept,
+        // flagged.
+        assert_eq!(
+            states,
+            [("dismissed", why), ("accepted", why), ("pending", why)]
+        );
+        // You can clear the flag on yours, and restore a dismissed one.
+        assert!(store.clear_obsolete(now[1].id).unwrap());
+        assert!(!store.clear_obsolete(now[0].id).unwrap());
+        assert!(
+            store
+                .set_draft_status(now[0].id, crate::DraftStatus::Pending)
+                .unwrap()
+        );
+        let now = store.draft_rows(run).unwrap();
+        assert_eq!(
+            (now[0].status.as_str(), now[0].obsolete.as_deref()),
+            ("pending", None)
+        );
+        assert_eq!(now[1].obsolete, None);
+    }
+
+    #[test]
+    fn a_dismissed_draft_stays_dismissed_on_later_runs() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        let nothing = ReviewResult {
+            summary: "Only a rebase.".into(),
+            verdict: Verdict::None,
+            comments: vec![],
+            resumed_from: Some(first),
+            ..result()
+        };
+        store
+            .finish_no_update(
+                run,
+                &nothing,
+                &carried(&drafts),
+                &[dismissal(drafts[0].id, "Stale.")],
+            )
+            .unwrap();
+        let later = store.queue_review(&request("h3")).unwrap().unwrap();
+        store.claim_run(later.id).unwrap();
+        let second = store.drafts(run).unwrap();
+        let again = ReviewResult {
+            resumed_from: Some(run),
+            ..nothing.clone()
+        };
+        store
+            .finish_no_update(later.id, &again, &carried(&second), &[])
+            .unwrap();
+        let now = store.draft_rows(later.id).unwrap();
+        assert_eq!(
+            (now[0].status.as_str(), now[0].obsolete.as_deref()),
+            ("dismissed", Some("Stale."))
+        );
+        assert_eq!(now[0].based_on, Some(second[0].id));
+    }
+
+    #[test]
+    fn a_regeneration_keeps_the_flag_and_a_push_review_reissuing_it_clears_it() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        let nothing = ReviewResult {
+            summary: "Only a rebase.".into(),
+            verdict: Verdict::None,
+            comments: vec![],
+            resumed_from: Some(first),
+            ..result()
+        };
+        store
+            .finish_no_update(
+                run,
+                &nothing,
+                &carried(&drafts),
+                &[dismissal(drafts[1].id, "Renamed.")],
+            )
+            .unwrap();
+        let flagged = store.drafts(run).unwrap();
+        // The accepted comment, as the agent answers it word for word.
+        let reissue = ReviewResult {
+            comments: vec![result().comments[0].clone()],
+            ..result()
+        };
+        let basis = Basis {
+            summary: None,
+            comments: vec![Some(flagged[1].id)],
+            dismissed: vec![],
+        };
+        // The PR is at the head the run reviewed, as regenerating needs.
+        let mut moved = snapshot();
+        moved.head_sha = "h2".into();
+        store.record(&moved, "me", "default", &[]).unwrap();
+        let Regeneration::Queued(regen) =
+            store.queue_regeneration(run, "Terser.", |_| false).unwrap()
+        else {
+            panic!("refused");
+        };
+        store.claim_run(regen.id).unwrap();
+        store
+            .finish_revision(regen.id, &reissue, regen.revision.as_ref().unwrap(), &basis)
+            .unwrap();
+        let kept = &store.draft_rows(regen.id).unwrap()[1];
+        assert_eq!(
+            (kept.status.as_str(), kept.obsolete.as_deref()),
+            ("accepted", Some("Renamed."))
+        );
+        // A push review drafting it again stands behind it.
+        let later = store.queue_review(&request("h3")).unwrap().unwrap();
+        store.claim_run(later.id).unwrap();
+        let resume = Resume {
+            run,
+            session_id: "sess".into(),
+            head_sha: "h2".into(),
+            base_sha: "b1".into(),
+            drafts: store.resumable(run).unwrap().0,
+        };
+        store
+            .finish_resumed(later.id, &reissue, &resume, &basis, &carried(&flagged))
+            .unwrap();
+        let kept = &store.draft_rows(later.id).unwrap()[1];
+        assert_eq!(
+            (kept.status.as_str(), kept.obsolete.as_deref()),
+            ("accepted", None)
+        );
+    }
+
+    #[test]
+    fn a_push_review_with_drafts_drops_an_earlier_dismissed_one() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        let nothing = ReviewResult {
+            summary: "Only a rebase.".into(),
+            verdict: Verdict::None,
+            comments: vec![],
+            resumed_from: Some(first),
+            ..result()
+        };
+        store
+            .finish_no_update(
+                run,
+                &nothing,
+                &carried(&drafts),
+                &[dismissal(drafts[0].id, "Stale.")],
+            )
+            .unwrap();
+        let second = store.drafts(run).unwrap();
+        assert_eq!(second[0].status, "dismissed");
+        let later = store.queue_review(&request("h3")).unwrap().unwrap();
+        store.claim_run(later.id).unwrap();
+        let resume = Resume {
+            run,
+            session_id: "sess".into(),
+            head_sha: "h2".into(),
+            base_sha: "b1".into(),
+            drafts: store.resumable(run).unwrap().0,
+        };
+        let review = ReviewResult {
+            summary: "New.".into(),
+            comments: vec![],
+            resumed_from: Some(run),
+            ..result()
+        };
+        // Dismissed again, it isn't brought along: it's gone, as a rejected
+        // one is.
+        let basis = Basis {
+            summary: None,
+            comments: vec![],
+            dismissed: vec![dismissal(second[0].id, "Still stale.")],
+        };
+        store
+            .finish_resumed(later.id, &review, &resume, &basis, &carried(&second))
+            .unwrap();
+        let bodies: Vec<String> = store
+            .draft_rows(later.id)
+            .unwrap()
+            .iter()
+            .map(|d| d.body().to_owned())
+            .collect();
+        assert_eq!(bodies, ["New."]);
+    }
+
+    #[test]
+    fn a_resumed_review_brings_along_the_comments_it_dismisses() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        let resume = Resume {
+            run: first,
+            session_id: "sess".into(),
+            head_sha: "h1".into(),
+            base_sha: "b1".into(),
+            drafts: store.resumable(first).unwrap().0,
+        };
+        // Its own summary, and the edited comment kept as its own.
+        let review = ReviewResult {
+            summary: "A new summary.".into(),
+            comments: vec![DraftComment {
+                comment: InlineComment {
+                    body: "and here, too?".into(),
+                    ..result().comments[0].comment.clone()
+                },
+                unanchored: true,
+            }],
+            resumed_from: Some(first),
+            ..result()
+        };
+        let basis = Basis {
+            summary: None,
+            comments: vec![Some(drafts[2].id)],
+            dismissed: vec![
+                // Replaced by its new summary instead.
+                dismissal(drafts[0].id, "Old."),
+                dismissal(drafts[1].id, "Fixed."),
+                // It keeps this one, so it isn't dismissed.
+                dismissal(drafts[2].id, "Contradicts itself."),
+            ],
+        };
+        store
+            .finish_resumed(run, &review, &resume, &basis, &carried(&drafts))
+            .unwrap();
+        let now = store.draft_rows(run).unwrap();
+        let states: Vec<(&str, &str, Option<&str>)> = now
+            .iter()
+            .map(|d| (d.body(), d.status.as_str(), d.obsolete.as_deref()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("A new summary.", "pending", None),
+                ("and here, too?", "pending", None),
+                ("off by one?", "accepted", Some("Fixed.")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_resumed_review_copies_a_dismissed_comment_once_and_not_a_rejected_one() {
+        let mut store = store();
+        let (first, run, drafts) = reviewed_then_pushed(&mut store);
+        store
+            .set_draft_status(drafts[2].id, crate::DraftStatus::Rejected)
+            .unwrap();
+        let resume = Resume {
+            run: first,
+            session_id: "sess".into(),
+            head_sha: "h1".into(),
+            base_sha: "b1".into(),
+            drafts: store.resumable(first).unwrap().0,
+        };
+        let review = ReviewResult {
+            summary: "A new summary.".into(),
+            comments: vec![],
+            resumed_from: Some(first),
+            ..result()
+        };
+        let basis = Basis {
+            summary: None,
+            comments: vec![],
+            dismissed: vec![
+                dismissal(drafts[1].id, "Fixed."),
+                dismissal(drafts[1].id, "Fixed, again."),
+                dismissal(drafts[2].id, "Wrong."),
+            ],
+        };
+        store
+            .finish_resumed(
+                run,
+                &review,
+                &resume,
+                &basis,
+                &carried(&store.drafts(first).unwrap()),
+            )
+            .unwrap();
+        let now = store.draft_rows(run).unwrap();
+        let states: Vec<(&str, &str)> = now.iter().map(|d| (d.body(), d.status.as_str())).collect();
+        assert_eq!(
+            states,
+            [("A new summary.", "pending"), ("off by one?", "accepted")]
+        );
+    }
+
     #[test]
     fn a_review_with_no_update_carries_the_last_ones_drafts() {
         let mut store = store();
@@ -2815,7 +3258,9 @@ mod tests {
         ];
         // Posted while it ran: left out.
         store.mark_posted(&[summary]).unwrap();
-        store.finish_no_update(run.id, &nothing, &carried).unwrap();
+        store
+            .finish_no_update(run.id, &nothing, &carried, &[])
+            .unwrap();
         assert_eq!(status(&store, run.id), "succeeded");
         let now = store.drafts(run.id).unwrap();
         assert_eq!(now.len(), 1, "{now:?}");

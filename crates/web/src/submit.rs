@@ -77,6 +77,9 @@ pub struct Built {
     pub unthreaded: usize,
     /// Drafts still pending, which the review leaves out.
     pub pending: Vec<i64>,
+    /// Accepted drafts the agent has since said are probably obsolete,
+    /// which are posted all the same.
+    pub obsolete: Vec<i64>,
     /// The reviewed head, which the drafts' lines are lines of.
     pub head: String,
     /// A review an earlier submit on the PR left pending on GitHub, or
@@ -256,6 +259,10 @@ pub fn build(
         pending: drafts
             .iter()
             .filter(|d| d.status == "pending")
+            .map(|d| d.id)
+            .collect(),
+        obsolete: accepted()
+            .filter(|d| d.obsolete.is_some())
             .map(|d| d.id)
             .collect(),
         bodies,
@@ -656,6 +663,24 @@ fn sumline(pr: &PrPage, built: &Built) -> Markup {
     }
 }
 
+/// The preview's warning that `n` accepted drafts the agent now thinks
+/// obsolete are posted all the same, linking `back` to the PR's page.
+fn obsolete_check(n: usize, back: &str) -> Markup {
+    let (is, posted, them) = if n == 1 {
+        (" accepted draft is one", " It's posted as it is. ", "it.")
+    } else {
+        (
+            " accepted drafts are ones",
+            " They're posted as they are. ",
+            "them.",
+        )
+    };
+    html! {
+        b.bad { (n) (is) " the agent now thinks obsolete." }
+        (posted) a href=(back) { "Go back" } " to clear the flag, or to un-accept " (them)
+    }
+}
+
 /// What to check before posting: a stale head, comments moved into the
 /// body, replies and thumbs-ups in existing threads, Markdown that hides
 /// things, and drafts left out.
@@ -716,6 +741,9 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
             @if review.is_some() { ", after the review" }
             "."
         });
+    }
+    if !built.obsolete.is_empty() {
+        checks.push(obsolete_check(built.obsolete.len(), back));
     }
     if !missable.is_empty() {
         checks.push(html! {
@@ -1742,6 +1770,7 @@ mod tests {
             choice: None,
             note: None,
             drop_reason: None,
+            obsolete: None,
         }
     }
 

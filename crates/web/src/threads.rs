@@ -105,10 +105,10 @@ impl<'a> Existing<'a> {
 
     /// The threads `draft` overlaps; see [`Thread::overlaps`]. Those you
     /// posted from here count: only a posted draft has a thread as its
-    /// posted form. A draft that's posted or rejected overlaps none: it
-    /// won't be posted again.
+    /// posted form. A draft that's posted, rejected or dismissed overlaps
+    /// none: it won't be posted again, or as it is.
     pub fn overlapping(self, draft: &DraftRow) -> Vec<&'a Thread> {
-        if matches!(draft.status.as_str(), "posted" | "rejected") {
+        if matches!(draft.status.as_str(), "posted" | "rejected" | "dismissed") {
             return Vec::new();
         }
         let Some((path, side, lines)) = lines(draft) else {

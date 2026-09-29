@@ -477,6 +477,9 @@ fn drafts_section(
                 b data-count="pending" { (count("pending")) } " pending · "
                 b.ok data-count="accepted" { (count("accepted")) } " accepted · "
                 b data-count="rejected" { (count("rejected")) } " rejected"
+                @if count("dismissed") > 0 {
+                    " · " b data-count="dismissed" { (count("dismissed")) } " dismissed by the agent"
+                }
             }
             span.sp {
                 span.seg {
@@ -559,8 +562,9 @@ pub fn draft_card(
     revise: &Revise,
 ) -> Markup {
     let editable = matches!(draft.status.as_str(), "pending" | "accepted" | "rejected");
+    // Set aside by the agent: only to restore, or to decide on as it is.
+    let dismissed = draft.status == "dismissed";
     let edit = format!("/drafts/{}/edit", draft.id);
-    let status = format!("/drafts/{}/status", draft.id);
     // A rejected draft folds to one line.
     let open = draft.status != "rejected";
     let context = diff
@@ -607,35 +611,15 @@ pub fn draft_card(
                     a.edited href={ "#draft-" (from) } { "revised from #" (from) }
                 }
                 @if draft.edited_body.is_some() { span.edited { "edited" } }
+                @if draft.obsolete.is_some() && !dismissed && draft.status != "posted" {
+                    a.tag-obsolete href={ "#draft-" (draft.id) "-obsolete" }
+                        title="The agent no longer stands behind this draft; it still posts if accepted." {
+                        "probably obsolete"
+                    }
+                }
                 span.sp {
-                    @if editable {
-                        form.decide method="post" action=(status) hx-post=(status)
-                            hx-target="closest article" hx-swap="outerHTML"
-                            hx-sync="closest article:queue all" {
-                            (csrf_field(app))
-                            @match draft.status.as_str() {
-                                "pending" => {
-                                    button.btn name="status" value="accepted"
-                                        title=[(!overlapping.is_empty()).then_some("As a comment of its own, not in the existing thread.")] {
-                                        @if overlapping.is_empty() { "Accept" } @else { "Post separately" }
-                                        (keycap("y"))
-                                    }
-                                    button.btn name="status" value="rejected" { "Reject" (keycap("n")) }
-                                }
-                                other => {
-                                    span.st.(other) {
-                                        @if other == "accepted" { (accepted) }
-                                        @else if dropped.is_some() { "✕ dropped by the agent" }
-                                        @else { "✕ rejected" }
-                                    }
-                                    button.btn name="status" value="pending"
-                                        title=[dropped.map(|_| "Put it back, pending")] {
-                                        @if dropped.is_some() { "Restore" } @else { "Undo" }
-                                        (keycap("u"))
-                                    }
-                                }
-                            }
-                        }
+                    @if editable || dismissed {
+                        (decide(app, draft, &accepted, overlapping.is_empty(), dropped))
                     } @else {
                         (settled(draft, existing.posted_as(draft.id)))
                     }
@@ -661,6 +645,52 @@ pub fn draft_card(
                 }
             }
             (card_foot(app, draft, editable, dropped, revise))
+            // Once posted, it's settled.
+            @if let Some(reason) = draft.obsolete.as_ref().filter(|_| draft.status != "posted") {
+                (obsolete(app, draft, reason, dismissed, editable))
+            }
+        }
+    }
+}
+
+/// Accept and Reject for a pending draft, or its decision and a way back.
+fn decide(
+    app: &App,
+    draft: &DraftRow,
+    accepted: &str,
+    alone: bool,
+    dropped: Option<&str>,
+) -> Markup {
+    let status = format!("/drafts/{}/status", draft.id);
+    let dismissed = draft.status == "dismissed";
+    html! {
+        form.decide method="post" action=(status) hx-post=(status)
+            hx-target="closest article" hx-swap="outerHTML"
+            hx-sync="closest article:queue all" {
+            (csrf_field(app))
+            @match draft.status.as_str() {
+                "pending" => {
+                    button.btn name="status" value="accepted"
+                        title=[(!alone).then_some("As a comment of its own, not in the existing thread.")] {
+                        @if alone { "Accept" } @else { "Post separately" }
+                        (keycap("y"))
+                    }
+                    button.btn name="status" value="rejected" { "Reject" (keycap("n")) }
+                }
+                other => {
+                    span.st.(other) {
+                        @if other == "accepted" { (accepted) }
+                        @else if dismissed { "✕ dismissed by the agent" }
+                        @else if dropped.is_some() { "✕ dropped by the agent" }
+                        @else { "✕ rejected" }
+                    }
+                    button.btn name="status" value="pending"
+                        title=[(dropped.is_some() || dismissed).then_some("Put it back, pending")] {
+                        @if dropped.is_some() || dismissed { "Restore" } @else { "Undo" }
+                        (keycap("u"))
+                    }
+                }
+            }
         }
     }
 }
@@ -687,6 +717,33 @@ fn card_foot(
         }
         @if let Some(run) = revision { (revision_state(&draft.key, run)) }
         @if revise.open && decidable && !underway { (revise_form(app, draft)) }
+    }
+}
+
+/// Why the agent thinks a draft obsolete: set aside, when it was pending,
+/// or else flagged, with a way to clear the flag, since the draft is yours,
+/// while it's `decidable`.
+fn obsolete(app: &App, draft: &DraftRow, reason: &str, dismissed: bool, decidable: bool) -> Markup {
+    let action = format!("/drafts/{}/obsolete", draft.id);
+    html! {
+        div.obsolete.flagged[!dismissed] #{ "draft-" (draft.id) "-obsolete" } {
+            @if dismissed {
+                b { "The agent dismissed this draft" }
+                span.dim { " (it isn't posted unless you restore or accept it)" } ":"
+            } @else {
+                b { "Probably obsolete, the agent says" }
+                span.dim { " (it's still yours: accepted, it's posted)" } ":"
+            }
+            div.why { (markdown::render(reason, &markdown::Context::default())) }
+            @if decidable {
+                form method="post" action=(action) hx-post=(action)
+                    hx-target="closest article" hx-swap="outerHTML"
+                    hx-sync="closest article:queue all" {
+                    (csrf_field(app))
+                    button.btn type="submit" { "Keep it: clear the flag" }
+                }
+            }
+        }
     }
 }
 
@@ -1026,6 +1083,16 @@ pub async fn set_draft_status(
     decided(&app, id, &headers, |store| {
         store.set_draft_status(id, status)
     })
+}
+
+/// Clears the agent's flag that draft `id` is probably obsolete.
+pub async fn clear_obsolete(
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    let _posting = app.posting.lock().await;
+    decided(&app, id, &headers, |store| store.clear_obsolete(id))
 }
 
 /// Applies `change` to draft `id`, then answers htmx with the redrawn card
