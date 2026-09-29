@@ -18,6 +18,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::{
+    manual::ManualReviews,
     pr::TeamRef,
     repo::RepoName,
     skip::{ProfileSkips, SkipRules, TitleFilter},
@@ -179,7 +180,8 @@ pub struct RunnerSettings {
     pub read_paths: Vec<PathBuf>,
     /// Queued reviews are held until you start one, so turning `serve` on
     /// doesn't review every outstanding request at once. On unless the
-    /// config turns it off.
+    /// config turns it off. A profile's own overrides it for its PRs; see
+    /// [`Config::manual_reviews`].
     pub manual_reviews: bool,
 }
 
@@ -225,6 +227,8 @@ pub struct Profile {
     pub skip_titles: TitleFilter,
     /// Overrides `review_requests.skip_drafts` for PRs this profile matches.
     pub skip_drafts: Option<bool>,
+    /// Overrides `runner.manual_reviews` for PRs this profile matches.
+    pub manual_reviews: Option<bool>,
     pub targets: Vec<Target>,
 }
 
@@ -404,6 +408,20 @@ impl Config {
                     };
                     (p.name.clone(), own)
                 })
+                .collect(),
+        }
+    }
+
+    /// Which PRs manual reviews hold, to share with what holds and shows
+    /// them.
+    #[must_use]
+    pub fn manual_reviews(&self) -> ManualReviews {
+        ManualReviews {
+            runner: self.runner.manual_reviews,
+            overrides: self
+                .profiles
+                .iter()
+                .filter_map(|p| Some((p.name.clone(), p.manual_reviews?)))
                 .collect(),
         }
     }
@@ -653,6 +671,7 @@ fn resolve_profile(
         auto_fix: raw.auto_fix,
         skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
         skip_drafts: raw.skip_drafts,
+        manual_reviews: raw.manual_reviews,
         targets,
     })
 }
@@ -832,6 +851,7 @@ struct RawProfile {
     #[serde(default)]
     skip_titles: Vec<String>,
     skip_drafts: Option<bool>,
+    manual_reviews: Option<bool>,
     // Entries are converted by hand so errors can say which shape was meant.
     repos: Vec<toml::Value>,
 }
@@ -946,6 +966,43 @@ mod tests {
                  invalid type: string \"no\", expected a boolean"
             ),
             "{why}"
+        );
+    }
+
+    #[test]
+    fn a_profiles_manual_reviews_override_the_runners_either_way() {
+        let text = |runner: bool| {
+            format!(
+                r#"
+                [runner]
+                manual_reviews = {runner}
+                [profile.on]
+                manual_reviews = true
+                repos = [{{ github = "a" }}]
+                [profile.off]
+                manual_reviews = false
+                repos = [{{ github = "b" }}]
+                [profile.unset]
+                repos = [{{ github = "c" }}]
+                "#
+            )
+        };
+        for runner in [false, true] {
+            let config = parse(&text(runner)).unwrap();
+            let manual = config.manual_reviews();
+            assert_eq!(
+                manual.overrides,
+                [("on".to_owned(), true), ("off".to_owned(), false)]
+            );
+            assert!(manual.holds("on"));
+            assert!(!manual.holds("off"));
+            assert_eq!(manual.holds("unset"), runner);
+        }
+        let no = "[profile.p]\nmanual_reviews = \"no\"\nrepos = [{ github = \"a\" }]\n";
+        let err = format!("{:#}", parse(no).unwrap_err());
+        assert!(
+            err.contains("invalid type: string \"no\", expected a boolean"),
+            "{err}"
         );
     }
 

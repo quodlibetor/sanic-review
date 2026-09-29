@@ -8,7 +8,8 @@ use crate::skip::Skip;
 pub enum Why {
     /// The latest run failed or crashed.
     Failed,
-    /// Manual reviews (`runner.manual_reviews`) are holding its queued review.
+    /// Manual reviews (`runner.manual_reviews`, or its profile's own) are
+    /// holding its queued review.
     Held,
     /// It isn't reviewed automatically, for this reason: archived, a draft,
     /// already reviewed by someone, or a skipped title.
@@ -18,8 +19,9 @@ pub enum Why {
 impl Why {
     /// From why the PR isn't reviewed automatically, if it isn't
     /// ([`SkipRules::decide`](crate::skip::SkipRules::decide)'s answer),
-    /// and its latest run's status. `None` if there's nothing to start:
-    /// its review is under way, done, or will come by itself.
+    /// its latest run's status, and whether manual reviews hold its
+    /// profile's reviews. `None` if there's nothing to start: its review is
+    /// under way, done, or will come by itself.
     #[must_use]
     pub fn of(skip: Option<&Skip>, latest_run: Option<&str>, manual_reviews: bool) -> Option<Self> {
         match (skip, latest_run) {

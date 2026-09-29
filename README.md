@@ -26,7 +26,8 @@ Nothing is posted until you click.
 - **It isn't free.** Every review spends your Claude tokens, and polling
   spends your GitHub rate limit. So out of the box it holds every review
   until you start it (manual reviews); turn that off, with `m` in the TUI or
-  the dashboard's settings, once you'd rather it just reviewed.
+  the dashboard's settings, once you'd rather it just reviewed, or set it
+  per profile in the config editor.
 - **It only drafts reviews of other people's PRs, for now.** Replies in
   threads you're in, and comments on your own PRs, show up as things to
   answer, but it doesn't draft answers or fixes for them yet.
@@ -257,6 +258,7 @@ skip_titles = ["build(deps)*"]    # never auto-review these
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                       # directories of SKILL.md skills
 model = "auto"                    # your claude default; or name a model
+# manual_reviews = true           # overrides [runner]'s, for this profile's PRs
 repos = [
   { github = "your-org" },
   { repo = "~/src/your-repo", paths = ["/backend/**"] },

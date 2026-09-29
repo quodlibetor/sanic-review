@@ -48,6 +48,7 @@ use color_eyre::eyre::{self, Result, WrapErr};
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
     config::Unloadable,
+    manual::ManualReviews,
     pr::PrKey,
     repo::RepoName,
     skip::SkipRules,
@@ -134,9 +135,9 @@ impl Sources for Mirrors {
 pub struct Context {
     /// The GitHub login everything is judged relative to.
     pub me: String,
-    /// `runner.manual_reviews`: queued reviews are held until you start
-    /// one. Follows config reloads.
-    pub manual_reviews: watch::Receiver<bool>,
+    /// `runner.manual_reviews` and the profiles that override it: queued
+    /// reviews they hold wait until you start one. Follows config reloads.
+    pub manual_reviews: watch::Receiver<ManualReviews>,
     /// Where runs keep their files, under `runs/<id>/`.
     pub data_dir: PathBuf,
     /// `serve`'s config file, for the commands the dashboard shows.
@@ -159,7 +160,7 @@ pub struct Context {
 
 struct App {
     me: String,
-    manual_reviews: watch::Receiver<bool>,
+    manual_reviews: watch::Receiver<ManualReviews>,
     data_dir: PathBuf,
     config_path: PathBuf,
     store: Mutex<Store>,
@@ -185,9 +186,9 @@ struct App {
 }
 
 impl App {
-    /// Whether manual reviews are on, as the config last loaded.
-    fn manual_reviews(&self) -> bool {
-        *self.manual_reviews.borrow()
+    /// What manual reviews hold, as the config last loaded.
+    fn manual_reviews(&self) -> ManualReviews {
+        self.manual_reviews.borrow().clone()
     }
 
     fn store(&self) -> MutexGuard<'_, Store> {

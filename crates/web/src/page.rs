@@ -148,8 +148,8 @@ pub fn counts(app: &App, with_archived: bool, filtered: Option<u32>) -> Markup {
     .ok();
     html! {
         span.counts #counts {
-            @if app.manual_reviews() {
-                a.held href="/settings" { "manual reviews" } " · "
+            @if let Some(badge) = app.manual_reviews().badge() {
+                a.held href="/settings" { (badge) } " · "
             }
             @if let Some((c, pending)) = counts {
                 b { (c.queued) } " queued · " b { (c.running) } " running · "

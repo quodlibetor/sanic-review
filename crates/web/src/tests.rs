@@ -16,6 +16,7 @@ use http_body_util::BodyExt;
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
     config::{CheckoutResolver, Config, Unloadable, Vcs},
+    manual::ManualReviews,
     pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
     run::{
@@ -55,7 +56,7 @@ struct FakeServe {
     /// The recency window, as `serve` publishes it.
     window: Mutex<Option<watch::Sender<RecencyWindow>>>,
     /// Manual reviews, as `serve` publishes them once it reloads.
-    manual: Mutex<Option<watch::Sender<bool>>>,
+    manual: Mutex<Option<watch::Sender<ManualReviews>>>,
     /// Why the config file doesn't load, if it doesn't.
     unloadable: Mutex<Option<String>>,
 }
@@ -75,7 +76,7 @@ impl Control for FakeServe {
         }
         let manual = self.manual.lock().unwrap();
         Ok(Ok(manual.as_ref().is_some_and(|manual| {
-            manual.send_if_modified(|was| std::mem::replace(was, on) != on)
+            manual.send_if_modified(|was| std::mem::replace(&mut was.runner, on) != on)
         })))
     }
 
@@ -363,7 +364,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         choice: None,
     });
     *serve.window.lock().unwrap() = Some(window);
-    let (manual, manual_rx) = watch::channel(manual_reviews);
+    let (manual, manual_rx) = watch::channel(ManualReviews::runner(manual_reviews));
     *serve.manual.lock().unwrap() = Some(manual);
     let clock = Arc::new(FixedClock::default());
     let mirror = Arc::new(FakeMirror::default());
@@ -2543,7 +2544,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
         card_of(&stale).contains("1 held review will start"),
         "{stale}"
     );
-    assert!(f.dashboard.app.manual_reviews());
+    assert!(f.dashboard.app.manual_reviews().runner);
 
     let done = f.post("/settings/manual-reviews", &off).await;
     assert_eq!(done.status, StatusCode::OK);
@@ -2552,7 +2553,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
         "{}",
         done.body
     );
-    assert!(!f.dashboard.app.manual_reviews());
+    assert!(!f.dashboard.app.manual_reviews().runner);
     assert!(!f.get("/").await.body.contains(">manual reviews</a>"));
     // Off as the reload last said, a post turning them off still asks
     // about what's queued: its page may predate a switch the reload
@@ -2578,7 +2579,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
         "{}",
         done.body
     );
-    assert!(f.dashboard.app.manual_reviews());
+    assert!(f.dashboard.app.manual_reviews().runner);
 }
 
 #[tokio::test]
@@ -2601,9 +2602,141 @@ async fn settings_leave_manual_reviews_alone_in_a_config_that_doesnt_load() {
                 refused.body
             );
             assert!(refused.body.contains(&why), "{}", refused.body);
-            assert!(f.dashboard.app.manual_reviews());
+            assert!(f.dashboard.app.manual_reviews().runner);
         }
     }
+}
+
+#[tokio::test]
+async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
+    // `ring` holds its own; the runner's is off.
+    let f = fixture(false).await;
+    let sender = f.serve.manual.lock().unwrap().clone().unwrap();
+    sender.send_replace(ManualReviews {
+        runner: false,
+        overrides: vec![("ring".into(), true)],
+    });
+    let eight = fixture_prs().into_iter().find(|s| s.key == key(8)).unwrap();
+    // PR 8's run is queued under `profile`, then its repo moves to `now`.
+    let queue_then_move = |head: &str, profile: &str, now: &str| {
+        let mut store = f.dashboard.app.store();
+        store
+            .queue_review(&ReviewRequest {
+                key: key(8),
+                profile: profile.into(),
+                head_sha: head.into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap();
+        store.record(&eight, "me", now, &[]).unwrap();
+    };
+    let row_of_8 = |index: &str| {
+        let at = index.find(r#"data-key="org/repo#8""#).unwrap();
+        let end = index[at..]
+            .find(r#"<div class="ib""#)
+            .map_or(index.len(), |n| at + n);
+        index[at..end].to_owned()
+    };
+
+    // Moved into `ring` after it was queued: the worker runs it by
+    // itself, so it's queued, with nothing to start.
+    queue_then_move("h2", "default", "ring");
+    let row = row_of_8(&f.get("/").await.body);
+    assert!(row.contains("it starts when a slot is free"), "{row}");
+    assert!(!row.contains("review-now"), "{row}");
+    let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+
+    // Moved out of `ring`: its run is still held, and Review now starts it.
+    queue_then_move("h3", "ring", "default");
+    let row = row_of_8(&f.get("/").await.body);
+    assert!(
+        row.contains(r#"<span class="chip held">held</span>"#),
+        "{row}"
+    );
+    assert!(row.contains("review-now"), "{row}");
+    let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(8)]);
+}
+
+#[tokio::test]
+async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
+    let f = fixture(false).await;
+    let queue = |number: u32, profile: &str| {
+        f.dashboard
+            .app
+            .store()
+            .queue_review(&ReviewRequest {
+                key: key(number),
+                profile: profile.into(),
+                head_sha: "newer".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap();
+    };
+    // PR 7 follows the runner's; PR 8 is of a profile that holds its own.
+    let eight = fixture_prs().into_iter().find(|s| s.key == key(8)).unwrap();
+    f.dashboard
+        .app
+        .store()
+        .record(&eight, "me", "ring", &[])
+        .unwrap();
+    queue(7, "default");
+    queue(8, "ring");
+    let manual = |runner| ManualReviews {
+        runner,
+        overrides: vec![("ring".into(), true), ("docs".into(), false)],
+    };
+    let sender = f.serve.manual.lock().unwrap().clone().unwrap();
+    sender.send_replace(manual(false));
+
+    // With the runner's off, the badge names the profile that holds, and
+    // only its PR's run reads as held.
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(r#"<a class="held" href="/settings">manual reviews: ring</a>"#),
+        "{index}"
+    );
+    assert!(
+        index.contains(r#"<span class="chip held">held</span>"#),
+        "{index}"
+    );
+    assert!(
+        index.contains("; manual reviews hold it until you start it (r)"),
+        "{index}"
+    );
+    assert!(index.contains("; it starts when a slot is free"), "{index}");
+    let settings = f.get("/settings").await.body;
+    assert!(settings.contains("Manual reviews: off"), "{settings}");
+    assert!(
+        settings.contains("<code>profile.ring</code>: <span class=\"held\">on</span>"),
+        "{settings}"
+    );
+    assert!(
+        settings.contains("<code>profile.docs</code>: off"),
+        "{settings}"
+    );
+
+    // With it on, turning it off would start only PR 7's: PR 8's own
+    // still holds it.
+    sender.send_replace(manual(true));
+    let settings = f.get("/settings").await.body;
+    assert!(settings.contains("1 held review now"), "{settings}");
+    let confirm = f.get("/settings/manual-reviews").await.body;
+    assert!(
+        card_of(&confirm).contains("1 held review will start. Continue?"),
+        "{confirm}"
+    );
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(r#"<a class="held" href="/settings">manual reviews</a>"#),
+        "{index}"
+    );
 }
 
 /// A confirm or result page's card, as the dashboard's dialog lifts it.

@@ -3,9 +3,9 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # keys = "emacs"                                                   (guessed) │"
-"│  ┌ Watch in [profile.ring] ───────────────────────────────────────────────┐  │"
-"│ [│ checkouts under /src, 2 deep                                           │  │"
+"│ [profile.ring]                                                               │"
+"│ #┌ Watch in [profile.ring] ───────────────────────────────────────────────┐  │"
+"│ #│ checkouts under /src, 2 deep                                           │) │"
 "│ #│                                                                        │  │"
 "│ #│ [ ] other  every repo in it · one of your orgs                         │) │"
 "│ #│ [ ] else  every repo in it · an owner of checkouts found               │  │"

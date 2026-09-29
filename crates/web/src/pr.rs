@@ -178,9 +178,8 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
     let pr = h.pr;
     // `—` fills a column; in a sentence it says nothing.
     let state = h.state.filter(|state| !state.is_blank());
-    let manual_reviews = app.manual_reviews();
-    let status = h.owed.map(|o| owed_status(o, h.overview, manual_reviews));
-    let why = h.owed.and_then(|o| why(o, h.overview, manual_reviews));
+    let status = h.owed.map(|o| owed_status(o, h.overview));
+    let why = h.owed.and_then(|o| why(o, h.overview));
     let href = pr_href(&pr.key);
     html! {
         div.prh {
@@ -1161,7 +1160,7 @@ pub async fn confirm_review_now(
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
     let owed = overview.owed.iter().find(|pr| pr.key == key);
-    let why = owed.and_then(|pr| why(pr, &overview, app.manual_reviews()));
+    let why = owed.and_then(|pr| why(pr, &overview));
     let pr = app
         .store()
         .pr_page(&key)
@@ -1272,7 +1271,7 @@ pub async fn review_now(
             key.url()
         )));
     };
-    if why(owed, &overview, app.manual_reviews()).is_none() {
+    if why(owed, &overview).is_none() {
         return Err(Error::Refused(format!(
             "there's nothing to start for {}: its review isn't failed, held or skipped",
             key.url()

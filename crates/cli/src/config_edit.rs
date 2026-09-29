@@ -9,7 +9,10 @@ use std::{
 };
 
 use color_eyre::eyre::{Result, WrapErr, bail};
-use sanic_core::config::{CheckoutResolver, Config, Unloadable};
+use sanic_core::{
+    config::{CheckoutResolver, Config, Unloadable},
+    manual::ManualReviews,
+};
 use toml_edit::{Array, DocumentMut, Item, RawString, Table, TableLike, Value};
 
 /// Sets `[table].key`, creating the table as needed. A replaced value keeps
@@ -396,15 +399,15 @@ fn set_manual_reviews(doc: &mut DocumentMut, on: bool) -> Result<bool> {
     Ok(true)
 }
 
-/// Whether the config file at `path` has manual reviews on, as `serve`
+/// What manual reviews hold by the config file at `path`, as `serve`
 /// would load it now. A value that isn't a bool, or anything else that
 /// keeps the file from loading, is an error, not the default.
 pub fn manual_reviews_in_file(
     path: &Path,
     resolver: &dyn CheckoutResolver,
-) -> Result<bool, Unloadable> {
+) -> Result<ManualReviews, Unloadable> {
     Config::load(path, resolver)
-        .map(|config| config.runner.manual_reviews)
+        .map(|config| config.manual_reviews())
         .map_err(Unloadable)
 }
 

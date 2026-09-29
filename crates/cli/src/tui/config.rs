@@ -23,7 +23,10 @@ use std::{
 
 use color_eyre::eyre::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sanic_core::config::{Keys, contract_path};
+use sanic_core::{
+    config::{DEFAULT_MANUAL_REVIEWS, Keys, contract_path},
+    manual::ManualReviews,
+};
 
 pub use self::check::{Checked, Checker};
 use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
@@ -608,11 +611,26 @@ impl ConfigEditor {
         self.popup = Some(Popup::Held(held));
     }
 
-    /// Whether saving turns manual reviews off, which `serve` has `on`.
+    /// What manual reviews would hold once the edits are saved, which
+    /// starts the held reviews of profiles they no longer hold.
     #[must_use]
-    pub fn turns_manual_reviews_off(&self, on: bool) -> bool {
-        let key = Key::new(Table::Runner, "manual_reviews");
-        on && key.is_some_and(|k| self.doc.scalar(&k) == Setting::Set(Scalar::Bool(false)))
+    pub fn manual_reviews(&self) -> ManualReviews {
+        let set = |table: Table| {
+            let key = Key::new(table, "manual_reviews")?;
+            match self.doc.scalar(&key) {
+                Setting::Set(Scalar::Bool(on)) => Some(on),
+                _ => None,
+            }
+        };
+        ManualReviews {
+            runner: set(Table::Runner).unwrap_or(DEFAULT_MANUAL_REVIEWS),
+            overrides: self
+                .doc
+                .profiles()
+                .into_iter()
+                .filter_map(|name| Some((name.clone(), set(Table::Profile(name))?)))
+                .collect(),
+        }
     }
 
     /// How [`Outcome::Save`] went. Once written, editing carries on from

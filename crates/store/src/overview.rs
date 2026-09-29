@@ -4,6 +4,7 @@
 use color_eyre::eyre::Result;
 use rusqlite::{OptionalExtension, Row, params, types::Type};
 use sanic_core::{
+    manual::ManualReviews,
     pr::{PrKey, is_login},
     repo::RepoName,
     reviewers::{ReviewRecord, Reviewer, SeenHead, reviewers},
@@ -81,11 +82,23 @@ impl OwedReview {
     pub fn latest_status(&self) -> Option<&str> {
         self.latest_run.as_ref().map(|run| run.status.as_str())
     }
+
+    /// Whether its latest run is queued and `manual` holds it, by the
+    /// profile it was queued under, as the worker decides: not the PR's
+    /// profile now, which a config change can have moved.
+    #[must_use]
+    pub fn held(&self, manual: &ManualReviews) -> bool {
+        self.latest_run
+            .as_ref()
+            .is_some_and(|run| run.status == "queued" && manual.holds(&run.profile))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestRun {
     pub status: String,
+    /// The profile it was queued under.
+    pub profile: String,
     /// Why a failed or crashed run ended.
     pub error: Option<String>,
     /// It succeeded, resuming an earlier run's session, and found nothing
@@ -131,6 +144,8 @@ pub struct RowFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunTimes {
     pub status: String,
+    /// The profile it was queued under.
+    pub profile: String,
     pub queued_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -183,7 +198,10 @@ pub struct Activity {
 pub enum ActivityKind {
     /// A detected trigger, by its kind (`review_requested`, `push`, ...).
     Trigger(String),
-    RunQueued,
+    /// A run was queued, for a PR that matched `profile`.
+    RunQueued {
+        profile: String,
+    },
     RunStarted,
     /// A run ended: succeeded, failed, crashed or superseded. `error` says
     /// why a failed or crashed one did.
@@ -206,7 +224,7 @@ impl Store {
                         SELECT id FROM runs s
                         WHERE s.repo = p.repo AND s.number = p.number AND s.session_id IS NOT NULL
                         ORDER BY coalesce(s.finished_at, s.queued_at) DESC, s.id DESC LIMIT 1),
-                    latest.no_update IS NOT NULL
+                    latest.no_update IS NOT NULL, latest.profile
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -221,6 +239,7 @@ impl Store {
                 let status: Option<String> = row.get(7)?;
                 let error: Option<String> = row.get(8)?;
                 let no_update: bool = row.get(13)?;
+                let run_profile: Option<String> = row.get(14)?;
                 Ok(OwedReview {
                     key: key_columns(row)?,
                     title: row.get(2)?,
@@ -230,6 +249,7 @@ impl Store {
                     archived: row.get(6)?,
                     latest_run: status.map(|status| LatestRun {
                         status,
+                        profile: run_profile.unwrap_or_default(),
                         error,
                         no_update,
                     }),
@@ -363,7 +383,7 @@ impl Store {
         let latest_run = self
             .conn
             .prepare_cached(
-                "SELECT queued_at, started_at, finished_at, status FROM runs
+                "SELECT queued_at, started_at, finished_at, status, profile FROM runs
                  WHERE repo = ?1 AND number = ?2
                  ORDER BY queued_at DESC, id DESC LIMIT 1",
             )?
@@ -373,6 +393,7 @@ impl Store {
                     started_at: row.get(1)?,
                     finished_at: row.get(2)?,
                     status: row.get(3)?,
+                    profile: row.get(4)?,
                 })
             })
             .optional()?;
@@ -450,7 +471,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT at, repo, number, 'trigger', kind, NULL FROM events
              UNION ALL
-             SELECT queued_at, repo, number, 'queued', NULL, NULL FROM runs
+             SELECT queued_at, repo, number, 'queued', profile, NULL FROM runs
              UNION ALL
              SELECT started_at, repo, number, 'started', NULL, NULL FROM runs
              WHERE started_at IS NOT NULL
@@ -477,7 +498,7 @@ impl Store {
                 let detail = detail.unwrap_or_default();
                 let kind = match what.as_str() {
                     "trigger" => ActivityKind::Trigger(detail),
-                    "queued" => ActivityKind::RunQueued,
+                    "queued" => ActivityKind::RunQueued { profile: detail },
                     "started" => ActivityKind::RunStarted,
                     _ => ActivityKind::RunFinished {
                         status: detail,
@@ -649,6 +670,7 @@ mod tests {
             latest(&store),
             Some(LatestRun {
                 status: "crashed".into(),
+                profile: pushed.profile.clone(),
                 error: Some("index out of bounds".into()),
                 no_update: false,
             })
@@ -1197,7 +1219,9 @@ mod tests {
                     error: Some("boom".into()),
                 },
                 ActivityKind::RunStarted,
-                ActivityKind::RunQueued,
+                ActivityKind::RunQueued {
+                    profile: run.request.profile.clone(),
+                },
                 ActivityKind::Trigger("review_requested".into()),
             ]
         );

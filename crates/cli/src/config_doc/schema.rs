@@ -205,6 +205,12 @@ pub const PROFILE: &[Field] = &[
         "the review model for this profile's PRs",
     ),
     Field::new(
+        "manual_reviews",
+        Kind::Bool,
+        Fallback::Inherits(Table::Runner, "manual_reviews"),
+        "overrides `runner.manual_reviews` for this profile's PRs",
+    ),
+    Field::new(
         "skip_titles",
         Kind::List,
         Fallback::Nothing,

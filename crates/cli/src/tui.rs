@@ -37,6 +37,7 @@ use ratatui::{
 use sanic_core::{
     clock::{Clock, window_start},
     config::{CheckoutResolver, Keys, Unloadable},
+    manual::ManualReviews,
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
     start::Why,
@@ -193,8 +194,9 @@ impl Drop for Tui {
 pub struct Shared {
     /// The GitHub login everything is judged relative to.
     pub me: String,
-    /// `runner.manual_reviews`, as the config last loaded.
-    pub manual_reviews: watch::Receiver<bool>,
+    /// `runner.manual_reviews` and the profiles that override it, as the
+    /// config last loaded.
+    pub manual_reviews: watch::Receiver<ManualReviews>,
     /// `tui.keys`, as the config last loaded, for the ignore editor.
     pub keys: watch::Receiver<Option<Keys>>,
     /// The keys text fields take where the config doesn't say, guessed
@@ -470,15 +472,17 @@ fn act_for_editor(host: &Host, flow: Flow, app: &mut App, shared: &Shared, store
 }
 
 /// Starts writing the config editor's edits, off the UI thread since it
-/// loads them first, asking first when they turn manual reviews off with
-/// more reviews held than it was `told` of.
+/// loads them first, asking first when they stop manual reviews holding
+/// more reviews than it was `told` of: `runner.manual_reviews`, or a
+/// profile's own, turned off.
 fn save_config(app: &mut App, host: &Host, shared: &Shared, store: &Store, told: u32) {
-    let on = *shared.manual_reviews.borrow();
+    let before = shared.manual_reviews.borrow().clone();
     let Some(editor) = app.editor_mut() else {
         return;
     };
-    if editor.turns_manual_reviews_off(on) {
-        match count_held(store) {
+    let after = editor.manual_reviews();
+    if before.releases_any(&after) {
+        match count_held(store, |profile| before.releases(&after, profile)) {
             Ok(held) if held > told => return editor.ask_held(held),
             Ok(_) => {}
             Err(err) => {
@@ -519,13 +523,18 @@ type ConfigFile<'a> = (&'a Path, &'a dyn CheckoutResolver);
 /// anything yet.
 fn switch_manual_reviews(app: &mut App, config: ConfigFile, store: &Store) -> Option<String> {
     let (path, resolver) = config;
-    let on = match config_edit::manual_reviews_in_file(path, resolver) {
-        Ok(on) => on,
+    let manual = match config_edit::manual_reviews_in_file(path, resolver) {
+        Ok(manual) => manual,
         Err(why) => return Some(unloadable(&why)),
     };
-    match if on { count_held(store) } else { Ok(0) } {
+    let held = if manual.runner {
+        count_released(store, &manual)
+    } else {
+        Ok(0)
+    };
+    match held {
         Ok(held) => app
-            .switch_manual_reviews(on, held)
+            .switch_manual_reviews(manual.runner, held)
             .map(|on| set_manual_reviews(config, on)),
         Err(err) => {
             warn!("switching manual reviews failed: {err:?}");
@@ -543,7 +552,12 @@ fn turn_off_manual_reviews(
     store: &Store,
     told: u32,
 ) -> Option<String> {
-    match count_held(store) {
+    let (path, resolver) = config;
+    let manual = match config_edit::manual_reviews_in_file(path, resolver) {
+        Ok(manual) => manual,
+        Err(why) => return Some(unloadable(&why)),
+    };
+    match count_released(store, &manual) {
         Ok(held) => app
             .turn_off_manual_reviews(held, told)
             .then(|| set_manual_reviews(config, false)),
@@ -554,11 +568,19 @@ fn turn_off_manual_reviews(
     }
 }
 
-/// The reviews manual reviews are holding, which turning them off starts.
-fn count_held(store: &Store) -> Result<u32> {
+/// The queued reviews of profiles `counted`: the held reviews a switch
+/// starts.
+fn count_held(store: &Store, counted: impl Fn(&str) -> bool) -> Result<u32> {
     store
-        .queued_review_count()
+        .queued_review_count(counted)
         .wrap_err("counting the held reviews")
+}
+
+/// The reviews turning `runner.manual_reviews` off starts: those of the
+/// profiles that follow it in `manual`, which the config file says, since
+/// that's what the switch writes to.
+fn count_released(store: &Store, manual: &ManualReviews) -> Result<u32> {
+    count_held(store, |profile| manual.follows_runner(profile))
 }
 
 /// Turns manual reviews on or off in the config file, and says how that
@@ -604,9 +626,9 @@ pub struct Overview {
     pub skipped: HashMap<PrKey, Skip>,
     /// The config's profiles, in file order.
     pub profiles: Vec<String>,
-    /// `runner.manual_reviews`: queued reviews are held, not waiting their
-    /// turn.
-    pub manual_reviews: bool,
+    /// `runner.manual_reviews` and the profiles that override it: queued
+    /// reviews they hold wait until you start them, not their turn.
+    pub manual_reviews: ManualReviews,
     /// The keys the ignore editor's pattern takes.
     pub keys: Keys,
 }
@@ -642,7 +664,7 @@ impl Overview {
         // Not held through the queries below: it blocks a config reload.
         drop(skips);
         Ok(Self {
-            manual_reviews: *shared.manual_reviews.borrow(),
+            manual_reviews: shared.manual_reviews.borrow().clone(),
             keys: shared.keys.borrow().unwrap_or(shared.guessed_keys),
             owed,
             skipped,
@@ -1066,7 +1088,8 @@ impl App {
             return;
         };
         let skip = self.overview.skipped.get(&pr.key);
-        let Some(why) = Why::of(skip, pr.latest_status(), self.overview.manual_reviews) else {
+        let held = pr.held(&self.overview.manual_reviews);
+        let Some(why) = Why::of(skip, pr.latest_status(), held) else {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
@@ -1303,14 +1326,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             // Newest first: a held review is one nothing newer for its PR
             // has started or finished, so history from runs that went ahead
             // still reads "queued".
-            let held = overview.manual_reviews
-                && !events[..i].iter().any(|newer| {
-                    newer.key == a.key
-                        && matches!(
-                            newer.kind,
-                            ActivityKind::RunStarted | ActivityKind::RunFinished { .. }
-                        )
-                });
+            let held = matches!(
+                &a.kind,
+                ActivityKind::RunQueued { profile } if overview.manual_reviews.holds(profile)
+            ) && !events[..i].iter().any(|newer| {
+                newer.key == a.key
+                    && matches!(
+                        newer.kind,
+                        ActivityKind::RunStarted | ActivityKind::RunFinished { .. }
+                    )
+            });
             activity_row(a, held)
         })
         .collect();
@@ -1480,7 +1505,9 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview) -> ListItem<'a> {
         _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), Color::DarkGray),
         (Some(left), _) => (format!("waiting {}", countdown(left)), Color::DarkGray),
         (None, None) => ("waiting".into(), Color::DarkGray),
-        (None, Some("queued")) if overview.manual_reviews => ("held".into(), Color::Yellow),
+        (None, Some("queued")) if pr.held(&overview.manual_reviews) => {
+            ("held".into(), Color::Yellow)
+        }
         (None, Some("queued")) => ("queued".into(), Color::Yellow),
         (None, Some("running")) => ("running".into(), Color::Cyan),
         (None, Some("succeeded")) if latest.is_some_and(|r| r.no_update) => {
@@ -1572,8 +1599,8 @@ fn drafts(n: u32) -> Span<'static> {
 fn activity_row(activity: &Activity, held: bool) -> ListItem<'_> {
     let what = match &activity.kind {
         ActivityKind::Trigger(kind) => kind.replace('_', " "),
-        ActivityKind::RunQueued if held => "review held".into(),
-        ActivityKind::RunQueued => "review queued".into(),
+        ActivityKind::RunQueued { .. } if held => "review held".into(),
+        ActivityKind::RunQueued { .. } => "review queued".into(),
         ActivityKind::RunStarted => "review started".into(),
         ActivityKind::RunFinished { status, .. } if status == "succeeded" => {
             "review drafted".into()
@@ -1618,8 +1645,8 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, overview: &Overview, notice:
         "{} queued · {} running · {pending} pending drafts ",
         counts.queued, counts.running
     );
-    if overview.manual_reviews {
-        right.insert_str(0, "manual reviews · ");
+    if let Some(badge) = overview.manual_reviews.badge() {
+        right.insert_str(0, &format!("{badge} · "));
     }
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Fill(1),
@@ -1772,6 +1799,7 @@ mod tests {
     fn latest(status: &str, error: Option<&str>) -> LatestRun {
         LatestRun {
             status: status.into(),
+            profile: "default".into(),
             error: error.map(Into::into),
             no_update: false,
         }
@@ -1898,7 +1926,7 @@ mod tests {
             running: Vec::new(),
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
             profiles: vec!["default".into(), "ring".into()],
-            manual_reviews: false,
+            manual_reviews: ManualReviews::default(),
             keys: Keys::Emacs,
             skipped: HashMap::from([(
                 pr("org/api", 490),
@@ -1913,7 +1941,7 @@ mod tests {
     fn app(manual_reviews: bool) -> App {
         let mut app = App::new();
         app.set_overview(Overview {
-            manual_reviews,
+            manual_reviews: ManualReviews::runner(manual_reviews),
             ..overview()
         });
         app.set_logs(
@@ -2106,7 +2134,7 @@ mod tests {
         let (window_tx, window) = watch::channel(Some(14));
         let shared = Shared {
             me: "me".into(),
-            manual_reviews: watch::channel(false).1,
+            manual_reviews: watch::channel(ManualReviews::default()).1,
             keys: watch::channel(None).1,
             guessed_keys: Keys::Emacs,
             logs: LogLines::default(),
@@ -2204,17 +2232,66 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_holding_its_own_reviews_is_named_and_only_its_prs_read_held() {
+        let mut app = App::new();
+        let mut overview = Overview {
+            manual_reviews: ManualReviews {
+                runner: false,
+                overrides: vec![("ring".into(), true), ("docs".into(), false)],
+            },
+            ..Overview::default()
+        };
+        for (number, profile, title) in [(90, "ring", "Alpha"), (91, "default", "Beta")] {
+            overview.owed.push(OwedReview {
+                profile: profile.into(),
+                latest_run: Some(LatestRun {
+                    profile: profile.into(),
+                    ..latest("queued", None)
+                }),
+                ..owed("org/web", number, title, "erin")
+            });
+            overview.activity.push(Activity {
+                at: "2026-09-23T16:36:00.000Z".into(),
+                key: pr("org/web", number),
+                kind: ActivityKind::RunQueued {
+                    profile: profile.into(),
+                },
+            });
+        }
+        app.set_overview(overview);
+        let terminal = draw(&mut app, 100, 24);
+        let screen = terminal.backend().to_string();
+        let line = |needle: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(
+            line("pending drafts").contains("manual reviews: ring · "),
+            "{screen}"
+        );
+        assert!(line("Alpha").contains("held"), "{screen}");
+        assert!(line("Beta").contains("queued"), "{screen}");
+        assert!(line("review held").contains("pull/90"), "{screen}");
+        assert!(line("review queued").contains("pull/91"), "{screen}");
+    }
+
+    #[test]
     fn queued_reviews_read_as_held_under_manual_reviews() {
         let queued = |manual: bool| {
             let mut app = App::new();
             let mut overview = Overview {
-                manual_reviews: manual,
+                manual_reviews: ManualReviews::runner(manual),
                 ..Overview::default()
             };
             overview.activity.push(Activity {
                 at: "2026-09-23T16:36:00.000Z".into(),
                 key: pr("org/web", 79),
-                kind: ActivityKind::RunQueued,
+                kind: ActivityKind::RunQueued {
+                    profile: "default".into(),
+                },
             });
             app.set_overview(overview);
             draw(&mut app, 80, 16).backend().to_string()
@@ -2229,12 +2306,17 @@ mod tests {
         // One that has since started isn't held.
         let mut app = App::new();
         let mut overview = Overview {
-            manual_reviews: true,
+            manual_reviews: ManualReviews::runner(true),
             ..Overview::default()
         };
         for (at, kind) in [
             ("2026-09-23T16:37:00.000Z", ActivityKind::RunStarted),
-            ("2026-09-23T16:36:00.000Z", ActivityKind::RunQueued),
+            (
+                "2026-09-23T16:36:00.000Z",
+                ActivityKind::RunQueued {
+                    profile: "default".into(),
+                },
+            ),
         ] {
             overview.activity.push(Activity {
                 at: at.into(),
@@ -2396,6 +2478,55 @@ mod tests {
     }
 
     #[test]
+    fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
+        // `ring` holds its own; the runner's is off.
+        let manual = ManualReviews {
+            runner: false,
+            overrides: vec![("ring".into(), true)],
+        };
+        let one = |pr_profile: &str, run_profile: &str| {
+            let mut app = App::new();
+            app.set_overview(Overview {
+                manual_reviews: manual.clone(),
+                owed: vec![OwedReview {
+                    profile: pr_profile.into(),
+                    latest_run: Some(LatestRun {
+                        profile: run_profile.into(),
+                        ..latest("queued", None)
+                    }),
+                    ..owed("org/web", 90, "Moved", "erin")
+                }],
+                ..Overview::default()
+            });
+            let screen = draw(&mut app, 80, 16).backend().to_string();
+            let row = screen
+                .lines()
+                .find(|line| line.contains("Moved"))
+                .unwrap_or_default()
+                .to_owned();
+            // Its only row, selected.
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('r'));
+            (row, app.overlay)
+        };
+        // Its repo moved into `ring` after the run was queued, which the
+        // worker runs by itself: queued, with nothing to start.
+        let (row, overlay) = one("ring", "default");
+        assert!(row.contains("queued"), "{row}");
+        assert_eq!(overlay, None);
+        // Moved out of `ring`: its run is still held, and `r` starts it.
+        let (row, overlay) = one("default", "ring");
+        assert!(row.contains("held"), "{row}");
+        assert_eq!(
+            overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 90),
+                why: Why::Held,
+            })
+        );
+    }
+
+    #[test]
     fn r_starts_a_held_review_under_manual_reviews() {
         let mut manual = app(true);
         // The queued "Fix login flake".
@@ -2501,6 +2632,38 @@ mod tests {
     }
 
     #[test]
+    fn m_counts_only_the_held_reviews_turning_it_off_starts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[runner]\nmanual_reviews = true\n\
+             [profile.p]\nrepos = [{ github = \"org\" }]\n\
+             [profile.q]\nmanual_reviews = true\nrepos = [{ github = \"else\" }]\n",
+        )
+        .unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        // `q`'s own keeps holding its review once the runner's is off.
+        for (number, profile) in [(77, "p"), (78, "q")] {
+            let queued = pr("org/web", number);
+            let snapshot = crate::poll::tests::snapshot(&queued, "alice", &[]);
+            store.record(&snapshot, "me", profile, &[]).unwrap();
+            let request = store.review_request(&queued).unwrap().unwrap();
+            store.queue_review(&request).unwrap().unwrap();
+        }
+        let mut app = App::new();
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('m'))),
+            Flow::SwitchManualReviews
+        );
+        assert_eq!(
+            switch_manual_reviews(&mut app, (&path, &NoCheckouts), &store),
+            None
+        );
+        assert_eq!(app.overlay, Some(Overlay::ConfirmAutomatic(1)));
+    }
+
+    #[test]
     fn a_quick_second_m_undoes_the_first_though_the_ui_hasnt_caught_up() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
@@ -2510,7 +2673,7 @@ mod tests {
         // reread before the next.
         let mut app = App::new();
         app.set_overview(Overview {
-            manual_reviews: true,
+            manual_reviews: ManualReviews::runner(true),
             ..Overview::default()
         });
         let press_m = |app: &mut App, store: &Store| {
@@ -2529,10 +2692,10 @@ mod tests {
         let manual = || config_edit::manual_reviews_in_file(&path, &NoCheckouts).unwrap();
         let off = press_m(&mut app, &store).unwrap();
         assert!(off.starts_with("manual reviews off"), "{off}");
-        assert!(!manual());
+        assert!(!manual().runner);
         let on = press_m(&mut app, &store).unwrap();
         assert!(on.starts_with("manual reviews on"), "{on}");
-        assert!(manual());
+        assert!(manual().runner);
 
         // Held reviews the panes haven't counted yet still get asked about,
         // at `m` and again at `y`.
@@ -2549,10 +2712,10 @@ mod tests {
         hold(&mut store, 78);
         assert_eq!(press_y(&mut app, &store), None);
         assert_eq!(app.overlay, Some(Overlay::ConfirmAutomatic(2)));
-        assert!(manual());
+        assert!(manual().runner);
         let off = press_y(&mut app, &store).unwrap();
         assert!(off.starts_with("manual reviews off"), "{off}");
-        assert!(!manual());
+        assert!(!manual().runner);
     }
 
     #[test]

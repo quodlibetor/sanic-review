@@ -814,13 +814,23 @@ impl Store {
         rows.into_iter().map(queued_run).collect()
     }
 
-    /// How many [`Store::queued_reviews`] there are.
-    pub fn queued_review_count(&self) -> Result<u32> {
-        Ok(self.conn.query_row(
-            "SELECT count(*) FROM runs WHERE status = 'queued' AND kind = ?1",
-            [REVIEW],
-            |row| row.get(0),
-        )?)
+    /// How many [`Store::queued_reviews`] there are of PRs whose profile,
+    /// as each was queued, is `counted`.
+    pub fn queued_review_count(&self, counted: impl Fn(&str) -> bool) -> Result<u32> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT profile, count(*) FROM runs WHERE status = 'queued' AND kind = ?1
+             GROUP BY profile",
+        )?;
+        let rows = stmt
+            .query_map([REVIEW], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(profile, _)| counted(profile))
+            .map(|(_, n)| n)
+            .sum())
     }
 
     /// `key`'s review that's queued but not started, if any.
@@ -2687,7 +2697,9 @@ mod tests {
             store.queued_reviews().unwrap(),
             std::slice::from_ref(&source)
         );
-        assert_eq!(store.queued_review_count().unwrap(), 1);
+        assert_eq!(store.queued_review_count(|_| true).unwrap(), 1);
+        let profile = &source.request.profile;
+        assert_eq!(store.queued_review_count(|p| p != profile).unwrap(), 0);
         store.claim_run(source.id).unwrap();
         store.finish_review(source.id, &result()).unwrap();
         let Regeneration::Queued(_) = store.queue_regeneration(source.id, "x", |_| false).unwrap()
@@ -2695,7 +2707,7 @@ mod tests {
             panic!("refused");
         };
         assert!(store.queued_reviews().unwrap().is_empty());
-        assert_eq!(store.queued_review_count().unwrap(), 0);
+        assert_eq!(store.queued_review_count(|_| true).unwrap(), 0);
     }
 
     #[test]

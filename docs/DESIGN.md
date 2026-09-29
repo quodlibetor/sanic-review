@@ -50,6 +50,18 @@ stay queued in the store. While it's on, the log and the TUI's Activity pane
 say "review held" where they'd otherwise say "review queued", and the TUI's
 status bar and the dashboard's top bar say "manual reviews".
 
+A profile's `manual_reviews` overrides `runner.manual_reviews` for its
+PRs, either way, as its `model` overrides `runner.model`; profiles
+without one follow the runner's, as does a run whose profile the config
+no longer has. A profile's that isn't a bool is an error, as the
+runner's is. Whether a queued review is held goes by the profile it was
+queued under, not the PR's profile now, which a config change can have
+moved: the worker, the PR's status ("held" or "queued"), why it may be
+started by hand, and what `r`, Review now and `sanic-review review`
+start all go by it, so they agree. With `runner.manual_reviews` off and
+some profiles holding theirs, the status bar and the top bar say "manual
+reviews: <profiles>", naming them in file order.
+
 It's a setting like any other: `m` in the TUI and the dashboard's Settings
 page write it to the config file, and `serve` follows it through the
 config reload, so the file is the one place it lives. Both read the
@@ -61,11 +73,15 @@ isn't following. A `runner.manual_reviews` that isn't a bool is such an
 error, not "unset". `serve
 --manual-reviews` writes it on at startup when the config turns it off;
 otherwise it leaves the file alone, so a config `serve` can't write still
-starts.
-Turning it off starts every held review, the worker running
-`runner.max_concurrent` at a time; the TUI and the dashboard first say how
-many will start and wait for a yes, while a hand edit of the file that
-turns it off releases them on reload without asking. Turning it on asks
+starts. `m`, the Settings page and `--manual-reviews` switch only
+`runner.manual_reviews`; a profile's own is edited in the config editor.
+Turning it off starts every held review of the profiles that follow it,
+the worker running `runner.max_concurrent` at a time; the TUI and the
+dashboard first say how many will start, leaving out those a profile's
+own still holds, and wait for a yes, while a hand edit of the file that
+turns it off releases them on reload without asking. Any reload that
+stops holding a profile's reviews, a profile's own turned off included,
+starts that profile's held reviews the same way. Turning it on asks
 nothing: running reviews carry on, and queued ones are held from then on,
 including those already waiting for a free slot.
 
@@ -109,7 +125,8 @@ starts a reconcile right away. An invalid one is logged and the previous
 config stays in force. `github.api_url` is only read at startup.
 Profiles, `[runner]` (including `read_paths`), `github.git_url` and the
 set of reference checkouts apply to runs that start after the reload. Lowering `runner.max_concurrent` takes effect as running runs
-finish. `runner.manual_reviews` applies at once, as above.
+finish. Manual reviews, the runner's and the profiles' own, apply at
+once, as above.
 
 The poller has its own SQLite connection; the scheduler and runner share a
 second one, so polling never waits on them.
@@ -176,6 +193,7 @@ skills = []                            # skill dirs made available to the agent
 model = "claude-sonnet-5"
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
 # skip_drafts = false                  # overrides review_requests.skip_drafts
+# manual_reviews = false               # overrides runner.manual_reviews
 repos = [{ github = "my-org" }]
 
 [profile.ring]
@@ -844,7 +862,8 @@ fonttools (run through `uv`, which only this task needs) to
     lists it only counts the facets in use.
   - The TUI has no filter.
 - **Top bar.** Every page's: home, where the page is, "manual reviews"
-  while they're on, the queued, running and pending draft counts, and a
+  while they're on, or "manual reviews: <profiles>" while only some
+  profiles' own hold theirs (see Manual reviews), the queued, running and pending draft counts, and a
   link to Settings. Pending drafts are counted, here, in
   the lists and in the TUI, only from each PR's current run: its latest
   review or regeneration that succeeded, the one its page shows. A
@@ -1159,15 +1178,18 @@ fonttools (run through `uv`, which only this task needs) to
   top bar. Edits are written back to the config file, preserving its
   comments and layout, and take effect through the same reload path as a
   hand edit. Each is a post behind the token and origin checks. For now
-  it has manual reviews: on or off, and how many reviews they hold.
-  Turning them on is one post. Turning them off while reviews are held
-  goes through a confirm card, "N held reviews will start. Continue?",
-  whose post carries that count; a post told of fewer than are held by
-  then shows the card again with the new count instead of switching. A
-  post turning them off checks the count whether or not the last reload
-  had them on, since a page can be drawn before a switch elsewhere. A
-  config file that doesn't load isn't written: the post is refused, with
-  why.
+  it has manual reviews: `runner.manual_reviews` on or off, how many
+  reviews it holds, and the profiles that set their own, each with its
+  value, which the page doesn't switch. Turning it on is one post.
+  Turning it off while reviews are held goes through a confirm card, "N
+  held reviews will start. Continue?", whose post carries that count; a
+  post told of fewer than are held by then shows the card again with the
+  new count instead of switching. The count is of the queued reviews of
+  profiles that follow `runner.manual_reviews`: those a profile's own
+  holds stay held. A post turning it off checks the count whether or not
+  the last reload had it on, since a page can be drawn before a switch
+  elsewhere. A config file that doesn't load isn't written: the post is
+  refused, with why.
 
 ## Terminal UI
 
@@ -1305,7 +1327,9 @@ fonttools (run through `uv`, which only this task needs) to
   held reviews in the store then too, and again on `y`. Off, while reviews
   are held, first asks "N held reviews will start. Continue?" and goes
   ahead only on `y`; if more are held by then, as the dashboard's post
-  does, it asks again with the new count. It edits `runner.manual_reviews`
+  does, it asks again with the new count. It counts as the Settings page
+  does, leaving out reviews a profile's own holds, by the profiles'
+  settings in the file. It edits only `runner.manual_reviews`
   in the config file the way `i` edits `skip_titles`, and the status bar
   says so until the next key; `serve` applies it as it reloads. A config
   file that doesn't load, at `m` or at `y`, is left alone, and the status
@@ -1454,10 +1478,11 @@ fonttools (run through `uv`, which only this task needs) to
   dashboard or by hand, the edits are made again on what's there, and a
   file that then doesn't load, or an edit that no longer applies, isn't
   written and says why. It's written as `i` writes, keeping a symlink a
-  symlink, and `serve` applies it through its reload. An edit that turns
-  manual reviews off while `serve` has them on asks first how many held
-  reviews will start, and asks again if more are held by `y`, as `m`
-  does. Saving a changed `github.api_url` says it applies when `serve`
+  symlink, and `serve` applies it through its reload. An edit that stops
+  manual reviews holding some profiles' reviews, as `serve` last loaded
+  them (`runner.manual_reviews` turned off, or a profile's own), asks
+  first how many of their held reviews will start, and asks again if
+  more are held by `y`, as `m` does. Saving a changed `github.api_url` says it applies when `serve`
   restarts. Esc or `q` leaves, asking first while there are unsaved
   edits; Ctrl-C quits `serve` as it does elsewhere. A file that isn't
   TOML can't be opened; one that is but doesn't load can, since fixing

@@ -15,6 +15,7 @@ use color_eyre::eyre::Result;
 use maud::{Markup, html};
 use sanic_core::{
     clock::{WindowChoice, window_start},
+    manual::ManualReviews,
     pr::PrKey,
     skip::{PrFacts, Skip},
     start::Why,
@@ -48,6 +49,9 @@ pub struct Overview {
     /// How many PRs of each list the recency window hides, as the last
     /// reconcile under it counted; also loaded by `load_facts`.
     pub hidden: Hidden,
+    /// What manual reviews hold, read once so a reload midway can't split
+    /// the page.
+    pub manual: ManualReviews,
 }
 
 /// Open PRs the recency window leaves out of each list, if counted.
@@ -94,6 +98,7 @@ impl Overview {
             waiting,
             facts: HashMap::new(),
             hidden: Hidden::default(),
+            manual: app.manual_reviews(),
         })
     }
 
@@ -145,11 +150,7 @@ pub fn owed_reviews(app: &App) -> Result<Vec<OwedReview>> {
 
 /// An owed review's status, as the TUI's status column words it, and the
 /// CSS class it's shown with.
-pub fn owed_status(
-    pr: &OwedReview,
-    overview: &Overview,
-    manual_reviews: bool,
-) -> (String, &'static str) {
+pub fn owed_status(pr: &OwedReview, overview: &Overview) -> (String, &'static str) {
     let latest = pr.latest_status();
     // A skip says why nothing will happen; a review waiting out the quiet
     // period is newer news than the last run.
@@ -158,7 +159,7 @@ pub fn owed_status(
         _ if let Some(skip) = overview.skipped.get(&pr.key) => (skip.status(), "dim"),
         (Some(left), _) => (format!("waiting {}", countdown(left.as_secs())), "dim"),
         (None, None) => ("waiting".into(), "dim"),
-        (None, Some("queued")) if manual_reviews => ("held".into(), "held"),
+        (None, Some("queued")) if pr.held(&overview.manual) => ("held".into(), "held"),
         (None, Some("queued")) => ("queued".into(), "held"),
         (None, Some("running")) => ("running".into(), "running"),
         (None, Some("succeeded")) if pr.latest_run.as_ref().is_some_and(|r| r.no_update) => {
@@ -171,11 +172,11 @@ pub fn owed_status(
 }
 
 /// Why a review of `pr` may be started by hand, as the TUI's `r` decides.
-pub fn why(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Option<Why> {
+pub fn why(pr: &OwedReview, overview: &Overview) -> Option<Why> {
     Why::of(
         overview.skipped.get(&pr.key),
         pr.latest_status(),
-        manual_reviews,
+        pr.held(&overview.manual),
     )
 }
 
@@ -189,7 +190,7 @@ pub async fn index(
     let query = IndexQuery::parse(raw.as_deref()).map_err(Error::BadRequest)?;
     let mut overview = Overview::load(&app)?;
     overview.load_facts(&app)?;
-    let listed = Listed::of(&app, &overview, query.archived);
+    let listed = Listed::of(&overview, query.archived);
     let values: Vec<RowValues> = listed
         .owed
         .iter()
@@ -235,7 +236,7 @@ struct Listing<'a, P, G> {
 }
 
 impl<'a> Listed<'a> {
-    fn of(app: &App, overview: &'a Overview, show_archived: bool) -> Self {
+    fn of(overview: &'a Overview, show_archived: bool) -> Self {
         let reviewers = |key: &PrKey| -> Vec<&'a str> {
             overview.facts.get(key).map_or_else(Vec::new, |f| {
                 f.reviewers.iter().map(|r| r.login.as_str()).collect()
@@ -254,7 +255,7 @@ impl<'a> Listed<'a> {
             .iter()
             .filter(|pr| show_archived || !pr.archived)
             .map(|pr| {
-                let group = OwedGroup::of(pr, overview, app.manual_reviews());
+                let group = OwedGroup::of(pr, overview);
                 let values = RowValues {
                     list: Side::Owed,
                     status: group.status(),
@@ -342,9 +343,9 @@ impl OwedGroup {
         }
     }
 
-    pub fn of(pr: &OwedReview, overview: &Overview, manual_reviews: bool) -> Self {
+    pub fn of(pr: &OwedReview, overview: &Overview) -> Self {
         let status = pr.latest_status();
-        let (label, class) = owed_status(pr, overview, manual_reviews);
+        let (label, class) = owed_status(pr, overview);
         if pr.archived {
             Self::Quiet
         } else if pr.pending_drafts > 0
@@ -496,14 +497,10 @@ fn my_lead(pr: &MyPr, overview: &Overview) -> Lead {
 
 /// [`owed_status`] as the index words it: a PR skipped because someone
 /// reviewed its head is just `skipped`, since the row says who.
-fn index_status(
-    pr: &OwedReview,
-    overview: &Overview,
-    manual_reviews: bool,
-) -> (String, &'static str) {
+fn index_status(pr: &OwedReview, overview: &Overview) -> (String, &'static str) {
     match overview.skipped.get(&pr.key) {
         Some(Skip::Reviewed { .. }) if !pr.archived => ("skipped".into(), "dim"),
-        _ => owed_status(pr, overview, manual_reviews),
+        _ => owed_status(pr, overview),
     }
 }
 
@@ -744,11 +741,9 @@ fn unseen(overview: &Overview, key: &PrKey) -> Markup {
 
 /// `back` is the index's URL, which archiving goes back to.
 fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Markup {
-    // Read once, so a reload midway can't split the row.
-    let manual_reviews = app.manual_reviews();
-    let (label, class) = index_status(pr, overview, manual_reviews);
+    let (label, class) = index_status(pr, overview);
     let lead = owed_lead(pr, overview, &label, class);
-    let why = why(pr, overview, manual_reviews);
+    let why = why(pr, overview);
     let href = pr_href(&pr.key);
     let facts = overview.facts.get(&pr.key);
     let waiting = overview
@@ -767,7 +762,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
         no_update: pr.latest_run.as_ref().is_some_and(|run| run.no_update),
         skip: overview.skipped.get(&pr.key),
         waiting: waiting.as_deref(),
-        manual_reviews,
+        manual_reviews: pr.held(&overview.manual),
         now: app.clock.now(),
     };
     let row = Row {
@@ -819,7 +814,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
         no_update: false,
         skip: None,
         waiting: None,
-        manual_reviews: app.manual_reviews(),
+        manual_reviews: run.is_some_and(|run| overview.manual.holds(&run.profile)),
         now: app.clock.now(),
     };
     let row = Row {

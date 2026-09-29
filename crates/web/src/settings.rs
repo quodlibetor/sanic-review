@@ -16,9 +16,14 @@ use crate::{
     page::{self, Card, Kind, Tone, csrf_field, keycap},
 };
 
-/// How many reviews are queued, which manual reviews hold while they're on.
+/// How many reviews are queued of the profiles that follow
+/// `runner.manual_reviews`: those it holds while it's on, and turning it
+/// off starts. A profile's own holds its reviews, or doesn't, either way.
 fn held(app: &App) -> Result<u32, Error> {
-    Ok(app.store().queued_review_count()?)
+    let manual = app.manual_reviews();
+    Ok(app
+        .store()
+        .queued_review_count(|profile| manual.follows_runner(profile))?)
 }
 
 /// `n` held reviews, in words.
@@ -44,7 +49,8 @@ fn crumbs() -> [Markup; 1] {
 }
 
 pub async fn page(State(app): State<Shared>) -> Result<Markup, Error> {
-    let on = app.manual_reviews();
+    let manual = app.manual_reviews();
+    let on = manual.runner;
     let held = if on { held(&app)? } else { 0 };
     let content = html! {
         h1 { "Settings" }
@@ -80,6 +86,21 @@ pub async fn page(State(app): State<Shared>) -> Result<Markup, Error> {
                 "already running carry on."
             }
             (switch(&app, true, 0, None, &html! { "Turn on" }))
+        }
+        @if !manual.overrides.is_empty() {
+            p {
+                "These profiles set their own " code { "manual_reviews" } ", which holds "
+                "their reviews, or doesn't, whatever this says. Change them in the config "
+                "editor: " kbd { "e" } " in the TUI, or " code { "sanic-review setup" } "."
+            }
+            ul {
+                @for (name, own) in &manual.overrides {
+                    li {
+                        code { "profile." (name) } ": "
+                        @if *own { span.held { "on" } } @else { "off" }
+                    }
+                }
+            }
         }
     };
     Ok(page::layout_in(

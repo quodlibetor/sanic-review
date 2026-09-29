@@ -64,6 +64,8 @@ pub struct LeadPop<'a> {
     pub skip: Option<&'a Skip>,
     /// The status shown for a review waiting out the quiet period.
     pub waiting: Option<&'a str>,
+    /// Manual reviews hold its latest run, queued, by the profile it was
+    /// queued under.
     pub manual_reviews: bool,
     pub now: SystemTime,
 }

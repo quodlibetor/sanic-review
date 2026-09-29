@@ -3,8 +3,8 @@ source: crates/cli/src/tui/config/tests.rs
 expression: narrow.backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /hom┐"
-"│ # the review model for this profile's PRs      │"
-"│ # model = "auto"           (from runner.model) │"
+"│ # overrides `runner.manual_reviews` for this p │"
+"│ # manual_review…  (from runner.manual_reviews) │"
 "│ # added to `review_requests.skip_titles` for t │"
 "│ # skip_titles = []                   (default) │"
 "│ # overrides `review_requests.skip_drafts` for  │"

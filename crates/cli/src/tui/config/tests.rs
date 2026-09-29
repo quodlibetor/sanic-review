@@ -248,12 +248,29 @@ fn a_save_carries_on_from_what_was_written() {
 }
 
 #[test]
+fn the_editor_says_what_manual_reviews_its_edits_leave() {
+    let text = CONFIG.replace(
+        "[profile.ring]\n",
+        "[profile.ring]\nmanual_reviews = false\n",
+    );
+    let mut editor = editor(&text);
+    let set = ManualReviews {
+        runner: true,
+        overrides: vec![("ring".into(), false)],
+    };
+    assert_eq!(editor.manual_reviews(), set);
+    // Unset, the profile follows the runner's again.
+    select(&mut editor, 5, 4);
+    let _ = press(&mut editor, KeyCode::Char('u'));
+    assert_eq!(editor.manual_reviews(), ManualReviews::runner(true));
+}
+
+#[test]
 fn leaving_with_unsaved_edits_asks_first() {
     let mut editor = editor(CONFIG);
     select(&mut editor, 3, 5);
     let _ = press(&mut editor, KeyCode::Char(' '));
-    assert!(editor.turns_manual_reviews_off(true));
-    assert!(!editor.turns_manual_reviews_off(false));
+    assert!(!editor.manual_reviews().runner);
     assert_eq!(press(&mut editor, KeyCode::Char('q')), Outcome::Open);
     insta::assert_snapshot!("discard", draw(&editor).backend());
     assert_eq!(press(&mut editor, KeyCode::Char('n')), Outcome::Open);
@@ -369,8 +386,8 @@ fn list_items_are_added_edited_moved_and_removed() {
 #[test]
 fn repo_entries_open_switch_kind_and_take_globs() {
     let mut editor = editor(CONFIG);
-    // profile.ring's repos, after its name and six keys.
-    select(&mut editor, 5, 7);
+    // profile.ring's repos, after its name and seven keys.
+    select(&mut editor, 5, 8);
     let _ = press(&mut editor, KeyCode::Enter);
     assert!(editor.entry.is_some());
     // github → checkout, which needs a path.
@@ -554,7 +571,7 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
         "repos = [{ github = \"org\" }, { github = \"org/api\", paths = [\"v/**\"] }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 7);
+    select(&mut editor, 5, 8);
     let now = SystemTime::UNIX_EPOCH;
     let wanted = editor.want(now);
     insta::assert_snapshot!("counting", draw(&editor).backend());
@@ -699,7 +716,7 @@ fn entry_counts_follow_their_entry_and_skip_ones_not_yet_loaded() {
         "repos = [{ github = \"org\" }, { github = \"else/api\" }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 8);
+    select(&mut editor, 5, 9);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let covers = |editor: &ConfigEditor, n| {
         editor
@@ -763,7 +780,7 @@ fn entries_on_one_checkout_through_two_remotes_keep_their_own_counts() {
     };
     let path = Path::new("/c/config.toml");
     editor.checked(generation, check::check(&text, path, &ByRemote));
-    select(&mut editor, 5, 8);
+    select(&mut editor, 5, 9);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let scope = |n| {
         editor
@@ -818,7 +835,7 @@ fn f_on_repos_suggests_orgs_and_scans_for_checkouts() {
         Query::Orgs,
         Answer::Orgs(vec!["org".into(), "other".into()]),
     );
-    select(&mut editor, 5, 7);
+    select(&mut editor, 5, 8);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -1044,7 +1061,7 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
         Answer::Orgs(vec!["ORG".into(), "Other".into()]),
     );
     // A profile's repos: orgs you're in are matched without case.
-    select(&mut editor, 5, 7);
+    select(&mut editor, 5, 8);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");

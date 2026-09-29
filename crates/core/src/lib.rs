@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod manual;
 pub mod pr;
 pub mod repo;
 pub mod reviewers;

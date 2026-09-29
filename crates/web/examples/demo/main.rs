@@ -14,6 +14,7 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
     config::{CheckoutResolver, Config, Unloadable, Vcs},
+    manual::ManualReviews,
     pr::PrKey,
     repo::RepoName,
 };
@@ -79,7 +80,7 @@ async fn demo(dir: &Path, port: u16) -> Result<Bound> {
     });
     let dashboard = Dashboard::new(Context {
         me: seed::ME.into(),
-        manual_reviews: watch::channel(false).1,
+        manual_reviews: watch::channel(ManualReviews::default()).1,
         data_dir: dir.to_owned(),
         config_path: "~/.config/sanic-review/config.toml".into(),
         store: Store::open(&db)?,

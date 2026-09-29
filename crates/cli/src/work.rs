@@ -18,6 +18,7 @@ use std::{
 use color_eyre::eyre::{Result, eyre};
 use sanic_core::{
     config::{Config, RunnerSettings},
+    manual::ManualReviews,
     pr::PrKey,
     run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
 };
@@ -88,6 +89,7 @@ struct Settings {
     /// By profile name.
     profiles: HashMap<String, AgentProfile>,
     runner: RunnerSettings,
+    manual_reviews: ManualReviews,
     git_url: String,
     reference_dirs: Vec<PathBuf>,
 }
@@ -101,6 +103,7 @@ impl Settings {
                 .map(|p| (p.name.clone(), AgentProfile::from(p)))
                 .collect(),
             runner: config.runner.clone(),
+            manual_reviews: config.manual_reviews(),
             git_url: config.github.git_url.clone(),
             reference_dirs: config.reference_dirs(),
         }
@@ -213,14 +216,14 @@ impl Worker {
         .await;
     }
 
-    /// Whether `runner.manual_reviews` holds automatic runs, as the config
-    /// last loaded.
-    fn holds_reviews(&self) -> bool {
+    /// Whether manual reviews hold automatic runs of `profile`'s PRs, as
+    /// the config last loaded.
+    fn holds_reviews(&self, profile: &str) -> bool {
         self.settings
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .runner
             .manual_reviews
+            .holds(profile)
     }
 
     /// Stops the running review of `run`'s PR, if it's of another head.
@@ -275,7 +278,7 @@ impl Worker {
         }
         // Manual reviews were turned on while it waited: it stays queued,
         // held like any other.
-        if automatic && self.holds_reviews() {
+        if automatic && self.holds_reviews(&run.request.profile) {
             debug!("held: manual reviews were turned on before it started");
             return;
         }
@@ -548,9 +551,9 @@ impl Worker {
 }
 
 /// A queued run for [`Worker::work`]. An `automatic` one, queued by the
-/// scheduler or left from before, is held after all if
-/// `runner.manual_reviews` is on by the time it would start; one started
-/// by hand never is.
+/// scheduler or left from before, is held after all if manual reviews
+/// hold its profile by the time it would start; one started by hand never
+/// is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub run: QueuedRun,
@@ -791,6 +794,30 @@ mod tests {
             &config(1, "p"),
             "me",
         ));
+        let (jobs, jobs_rx) = mpsc::unbounded_channel();
+        jobs.send(Job {
+            run: run.clone(),
+            automatic: true,
+        })
+        .unwrap();
+        drop(jobs);
+        worker.work(jobs_rx).await;
+        let record = store.lock().unwrap().run(run.id).unwrap().unwrap();
+        assert_eq!(record.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn a_profiles_own_manual_reviews_hold_its_runs_with_the_runners_off() {
+        let data = tempfile::TempDir::new().unwrap();
+        let (store, run) = store_with_queued_review();
+        let store = Arc::new(Mutex::new(store));
+        let text = format!(
+            "[runner]\nmanual_reviews = false\n\
+             [profile.{}]\nmanual_reviews = true\nrepos = [{{ github = \"org\" }}]\n",
+            run.request.profile
+        );
+        let config = Config::parse(&text, Path::new("/"), &NoCheckouts).unwrap();
+        let worker = Arc::new(Worker::new(data.path(), Arc::clone(&store), &config, "me"));
         let (jobs, jobs_rx) = mpsc::unbounded_channel();
         jobs.send(Job {
             run: run.clone(),

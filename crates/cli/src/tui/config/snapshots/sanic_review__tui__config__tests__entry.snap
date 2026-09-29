@@ -3,15 +3,15 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic. 4 unsaved ┐"
-"│ # keys = "emacs"                                                   (guessed) │"
-"│                                                                              │"
 "│ [profile.ring]                                                               │"
 "│ # files whose text goes in the agent's system prompt                         │"
 "│ # instructions = []                                                (default) │"
 "│ # skill directories the agent may read                                       │"
 "│ # skills = []                                                      (default) │"
+"│ # the review model for this profile's PRs                                    │"
+"│ # model = "auto"                                         (from runner.model) │"
 "│ # ┌ [profile.ring] repos[0] ─────────────────────────────────────────────┐   │"
-"│ # │                                                                      │l) │"
+"│ # │                                                                      │s) │"
 "│ # │ kind    ( ) checkout  (•) checkout + paths  ( ) github               │   │"
 "│ # │ repo    /src/services                                                │t) │"
 "│ # │ remote  # found from the checkout                                    │   │"
