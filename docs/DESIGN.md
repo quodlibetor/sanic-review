@@ -684,7 +684,10 @@ fonttools (run through `uv`, which only this task needs) to
 
   Folded rows leave out the PR's dim line. On a narrower window the lead
   and status share a line over the PR; on a phone they stack, and nothing
-  scrolls sideways. A row's actions show on hover and on the selected row.
+  scrolls sideways. A row's actions show on hover and on the selected
+  row: on a wide window over the end of the PR's dim line, which
+  otherwise has the cell's whole width. A status cell taller than the
+  title and dim line leaves the space under them, not between them.
   It rereads the lists, and the counts in the top bar, every few seconds;
   selection follows the PR, so a refresh that reorders rows keeps it, as
   does a popover opened by key. When the PR leaves the list, the

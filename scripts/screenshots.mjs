@@ -18,11 +18,13 @@ const SHOWCASE = "/pr/quodlibetor/frobnicator/42";
 // In order: opening a PR's page marks its review seen, so the index goes
 // first.
 // `prepare` runs in the page first; `until`, if it finds an element, is
-// where the shot stops, else it's the whole page.
+// where the shot stops, else it's the whole page. With `tall`, the window
+// is as tall as the page, so what's capped at its height, like the
+// index's filter sidebar, shows whole.
 const openQuiet = `document.querySelector("#owed-quiet").open = true`;
 const SHOTS = [
-  { file: "index.png", path: "/", width: 1440, prepare: openQuiet },
-  { file: "index-dark.png", path: "/", width: 1440, dark: true, prepare: openQuiet },
+  { file: "index.png", path: "/", width: 1440, tall: true, prepare: openQuiet },
+  { file: "index-dark.png", path: "/", width: 1440, tall: true, dark: true, prepare: openQuiet },
   // The summary and the drafts on the first file, the last of them
   // accepted; the second file's draft is next.
   { file: "drafts.png", path: SHOWCASE, width: 1100, until: `document.querySelectorAll("article.draft")[4]` },
@@ -101,7 +103,7 @@ async function startChrome() {
 }
 
 // A PNG of `url` at `width`; see SHOTS.
-async function capture(port, url, { width, dark, prepare, until }) {
+async function capture(port, url, { width, tall, dark, prepare, until }) {
   const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
   const page = await connect(target.webSocketDebuggerUrl);
   try {
@@ -137,6 +139,10 @@ async function capture(port, url, { width, dark, prepare, until }) {
     }
     const { status, height } = result.value;
     if (status !== 200) throw new Error(`${url} answered ${status}`);
+    if (tall) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+      await sleep(200);
+    }
     const { data } = await page.send("Page.captureScreenshot", {
       format: "png",
       captureBeyondViewport: true,

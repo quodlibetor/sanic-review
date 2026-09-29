@@ -95,6 +95,39 @@ fn owed(store: &mut Store, s: &mut Seeded) -> Result<()> {
     record(store, s, &pr, &[("mood", 0)])?;
     let run = queue(store, &pr)?;
     s.pins.run(run, 0.02, None, None);
+    // A long title, a status cell three lines tall (two reviewers and a
+    // comment awaiting the author), and state words after the author. Not
+    // a draft PR, which the config skips.
+    let pr = PrSnapshot {
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some("UNSTABLE".into()),
+        checks: Some("FAILURE".into()),
+        ..snapshot(
+            ("hamster-wheel", 9),
+            "sleepy-semicolon",
+            "Let the hamster wheel run backwards on Sundays, and log each lap where the hamster can read it",
+            1,
+        )
+    };
+    let pr = PrSnapshot {
+        // On the push before the head, so it isn't skipped as reviewed.
+        reviews: ["ringcollector", "gotta-go-fast"]
+            .map(|who| Review {
+                commit: Some(sha("sundays")),
+                ..review(&pr, who, ReviewState::Approved, 3)
+            })
+            .into(),
+        threads: vec![thread(
+            &pr,
+            "sundays-1",
+            ("src/wheel.rs", 12),
+            &[(ME, 2, "Does the hamster get a say in which way it runs?")],
+        )],
+        ..pr
+    };
+    record(store, s, &pr, &[("sundays", 5), ("sundays-2", 1)])?;
+    let run = queue(store, &pr)?;
+    s.pins.run(run, 0.01, None, None);
     // Nothing to do now.
     done(store, s)?;
     let pr = PrSnapshot {
