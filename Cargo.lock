@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "color-eyre",
  "globset",
@@ -3036,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-github"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "apollo-compiler",
  "color-eyre",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-review"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "color-eyre",
@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-runner"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "color-eyre",
  "insta",
@@ -3094,7 +3094,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-store"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "color-eyre",
  "rusqlite",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "sanic-web"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ammonia",
  "axum",
