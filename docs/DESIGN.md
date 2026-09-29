@@ -1318,15 +1318,31 @@ fonttools (run through `uv`, which only this task needs) to
     another) to a depth `<` and `>` change, with the scanned checkouts'
     owners; what any profile already watches isn't offered;
   - on a `model`, `auto`, the aliases and the models your Claude settings
-    and environment name; Tab completes them as
-    they're typed;
+    and environment name;
   - on a profile's `skills` and `instructions`, the skills and instruction
     files in its checkouts (a path-scoped one's globbed directories
     first) and your own skills, less what it lists already.
   Space picks, Enter adds what's picked. Scans and searches of the disk
-  run off the UI thread. Tab completes a path as it's typed
-  (skills, instructions, `read_paths`, `runner.claude`, a checkout), as
-  far as the matches agree.
+  run off the UI thread.
+  As a field's typed, a dropdown under it lists what it could hold,
+  going on from what's typed: those starting with it first, then those
+  with it anywhere, ignoring case. It draws from what the editor has
+  already, so typing asks GitHub nothing: a path key's files (skills,
+  instructions, `read_paths`, `runner.claude`, a checkout, the scan's
+  directory), listed from the disk once something's typed, a directory
+  with a `/`; the models `f` lists; for `teams`, your teams as counted,
+  `!` kept when typed; for a `github` entry, your orgs and your teams'
+  orgs that no profile watches already, and the repos counted so far; a
+  key's few values, as `tui.keys`'s; and a profile's skills and
+  instruction files, found as `f` finds them the first time either is
+  typed into, and again after an edit. It opens
+  once there are options and follows new answers as they come in. ↑ and
+  ↓ choose, round from either end; Tab takes the chosen one, or else the
+  first, and Enter takes the chosen one but sets what's typed while none
+  is, so a value that isn't listed is still set with one key. What's
+  taken is typed over the field, and the list goes on from it, as into
+  a directory. Esc closes the list and keeps the edit; typing opens it
+  again. The footer shows the list's keys while it's open.
   Each edit goes into the file's document in place, keeping its comments
   and layout, and is kept in order. After each one the text is checked
   with the loader off the UI thread, with what remote discovery finds for
@@ -1720,10 +1736,10 @@ downcast.
 - SQLite tests get a fresh database per test, with migrations applied.
 - `insta` snapshots cover prompt assembly, GitHub payload previews,
   dashboard HTML, and the TUI's and config editor's screens, drawn on
-  ratatui's `TestBackend`. Beyond Tab completing a typed path, the
-  editor's keys act only on its state: checks, saves and searches of the
-  disk come back as outcomes its host carries out, and the host asks it
-  what to count and hands it the answers.
+  ratatui's `TestBackend`. Beyond listing a typed path's directory for
+  the dropdown, the editor's keys act only on its state: checks, saves
+  and searches of the disk come back as outcomes its host carries out,
+  and the host asks it what to count and hands it the answers.
 - Whether stdin and stdout are terminals, and whether `serve` has the
   foreground, is passed in as values, so choosing the UI and opening the
   editor on a first run are tested without a terminal.

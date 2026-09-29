@@ -8,6 +8,7 @@ pub mod counts;
 pub mod discover;
 pub mod field;
 pub mod host;
+mod menu;
 mod render;
 mod rows;
 pub mod standalone;
@@ -27,6 +28,7 @@ use sanic_core::config::{Keys, contract_path};
 pub use self::check::{Checked, Checker};
 use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
 use self::field::{TextField, Took};
+use self::menu::{Menu, matching};
 use self::rows::{
     EntryEdit, EntryRow, KINDS, Row, Shown, all_rows, entries, items, scalar_text, shown,
 };
@@ -77,6 +79,9 @@ pub struct ConfigEditor {
     models: Vec<String>,
     /// The keys text fields take when the config doesn't say.
     guessed_keys: Keys,
+    /// Each profile's skills and instruction files, found for the
+    /// dropdown; `None` while they're being found. Edits forget them.
+    extras: HashMap<String, Option<Extras>>,
     /// Why nothing's counted, when that's so from the start.
     offline: Option<String>,
     /// A save has been written.
@@ -95,11 +100,20 @@ pub enum Check {
     Fails(String),
 }
 
+/// A profile's skills and instruction files, as the config would name
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Extras {
+    skills: Vec<String>,
+    instructions: Vec<String>,
+}
+
 /// What you're typing, and into what.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Typing {
     into: Input,
     field: TextField,
+    menu: Menu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +198,7 @@ impl ConfigEditor {
             saving: false,
             models: Vec::new(),
             guessed_keys: Keys::Emacs,
+            extras: HashMap::new(),
             offline: None,
             wrote: false,
         }
@@ -242,6 +257,8 @@ impl ConfigEditor {
 
     /// Answers from the counter.
     pub fn counted(&mut self, counted: Vec<Counted>) {
+        // Teams, orgs and repos come in with the answers.
+        let answered = counted.iter().any(|c| matches!(c, Counted::Answer(..)));
         for counted in counted {
             match counted {
                 Counted::Answer(query, answer) => {
@@ -263,6 +280,9 @@ impl ConfigEditor {
                 }
                 Counted::Waiting => self.waiting = true,
             }
+        }
+        if answered {
+            self.refresh_menu();
         }
     }
 
@@ -289,7 +309,7 @@ impl ConfigEditor {
         self.saving
     }
 
-    /// The models `f` suggests and Tab completes for a `model`.
+    /// The models `f` suggests and the dropdown offers for a `model`.
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
     }
@@ -302,6 +322,20 @@ impl ConfigEditor {
 
     /// What [`Outcome::Find`] found.
     pub fn found(&mut self, found: Found) {
+        if let Found::Extras {
+            profile,
+            skills,
+            instructions,
+        } = &found
+            && self.extras.get(profile) == Some(&None)
+        {
+            let extras = Extras {
+                skills: skills.iter().map(|s| contract_path(&s.dir)).collect(),
+                instructions: instructions.iter().map(|p| contract_path(p)).collect(),
+            };
+            self.extras.insert(profile.clone(), Some(extras));
+            self.refresh_menu();
+        }
         let Some(Popup::Suggest(suggest)) = &mut self.popup else {
             if let Found::Failed(why) = found {
                 self.notice = Some(why);
@@ -387,6 +421,46 @@ impl ConfigEditor {
         }
     }
 
+    /// What to find for `profile`'s skills and instruction files: what
+    /// its entries check out, less what it lists.
+    fn find_extras(&self, profile: String) -> Find {
+        let listed = |name| {
+            Key::new(Table::Profile(profile.clone()), name)
+                .map(|k| items(&self.doc, &k))
+                .unwrap_or_default()
+        };
+        Find::Extras {
+            entries: entries(&self.doc, &profile)
+                .into_iter()
+                .filter_map(Result::ok)
+                .collect(),
+            skills: listed("skills"),
+            instructions: listed("instructions"),
+            profile,
+        }
+    }
+
+    /// The find the dropdown needs for the skills or instructions being
+    /// typed, once a profile.
+    fn dropdown_find(&mut self) -> Option<Find> {
+        let Some(Typing {
+            into: Input::Item(key, _) | Input::NewItem(key),
+            ..
+        }) = &self.typing
+        else {
+            return None;
+        };
+        let Table::Profile(profile) = &key.table else {
+            return None;
+        };
+        if !matches!(key.name, "skills" | "instructions") || self.extras.contains_key(profile) {
+            return None;
+        }
+        let profile = profile.clone();
+        self.extras.insert(profile.clone(), None);
+        Some(self.find_extras(profile))
+    }
+
     /// `f`: suggestions for the selected key.
     fn suggest(&mut self) -> Outcome {
         let row = self.current_row();
@@ -460,20 +534,7 @@ impl ConfigEditor {
                 let mut suggest = Suggest::new(what, Vec::new());
                 suggest.finding = true;
                 self.popup = Some(Popup::Suggest(Box::new(suggest)));
-                let listed = |name| {
-                    Key::new(Table::Profile(profile.clone()), name)
-                        .map(|k| items(&self.doc, &k))
-                        .unwrap_or_default()
-                };
-                return Outcome::Find(Find::Extras {
-                    entries: entries(&self.doc, &profile)
-                        .into_iter()
-                        .filter_map(Result::ok)
-                        .collect(),
-                    skills: listed("skills"),
-                    instructions: listed("instructions"),
-                    profile,
-                });
+                return Outcome::Find(self.find_extras(profile));
             }
             _ => {
                 self.notice = Some(
@@ -676,6 +737,13 @@ impl ConfigEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        match self.key(key) {
+            Outcome::Open => self.dropdown_find().map_or(Outcome::Open, Outcome::Find),
+            outcome => outcome,
+        }
+    }
+
+    fn key(&mut self, key: KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.notice = None;
         if ctrl && key.code == KeyCode::Char('c') {
@@ -757,7 +825,8 @@ impl ConfigEditor {
 
     fn start_typing(&mut self, into: Input, text: &str) {
         let field = TextField::new(text, self.keys());
-        self.typing = Some(Typing { into, field });
+        let menu = Menu::new(self.options(&into, text));
+        self.typing = Some(Typing { into, field, menu });
     }
 
     /// The keys text fields take: the config's, as edited, or the guess.
@@ -775,29 +844,17 @@ impl ConfigEditor {
 
     fn typing_key(&mut self, mut typing: Typing, key: KeyEvent) -> Outcome {
         let number = matches!(&typing.into, Input::Scalar(k) if k.field().kind == Kind::Number);
+        let open = typing.menu.is_open();
+        let before = typing.field.text();
         match key.code {
-            KeyCode::Tab if matches!(&typing.into, Input::Scalar(k) if k.name == "model") => {
-                if let Some(done) = complete_model(&self.models, &typing.field.text()) {
-                    typing.field.set_text(&done);
-                }
-            }
-            KeyCode::Tab if self.completes_paths(&typing.into) => {
-                // The scan's directory resolves against the working
-                // directory, as a path typed at a shell does; the config's
-                // paths against its own.
-                let cwd;
-                let base = if typing.into == Input::ScanRoot {
-                    cwd = std::env::current_dir().unwrap_or_default();
-                    &cwd
-                } else {
-                    self.path.parent().unwrap_or(Path::new("."))
-                };
-                let home = std::env::home_dir();
-                let typed = typing.field.text();
-                if let Some(done) = complete::complete_path(&typed, base, home.as_deref()) {
-                    typing.field.set_text(&done);
-                }
-            }
+            // Esc closes the dropdown first, and ↑ and ↓ choose in it.
+            KeyCode::Esc if open => typing.menu.closed = true,
+            KeyCode::Up if open => typing.menu.step(-1),
+            KeyCode::Down if open => typing.menu.step(1),
+            // Enter takes an option only once one's chosen, so it still
+            // sets what's typed as it is.
+            KeyCode::Tab if open => self.take(&mut typing),
+            KeyCode::Enter if open && typing.menu.chosen.is_some() => self.take(&mut typing),
             // A tab is never part of a value.
             KeyCode::Tab => {}
             _ if number
@@ -806,6 +863,9 @@ impl ConfigEditor {
                     .inserts(key)
                     .is_some_and(|c| !c.is_ascii_digit()) => {}
             _ => match typing.field.key(key) {
+                Took::Edit if typing.field.text() != before => {
+                    typing.menu = Menu::new(self.options(&typing.into, &typing.field.text()));
+                }
                 Took::Edit => {}
                 Took::Commit => return self.commit(&typing.into, typing.field.text().trim()),
                 Took::Cancel => {
@@ -824,6 +884,115 @@ impl ConfigEditor {
         }
         self.typing = Some(typing);
         Outcome::Open
+    }
+
+    /// Types the dropdown's option over what's typed, and lists what goes
+    /// on from it, as a directory's files.
+    fn take(&self, typing: &mut Typing) {
+        if let Some(pick) = typing.menu.pick().map(str::to_owned) {
+            typing.field.set_text(&pick);
+            typing.menu = Menu::new(self.options(&typing.into, &pick));
+        }
+    }
+
+    /// Lists the dropdown's options again, as what they come from changes.
+    fn refresh_menu(&mut self) {
+        let Some(mut typing) = self.typing.take() else {
+            return;
+        };
+        let options = self.options(&typing.into, &typing.field.text());
+        if options != typing.menu.options {
+            typing.menu = Menu {
+                options,
+                chosen: None,
+                closed: typing.menu.closed,
+            };
+        }
+        self.typing = Some(typing);
+    }
+
+    /// What `into` could hold, going on from `typed`: paths on disk, and
+    /// otherwise what `f` suggests, from what's been found and counted
+    /// already.
+    fn options(&self, into: &Input, typed: &str) -> Vec<String> {
+        let mut options = Vec::new();
+        let key = match into {
+            Input::Scalar(key) | Input::Item(key, _) | Input::NewItem(key) => Some(key),
+            _ => None,
+        };
+        let tally = Tally(&self.answers);
+        match (key, into) {
+            (Some(key), _) if !key.field().choices.is_empty() => {
+                options.extend(key.field().choices.iter().map(|&c| c.to_owned()));
+            }
+            (Some(key), _) if key.name == "model" => options.extend(self.models.iter().cloned()),
+            (Some(key), _) if key.table == Table::ReviewRequests && key.name == "teams" => {
+                // `!` excludes a team, so it goes on as the team would.
+                let (not, team) = match typed.strip_prefix('!') {
+                    Some(team) => ("!", team),
+                    None => ("", typed),
+                };
+                let teams = tally.teams().into_iter().flatten();
+                let teams = teams.map(|team| format!("{}/{}", team.org, team.slug));
+                return matching(teams, team)
+                    .into_iter()
+                    .map(|team| format!("{not}{team}"))
+                    .collect();
+            }
+            (Some(key), _) if matches!(key.name, "skills" | "instructions") => {
+                if let Table::Profile(profile) = &key.table
+                    && let Some(Some(found)) = self.extras.get(profile)
+                {
+                    let found = if key.name == "skills" {
+                        &found.skills
+                    } else {
+                        &found.instructions
+                    };
+                    // A find that raced an edit may name what's listed now.
+                    let listed = items(&self.doc, key);
+                    options.extend(found.iter().filter(|f| !listed.contains(f)).cloned());
+                }
+            }
+            (None, Input::Entry(EntryRow::Target)) if !self.completes_paths(into) => {
+                // As `f` does, what a profile watches already isn't offered.
+                let watched = present_entries(&self.doc, &self.path).orgs;
+                let orgs = tally.orgs().into_iter().flatten().cloned();
+                let team_orgs = tally.teams().into_iter().flatten().map(|t| t.org.clone());
+                options.extend(
+                    orgs.chain(team_orgs)
+                        .map(|org| org.to_ascii_lowercase())
+                        .filter(|org| !watched.contains(org)),
+                );
+                for answer in self.answers.values() {
+                    if let Answer::RepoNames { repos, .. } = answer {
+                        options.extend(repos.iter().map(ToString::to_string));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut options = matching(options, typed);
+        // Paths go on from what's typed, so there's nothing to list until
+        // something is.
+        if self.completes_paths(into) && !typed.trim().is_empty() {
+            // The scan's directory resolves against the working
+            // directory, as a path typed at a shell does; the config's
+            // paths against its own.
+            let base = if *into == Input::ScanRoot {
+                std::env::current_dir().unwrap_or_default()
+            } else {
+                self.path.parent().unwrap_or(Path::new(".")).to_owned()
+            };
+            let home = std::env::home_dir();
+            let typed = typed.trim();
+            for path in complete::path_matches(typed, &base, home.as_deref()) {
+                // A file taken lists only itself: nothing goes on from it.
+                if path != typed && !options.contains(&path) {
+                    options.push(path);
+                }
+            }
+        }
+        options
     }
 
     fn completes_paths(&self, into: &Input) -> bool {
@@ -1381,6 +1550,7 @@ impl ConfigEditor {
     fn apply(&mut self, op: Op) -> Outcome {
         match self.doc.apply(op) {
             Ok(()) => {
+                self.extras.clear();
                 self.clamp();
                 self.check_now()
             }
@@ -1489,26 +1659,6 @@ fn org_row(org: &str, why: &str) -> Suggestion {
             paths: Vec::new(),
         }),
     }
-}
-
-/// `typed` completed to the one model it matches, or as far as the
-/// models starting with it agree.
-fn complete_model(models: &[String], typed: &str) -> Option<String> {
-    let starting: Vec<&String> = models
-        .iter()
-        .filter(|m| m.to_lowercase().starts_with(&typed.to_lowercase()))
-        .collect();
-    let (first, rest) = starting.split_first()?;
-    let mut common = (*first).clone();
-    for model in rest {
-        let agreed = common
-            .char_indices()
-            .zip(model.chars())
-            .find(|((_, a), b)| !a.eq_ignore_ascii_case(b))
-            .map_or(common.len().min(model.len()), |((at, _), _)| at);
-        common.truncate(agreed);
-    }
-    (common.len() > typed.len()).then_some(common)
 }
 
 #[cfg(test)]

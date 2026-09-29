@@ -879,6 +879,133 @@ fn models_are_suggested_and_complete_as_typed() {
     assert_eq!(text(&editor).as_deref(), Some("claude-sonnet-5"));
 }
 
+/// The dropdown's options, when it's open.
+fn menu(editor: &ConfigEditor) -> Vec<String> {
+    editor
+        .typing
+        .as_ref()
+        .filter(|t| t.menu.is_open())
+        .map(|t| t.menu.options.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_dropdown_lists_what_a_field_could_hold_as_you_type() {
+    let mut editor = editor(CONFIG);
+    editor.set_models(
+        ["auto", "opus", "claude-opus-5-5", "claude-sonnet-5"]
+            .map(String::from)
+            .to_vec(),
+    );
+    // runner.model
+    select(&mut editor, 3, 4);
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert_eq!(menu(&editor).len(), 4, "every model, before typing");
+    typed(&mut editor, "op");
+    assert_eq!(menu(&editor), ["opus", "claude-opus-5-5"]);
+    insta::assert_snapshot!("dropdown", draw(&editor).backend());
+    // Enter sets what's typed until ↑ or ↓ chooses; then it takes that.
+    let _ = press(&mut editor, KeyCode::Down);
+    let _ = press(&mut editor, KeyCode::Down);
+    assert_eq!(press(&mut editor, KeyCode::Enter), Outcome::Open);
+    assert_eq!(text(&editor).as_deref(), Some("claude-opus-5-5"));
+    assert!(menu(&editor).is_empty(), "nothing goes on from it");
+    // Esc closes the dropdown and keeps typing; typing opens it again.
+    let _ = ctrl(&mut editor, 'u');
+    typed(&mut editor, "cl");
+    let _ = press(&mut editor, KeyCode::Esc);
+    assert!(menu(&editor).is_empty());
+    assert_eq!(text(&editor).as_deref(), Some("cl"));
+    typed(&mut editor, "a");
+    assert_eq!(menu(&editor), ["claude-opus-5-5", "claude-sonnet-5"]);
+    // Tab takes the first when none's chosen.
+    let _ = press(&mut editor, KeyCode::Tab);
+    assert_eq!(text(&editor).as_deref(), Some("claude-opus-5-5"));
+    let Outcome::Check { text, .. } = press(&mut editor, KeyCode::Enter) else {
+        panic!("not set");
+    };
+    assert!(text.contains("model = \"claude-opus-5-5\""), "{text}");
+}
+
+#[test]
+fn the_dropdown_offers_teams_choices_and_what_f_finds() {
+    let mut editor = editor(CONFIG);
+    // Your teams, `!` as typed.
+    select(&mut editor, 2, 0);
+    let _ = press(&mut editor, KeyCode::Enter);
+    answer(
+        &mut editor,
+        Query::Teams,
+        Answer::Teams(vec![sanic_core::pr::TeamRef::new("org", "platform")]),
+    );
+    assert_eq!(menu(&editor), ["org/platform"], "as the teams come in");
+    typed(&mut editor, "!pl");
+    assert_eq!(menu(&editor), ["!org/platform"]);
+    let _ = press(&mut editor, KeyCode::Esc);
+    let _ = press(&mut editor, KeyCode::Esc);
+
+    // A key's few values.
+    select(&mut editor, 4, 0);
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert_eq!(menu(&editor), ["emacs", "vi"]);
+    let _ = press(&mut editor, KeyCode::Esc);
+    let _ = press(&mut editor, KeyCode::Esc);
+
+    // A profile's skills, found once for the dropdown as `f` finds them.
+    select(&mut editor, 5, 2);
+    let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('+')) else {
+        panic!("nothing to find");
+    };
+    assert!(menu(&editor).is_empty());
+    editor.found(Found::Extras {
+        profile,
+        skills: vec![discover::skills::Skill {
+            dir: PathBuf::from("/src/.claude/skills/review"),
+            name: "review".into(),
+            description: None,
+        }],
+        instructions: Vec::new(),
+    });
+    assert_eq!(menu(&editor), ["/src/.claude/skills/review"]);
+    let _ = press(&mut editor, KeyCode::Esc);
+    let _ = press(&mut editor, KeyCode::Esc);
+    assert_eq!(
+        press(&mut editor, KeyCode::Char('+')),
+        Outcome::Open,
+        "found already"
+    );
+    assert_eq!(menu(&editor), ["/src/.claude/skills/review"]);
+
+    // A github entry's orgs and the repos counted.
+    answer(&mut editor, Query::Orgs, Answer::Orgs(vec!["Other".into()]));
+    answer(
+        &mut editor,
+        Query::RepoNames("q".into()),
+        Answer::RepoNames {
+            repos: std::collections::BTreeSet::from([sanic_core::repo::RepoName::new(
+                "org", "api",
+            )]),
+            complete: true,
+        },
+    );
+    editor.entry = Some(EntryEdit {
+        profile: "ring".into(),
+        entry: RepoEntry::Github {
+            name: String::new(),
+            paths: Vec::new(),
+        },
+        in_doc: false,
+        row: 1,
+        set_aside: String::new(),
+        globs_aside: Vec::new(),
+    });
+    assert_eq!(
+        editor.options(&Input::Entry(EntryRow::Target), "o"),
+        ["other", "org/api"],
+        "org is watched already"
+    );
+}
+
 #[test]
 fn f_on_skills_asks_for_whats_in_the_checkouts_and_adds_what_you_pick() {
     let mut editor = editor(CONFIG);

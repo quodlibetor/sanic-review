@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│ Seconds a PR must go quiet before its review starts.                         │"
 "│ Type a whole number; a blank unsets it.                                      │"
 "│──────────────────────────────────────────────────────────────────────────────│"
-"│ ✓ loads          -- NORMAL --  ↵ set  blank unsets  Esc cancel  Tab complete │"
+"│ ✓ loads                        -- NORMAL --  ↵ set  blank unsets  Esc cancel │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

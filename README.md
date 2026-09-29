@@ -220,13 +220,16 @@ watches, the reviews you're asked for, your open PRs.
 | `v` / Ctrl-S | show the diff / save, after showing it |
 | Esc, `q` | back out of an entry, or leave, asking about unsaved edits |
 
-While typing, Enter sets, a blank unsets, Esc cancels and Tab completes a
-path or a model. Fields take readline's emacs keys (Ctrl-A/E/B/F/K/U/W,
-Alt-B/F, the arrows, Home/End), or vi's with `keys = "vi"` under `[tui]`:
-typing starts in insert mode, Esc goes to normal mode, and Esc there
-drops a half-typed command (`d`, `f`, a count…) or else cancels. Unset,
-it's vi if `~/.inputrc` sets `editing-mode vi`, or else if `$VISUAL` or
-`$EDITOR` is a vi.
+While typing, Enter sets, a blank unsets and Esc cancels. What the field
+could hold drops down under it as you type (paths, models, your teams,
+orgs and repos, a profile's skills and instructions, a key's few values):
+↑/↓ choose, Tab takes the chosen one or else the first, Enter takes the
+chosen one, and Esc closes the list. Fields take readline's emacs keys
+(Ctrl-A/E/B/F/K/U/W, Alt-B/F, the arrows, Home/End), or vi's with
+`keys = "vi"` under `[tui]`: typing starts in insert mode, Esc goes to
+normal mode, and Esc there drops a half-typed command (`d`, `f`, a
+count…) or else cancels. Unset, it's vi if `~/.inputrc` sets
+`editing-mode vi`, or else if `$VISUAL` or `$EDITOR` is a vi.
 
 For how any of this actually works, see [docs/DESIGN.md](docs/DESIGN.md).
 

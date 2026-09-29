@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: draw(&editor).backend()
+---
+"┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
+"│ # skip_titles = []                                                 (default) │"
+"│ # never review draft PRs automatically                                       │"
+"│ # skip_drafts = true                                               (default) │"
+"│                                                                              │"
+"│ [runner]                                                                     │"
+"│ # the `claude` executable; a bare name is looked up on PATH                  │"
+"│ # claude = "claude"                                                (default) │"
+"│ # agent runs at once, across all PRs                                         │"
+"│ # max_concurrent = 2                                               (default) │"
+"│ # seconds before a run is killed                                             │"
+"│ # timeout_secs = 1800                                              (default) │"
+"│ # more directories the agent may read                                        │"
+"│ # read_paths = []                                                  (default) │"
+"│ # the review model; `auto` is your own Claude default                        │"
+"│ model = op▏                                                                  │"
+"│         opus                                                                 │"
+"│         claude-opus-5-5                                                      │"
+"│ runner.model ────────────────────────────────────────────────────────────────│"
+"│ The review model; `auto` is your own Claude default. Unset, it's "auto".     │"
+"│ Type a model id, or auto; the ones known drop down, and f lists them.        │"
+"│──────────────────────────────────────────────────────────────────────────────│"
+"│ ✓ loads                                ↑↓ choose  Tab take  Esc close  ↵ set │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

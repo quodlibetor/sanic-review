@@ -33,6 +33,9 @@ pub(super) const COMMENT: Style = Style::new().fg(Color::Gray);
 const UNSET: Style = Style::new().fg(Color::DarkGray);
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 const ERROR: Style = Style::new().fg(Color::Red);
+/// The dropdown under a field, and its chosen option.
+const MENU: Style = Style::new().fg(Color::Cyan);
+const MENU_CHOSEN: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 
 /// A line of the file view, and the row it shows, if any.
 pub(super) struct FileLine {
@@ -123,7 +126,9 @@ impl ConfigEditor {
     /// What's being typed into `into`, with a cursor, if it is.
     fn typed(&self, into: &Input) -> Option<Line<'static>> {
         match &self.typing {
-            Some(Typing { into: now, field }) if now == into => Some(field.line()),
+            Some(Typing {
+                into: now, field, ..
+            }) if now == into => Some(field.line()),
             _ => None,
         }
     }
@@ -253,7 +258,67 @@ impl ConfigEditor {
                 }
             }
         }
+        self.with_menu(&mut out);
         out
+    }
+
+    /// `out` with the dropdown under the field typed into, as lines of
+    /// its row so they scroll into view with it.
+    fn with_menu(&self, out: &mut Vec<FileLine>) {
+        let indent = match self.typing.as_ref().map(|t| &t.into) {
+            Some(Input::Scalar(key)) => key.name.chars().count() + " = ".len(),
+            Some(Input::Item(..) | Input::NewItem(_)) => "  ".len(),
+            Some(Input::Rename(_) | Input::NewProfile) => "[profile.".len(),
+            _ => return,
+        };
+        let Some(at) = out.iter().rposition(|l| l.row == Some(self.row)) else {
+            return;
+        };
+        let after = out.split_off(at + 1);
+        out.extend(self.menu_lines(indent).into_iter().map(|line| FileLine {
+            line,
+            row: Some(self.row),
+        }));
+        out.extend(after);
+    }
+
+    /// The dropdown's lines, each `indent` in, when it's open: the
+    /// options in view, the chosen one marked, and how many more there are.
+    fn menu_lines(&self, indent: usize) -> Vec<Line<'static>> {
+        let Some(menu) = self
+            .typing
+            .as_ref()
+            .map(|t| &t.menu)
+            .filter(|m| m.is_open())
+        else {
+            return Vec::new();
+        };
+        // Each option's padded, so its text lines up with the field's.
+        let pad = " ".repeat(indent.saturating_sub(1));
+        let (first, shown) = menu.window();
+        let mut lines: Vec<Line<'static>> = shown
+            .iter()
+            .enumerate()
+            .map(|(n, option)| {
+                let style = if menu.chosen == Some(first + n) {
+                    MENU_CHOSEN
+                } else {
+                    MENU
+                };
+                Line::from(vec![
+                    Span::raw(pad.clone()),
+                    Span::styled(format!(" {option} "), style),
+                ])
+            })
+            .collect();
+        let hidden = menu.options.len() - shown.len();
+        if hidden > 0 {
+            lines.push(Line::from(vec![
+                Span::raw(pad),
+                Span::raw(format!(" {hidden} more")).dim(),
+            ]));
+        }
+        lines
     }
 
     /// A table's header, with the comments the file has around it.
@@ -767,11 +832,15 @@ impl ConfigEditor {
         let typing = match (field.kind, field.paths, key.name) {
             (Kind::Number, _, _) => "Type a whole number; a blank unsets it.",
             (_, _, "model") => {
-                "Type a model id, or auto; Tab completes the ones known, f lists them."
+                "Type a model id, or auto; the ones known drop down, and f lists them."
             }
-            (Kind::List, true, _) => "Type a path; Tab completes it, and a blank removes the item.",
+            (Kind::List, true, _) => {
+                "Type a path; what it could go on to drops down, and a blank removes the item."
+            }
             (Kind::List, false, _) => "Type the item; a blank removes it.",
-            (_, true, _) => "Type a path; Tab completes it, and a blank unsets it.",
+            (_, true, _) => {
+                "Type a path; what it could go on to drops down, and a blank unsets it."
+            }
             _ => "Type it; a blank unsets it.",
         };
         vec![Line::raw(help), Line::from(typing.dim())]
@@ -960,15 +1029,17 @@ impl ConfigEditor {
                 let esc = typing.field.esc_does();
                 let mode = typing.field.mode().map(|mode| format!("-- {mode} --  "));
                 let label = mode.as_deref().map_or(0, |mode| mode.chars().count());
-                let mut hints = fitted_hints(
-                    room.saturating_sub(label),
+                let hints: &[(&str, &str)] = if typing.menu.is_open() {
                     &[
+                        ("↑↓", "choose"),
+                        ("Tab", "take"),
+                        ("Esc", "close"),
                         ("↵", "set"),
-                        ("blank", "unsets"),
-                        ("Esc", esc),
-                        ("Tab", "complete"),
-                    ],
-                );
+                    ]
+                } else {
+                    &[("↵", "set"), ("blank", "unsets"), ("Esc", esc)]
+                };
+                let mut hints = fitted_hints(room.saturating_sub(label), hints);
                 if let Some(mode) = mode {
                     hints.spans.insert(0, Span::raw(mode).bold());
                 }
@@ -1071,6 +1142,17 @@ impl ConfigEditor {
             let mut spans = vec![Span::raw(format!(" {label:<8}"))];
             spans.extend(value.spans);
             items.push(ListItem::new(Line::from(spans)));
+            if self
+                .typing
+                .as_ref()
+                .is_some_and(|t| t.into == Input::Entry(row))
+            {
+                items.extend(
+                    self.menu_lines(" ".len() + 8)
+                        .into_iter()
+                        .map(ListItem::new),
+                );
+            }
         }
         // Its keys are in the footer; a line of room above and below.
         let height = u16::try_from(items.len() + 4).unwrap_or(u16::MAX);
@@ -1099,8 +1181,14 @@ impl ConfigEditor {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let repos = matches!(suggest.what, What::Repos { .. });
+        let menu = if repos {
+            self.menu_lines(" checkouts under ".len())
+        } else {
+            Vec::new()
+        };
+        let head_height = u16::try_from(menu.len()).unwrap_or(u16::MAX) + 2;
         let [head, body, footer] = Layout::vertical([
-            Constraint::Length(u16::from(repos) * 2),
+            Constraint::Length(u16::from(repos) * head_height),
             Constraint::Fill(1),
             Constraint::Length(1),
         ])
@@ -1115,7 +1203,9 @@ impl ConfigEditor {
             if suggest.finding {
                 spans.push("  scanning…".dim());
             }
-            frame.render_widget(Paragraph::new(Line::from(spans)), head);
+            let mut lines = vec![Line::from(spans)];
+            lines.extend(menu);
+            frame.render_widget(Paragraph::new(lines), head);
         }
         let items: Vec<ListItem<'_>> = suggest
             .rows
@@ -1461,10 +1551,11 @@ fn render_help(frame: &mut Frame<'_>) {
         .collect();
     lines.push(Line::raw(""));
     lines.push(Line::raw(" Typing: Enter sets, a blank unsets or removes, Esc cancels,").dim());
-    lines.push(Line::raw(" Tab completes a path or a model. Fields take readline's emacs").dim());
-    lines
-        .push(Line::raw(" keys, or vi's with [tui] keys = \"vi\": Esc goes to normal mode,").dim());
-    lines.push(Line::raw(" and Esc there cancels.").dim());
+    lines.push(Line::raw(" and what a field could hold drops down: ↑↓ choose, Tab takes,").dim());
+    lines.push(Line::raw(" Esc closes it. Fields take readline's emacs keys, or vi's with").dim());
+    lines.push(
+        Line::raw(" [tui] keys = \"vi\": Esc goes to normal mode, and Esc there cancels.").dim(),
+    );
     render_popup(frame, " Config editor keys ", lines);
 }
 
