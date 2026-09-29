@@ -266,6 +266,103 @@ fn the_editor_says_what_manual_reviews_its_edits_leave() {
 }
 
 #[test]
+fn the_footer_offers_k_j_on_profiles_and_entries_after_the_other_keys() {
+    let mut editor = editor(CONFIG);
+    let footer = |editor: &ConfigEditor, width| {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, 22)].symbol().to_owned())
+            .collect::<String>()
+    };
+    // `[profile.ring]`, then its one entry, the row after its keys.
+    for row in [0, 9] {
+        select(&mut editor, 5, row);
+        // At 80 columns the keys it showed before come first, and `K/J`
+        // is what gives way.
+        let line = footer(&editor, 80);
+        assert!(
+            line.ends_with("↵ edit  + add  - remove  u unset  f find  ^S save  ? keys │"),
+            "{line}"
+        );
+        let line = footer(&editor, 100);
+        assert!(line.contains("^S save  K/J move  ? keys"), "{line}");
+    }
+    select(&mut editor, 5, 0);
+    insta::assert_snapshot!("profile_footer", draw(&editor).backend());
+    // Elsewhere, nothing moves.
+    select(&mut editor, 3, 0);
+    assert!(!footer(&editor, 100).contains("K/J"));
+}
+
+#[test]
+fn arriving_on_a_profile_says_why_their_order_matters_until_the_next_key() {
+    let mut editor = editor(CONFIG);
+    select(&mut editor, 4, 0);
+    let _ = press(&mut editor, KeyCode::Tab);
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Header(Table::Profile("ring".into())))
+    );
+    assert_eq!(
+        editor.notice.as_deref(),
+        Some("most specific match wins, then first in the file")
+    );
+    insta::assert_snapshot!("precedence_hint", draw(&editor).backend());
+    // A key that stays on it clears it, as it does any notice.
+    let _ = press(&mut editor, KeyCode::Char('v'));
+    let _ = press(&mut editor, KeyCode::Esc);
+    assert_eq!(editor.notice, None);
+    // Renaming it keeps the cursor where it was, so it says nothing,
+    // though the selected header is now another profile's.
+    let _ = press(&mut editor, KeyCode::Enter);
+    let _ = ctrl(&mut editor, 'u');
+    typed(&mut editor, "sec");
+    let _ = press(&mut editor, KeyCode::Enter);
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Header(Table::Profile("sec".into())))
+    );
+    assert_eq!(editor.notice, None);
+    // Nor does moving it, which carries the cursor along.
+    let _ = press(&mut editor, KeyCode::Char('G'));
+    let _ = press(&mut editor, KeyCode::Char('+'));
+    typed(&mut editor, "extra");
+    let _ = press(&mut editor, KeyCode::Enter);
+    let _ = press(&mut editor, KeyCode::Char('K'));
+    assert_eq!(editor.doc.profiles(), ["extra", "sec"]);
+    assert_eq!(editor.notice, None);
+    // Nor does removing it, which leaves the cursor on the next header.
+    let _ = press(&mut editor, KeyCode::Char('-'));
+    let _ = press(&mut editor, KeyCode::Char('y'));
+    assert_eq!(
+        editor.current_row(),
+        Some(Row::Header(Table::Profile("sec".into())))
+    );
+    assert_eq!(editor.notice, None);
+    // A notice the key leaves isn't replaced: a save refused for the
+    // profile the error names selects it and says why.
+    let mut broken = self::editor(&CONFIG.replace("[{ github = \"org\" }]", "[]"));
+    select(&mut broken, 3, 5);
+    let _ = press(&mut broken, KeyCode::Char(' '));
+    settle(&mut broken);
+    let _ = ctrl(&mut broken, 's');
+    assert_eq!(
+        broken.current_row(),
+        Some(Row::Header(Table::Profile("ring".into())))
+    );
+    assert!(
+        broken
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("it doesn't load")),
+        "{:?}",
+        broken.notice
+    );
+}
+
+#[test]
 fn leaving_with_unsaved_edits_asks_first() {
     let mut editor = editor(CONFIG);
     select(&mut editor, 3, 5);
@@ -1525,6 +1622,23 @@ fn every_comment_still_shows_once_after_edits() {
             );
         }
     }
+}
+
+#[test]
+fn the_first_profile_added_shows_why_order_matters_over_it() {
+    let mut editor = editor("[runner]\nmodel = \"m\"\n");
+    let _ = editor.apply(Op::AddProfile { name: "p".into() });
+    editor.select(&Row::Header(Table::Profile("p".into())));
+    let screen = draw(&editor).backend().to_string();
+    let lines: Vec<&str> = screen.lines().collect();
+    let header = lines
+        .iter()
+        .position(|line| line.contains("[profile.p]"))
+        .unwrap();
+    assert!(
+        lines[header - 1].contains("# moves profiles and their entries."),
+        "{screen}"
+    );
 }
 
 mod screenshot;

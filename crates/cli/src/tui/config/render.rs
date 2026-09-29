@@ -1057,18 +1057,25 @@ impl ConfigEditor {
                     ("?", "keys"),
                 ],
             ),
-            (None, None, None) => fitted_hints(
-                room,
-                &[
+            (None, None, None) => {
+                let mut hints = vec![
                     ("↵", "edit"),
                     ("+", "add"),
                     ("-", "remove"),
                     ("u", "unset"),
                     ("f", "find"),
                     ("^S", "save"),
-                    ("?", "keys"),
-                ],
-            ),
+                ];
+                // After the rest, so it takes only room they leave.
+                if matches!(
+                    self.current_row(),
+                    Some(Row::Header(Table::Profile(_)) | Row::Entry(..))
+                ) {
+                    hints.push(("K/J", "move"));
+                }
+                hints.push(("?", "keys"));
+                fitted_hints(room, &hints)
+            }
         };
         frame.render_widget(Paragraph::new(state), left);
         frame.render_widget(Paragraph::new(keys.right_aligned()), right);

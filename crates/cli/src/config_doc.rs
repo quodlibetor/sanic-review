@@ -1594,7 +1594,10 @@ repos = [{ github = "org" }]
         assert!(doc.is_changed());
         assert_eq!(
             doc.text(),
-            format!("{NEW_FILE_HEADER}\n[profile.default]\nrepos = [{{ github = \"org\" }}]\n")
+            format!(
+                "{NEW_FILE_HEADER}\n{}[profile.default]\nrepos = [{{ github = \"org\" }}]\n",
+                profiles::PRECEDENCE
+            )
         );
         doc.load(path, &NoCheckouts).unwrap();
     }

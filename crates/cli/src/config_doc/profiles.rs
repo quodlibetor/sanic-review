@@ -17,9 +17,27 @@ pub fn get_mut<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut dyn T
         .ok_or_else(|| eyre!("there's no `[profile.{name}]` in the config"))
 }
 
-/// Adds `[profile.<name>]` with an empty `repos`, after the others.
+/// Written right above the first profile the editor adds, so a file says
+/// why its profiles' order matters. It's among that header's own
+/// comments, so the editor shows it over the profile, and it's kept with
+/// whichever profile is first as they're moved or removed.
+pub const PRECEDENCE: &str = "\
+# When several `repos` entries match a PR, the most specific wins:
+# path-scoped, then repo, then org. Between equally specific ones, the
+# first in the file wins, so order matters; the config editor's K/J
+# moves profiles and their entries.
+";
+
+/// Adds `[profile.<name>]` with an empty `repos`, after the others. The
+/// first profile of a file that doesn't say so yet gets [`PRECEDENCE`]
+/// above it.
 pub fn add(doc: &mut DocumentMut, name: &str) -> Result<()> {
     let after = last_position(doc.as_table()) + 1;
+    let first = doc
+        .get("profile")
+        .and_then(Item::as_table_like)
+        .is_none_or(TableLike::is_empty)
+        && !doc.to_string().contains(PRECEDENCE);
     let profiles = doc.entry("profile").or_insert_with(|| {
         let mut table = Table::new();
         // Only `[profile.<name>]` headers, no bare `[profile]`.
@@ -55,6 +73,9 @@ pub fn add(doc: &mut DocumentMut, name: &str) -> Result<()> {
             if !dotted {
                 // Placed after every other table, where it's printed.
                 profile.set_position(Some(after));
+                if first {
+                    profile.decor_mut().set_prefix(format!("\n{PRECEDENCE}"));
+                }
             }
             profiles.insert(name, Item::Table(profile));
         }
@@ -96,6 +117,22 @@ pub fn remove(doc: &mut DocumentMut, name: &str) -> Result<()> {
             let trailing = format!("{trailing}{above}\n");
             doc.set_trailing(trailing);
         }
+    }
+    if let Item::Table(removed) = &removed
+        && split_prefix(removed).1.contains(PRECEDENCE)
+        && let Some(Item::Table(profiles)) = doc.get_mut("profile")
+        && let Some(first) = profiles
+            .iter_mut()
+            .filter_map(|(_, item)| item.as_table_mut())
+            // An implicit one, only named by its own tables' headers,
+            // doesn't print its decor.
+            .filter(|t| !t.is_dotted() && !t.is_implicit())
+            .min_by_key(|t| t.position())
+        && !split_prefix(first).1.contains(PRECEDENCE)
+    {
+        let (above, own) = split_prefix(first);
+        let prefix = format!("{above}{PRECEDENCE}{own}");
+        first.decor_mut().set_prefix(prefix);
     }
     let profiles = profiles_mut(doc)?;
     if profiles.is_empty()
@@ -212,8 +249,20 @@ fn reorder(doc: &mut DocumentMut, order: &[String]) {
                 .map(|t| (t.position(), split_prefix(t).0.to_owned()))
                 .collect();
             places.sort_by_key(|(position, _)| *position);
-            for (table, (position, above)) in headers.iter_mut().zip(places) {
-                let own = split_prefix(table).1.to_owned();
+            let mut owns: Vec<String> = headers
+                .iter()
+                .map(|t| split_prefix(t).1.to_owned())
+                .collect();
+            // The rule stays with whichever profile is now first.
+            if let Some(had) = owns.iter().position(|own| own.contains(PRECEDENCE))
+                && had != 0
+            {
+                owns[had] = owns[had].replacen(PRECEDENCE, "", 1);
+                if let Some(first) = owns.first_mut() {
+                    first.insert_str(0, PRECEDENCE);
+                }
+            }
+            for ((table, (position, above)), own) in headers.iter_mut().zip(places).zip(owns) {
                 table.set_position(position);
                 table.decor_mut().set_prefix(format!("{above}{own}"));
             }
@@ -371,7 +420,82 @@ repos = [{ github = "a" }]
         assert!(removed.starts_with("# Mine.\n\n[runner]"), "{removed}");
         let none = edit(&removed, |doc| remove(doc, "default"));
         assert_eq!(none, "# Mine.\n\n[runner]\nmodel = \"m\"\n");
-        assert_eq!(edit("", |doc| add(doc, "p")), "\n[profile.p]\nrepos = []\n");
+        assert_eq!(
+            edit("", |doc| add(doc, "p")),
+            format!("\n{PRECEDENCE}[profile.p]\nrepos = []\n")
+        );
+    }
+
+    #[test]
+    fn the_first_profile_added_says_why_order_matters_once() {
+        let first = edit("[runner]\nmodel = \"m\"\n", |doc| add(doc, "a"));
+        assert_eq!(
+            first,
+            format!("[runner]\nmodel = \"m\"\n\n{PRECEDENCE}[profile.a]\nrepos = []\n")
+        );
+        // Not again for later ones, nor for a file that already has
+        // profiles.
+        let second = edit(&first, |doc| add(doc, "b"));
+        assert_eq!(second.matches(PRECEDENCE).count(), 1, "{second}");
+        assert!(!edit(HEADERS, |doc| add(doc, "c")).contains(PRECEDENCE));
+        // It stays with whichever profile is first as they move.
+        let moved = edit(&second, |doc| move_to(doc, "b", 0));
+        assert!(
+            moved.ends_with(&format!(
+                "\n{PRECEDENCE}[profile.b]\nrepos = []\n\n[profile.a]\nrepos = []\n"
+            )),
+            "{moved}"
+        );
+        assert_eq!(names(&moved.parse().unwrap()), ["b", "a"]);
+        assert_eq!(edit(&moved, |doc| move_to(doc, "b", 1)), second);
+        // And when the first is removed, with the one after it.
+        let removed = edit(&moved, |doc| remove(doc, "b"));
+        assert!(
+            removed.ends_with(&format!("\n{PRECEDENCE}[profile.a]\nrepos = []\n")),
+            "{removed}"
+        );
+        // Gone with the last profile, it's written again with the next.
+        let none = edit(&removed, |doc| remove(doc, "a"));
+        assert!(!none.contains(PRECEDENCE), "{none}");
+        let again = edit(&none, |doc| add(doc, "c"));
+        assert_eq!(again.matches(PRECEDENCE).count(), 1, "{again}");
+        // A first profile keeping its place keeps its comments as written.
+        let mine = format!(
+            "\n# Mine.\n{PRECEDENCE}[profile.a]\nrepos = []\n\n[profile.b]\nrepos = []\n\n\
+             [profile.c]\nrepos = []\n"
+        );
+        assert_eq!(
+            edit(&mine, |doc| rename(doc, "a", "z")),
+            mine.replace("profile.a", "profile.z")
+        );
+        let moved = edit(&mine, |doc| move_to(doc, "c", 1));
+        assert!(
+            moved.starts_with(&format!("\n# Mine.\n{PRECEDENCE}[profile.a]")),
+            "{moved}"
+        );
+        // Removing the first doesn't write it twice over one that has it.
+        let both = format!("\n{PRECEDENCE}[profile.a]\nrepos = []\n\n{PRECEDENCE}[profile.b]\n");
+        let removed = edit(&both, |doc| remove(doc, "a"));
+        assert_eq!(removed.matches(PRECEDENCE).count(), 1, "{removed}");
+        // Nor over one only its own tables' headers name, which wouldn't
+        // print it.
+        let implicit = format!(
+            "\n{PRECEDENCE}[profile.a]\nrepos = []\n\n[[profile.b.repos]]\ngithub = \"x\"\n\n\
+             [profile.c]\nrepos = []\n"
+        );
+        let removed = edit(&implicit, |doc| remove(doc, "a"));
+        assert!(
+            removed.ends_with(&format!("\n{PRECEDENCE}[profile.c]\nrepos = []\n")),
+            "{removed}"
+        );
+    }
+
+    /// The docs' sample configs carry the rule as the editor writes it, so
+    /// a config copied from them has it kept with the first profile.
+    #[test]
+    fn the_docs_write_the_rule_as_the_editor_does() {
+        assert!(include_str!("../../../../README.md").contains(PRECEDENCE));
+        assert!(include_str!("../../../../docs/DESIGN.md").contains(PRECEDENCE));
     }
 
     #[test]

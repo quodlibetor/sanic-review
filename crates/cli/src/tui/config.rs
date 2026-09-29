@@ -152,6 +152,9 @@ enum Popup {
     Suggest(Box<Suggest>),
 }
 
+/// Shown on arriving at a profile's header: `Config::match_pr`'s rule.
+const PRECEDENCE_HINT: &str = "most specific match wins, then first in the file";
+
 /// What a key did to the editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -755,9 +758,28 @@ impl ConfigEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
-        match self.key(key) {
+        let before = (self.row, self.current_row());
+        let outcome = match self.key(key) {
             Outcome::Open => self.dropdown_find().map_or(Outcome::Open, Outcome::Find),
             outcome => outcome,
+        };
+        self.hint_precedence(before.0, before.1.as_ref());
+        outcome
+    }
+
+    /// Moving onto a profile's header, says why the profiles' order
+    /// matters, unless the key left a notice of its own. Like any notice,
+    /// the next key clears it and the footer's keys come back. Only a move
+    /// counts: the cursor on another row, and that row another header. An
+    /// edit that keeps the selection in place, as a rename does, or that
+    /// carries it along, as `K`/`J` do, changes only one of the two.
+    fn hint_precedence(&mut self, at: usize, before: Option<&Row>) {
+        let row = self.current_row();
+        let moved = self.row != at && row.as_ref() != before;
+        let header = matches!(row, Some(Row::Header(Table::Profile(_))));
+        let idle = self.popup.is_none() && self.typing.is_none() && self.entry.is_none();
+        if moved && header && idle && self.notice.is_none() {
+            self.notice = Some(PRECEDENCE_HINT.into());
         }
     }
 

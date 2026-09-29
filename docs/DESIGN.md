@@ -188,6 +188,10 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 [tui]
 # keys = "emacs"                       # or "vi", for text fields; unset, guessed
 
+# When several `repos` entries match a PR, the most specific wins:
+# path-scoped, then repo, then org. Between equally specific ones, the
+# first in the file wins, so order matters; the config editor's K/J
+# moves profiles and their entries.
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                            # skill dirs made available to the agent
@@ -1531,10 +1535,20 @@ fonttools (run through `uv`, which only this task needs) to
   doesn't know, and repos written as `[[profile.<name>.repos]]` tables,
   are shown to edit by hand. On a profile's header, or the row after the
   last table, `+` adds a profile after the others; on a header, `-`
-  removes the profile after a yes, and `K`/`J` move it. The footer says
+  removes the profile after a yes, and `K`/`J` move it. The first profile
+  added to a file that doesn't say so yet gets a comment right above its
+  header with the Precedence rule and that `K`/`J` reorder; it's among
+  that header's own comments, so it shows over it, and moving or removing
+  profiles keeps it with whichever is first. The footer says
   whether the config loads and lists the main keys, each key bright, as
   in the `f` lists' hints; `?` lists them all. Hints that don't fit are
-  dropped whole from the right, but `? keys` always stays.
+  dropped whole from the right, but `? keys` always stays. On a profile's
+  header or a repo entry, `K/J move` comes after the other keys, just
+  before `? keys`, so it takes only the room they leave. When the cursor
+  moves onto a profile's header, unless the key left a notice of its own,
+  the footer says the rule instead, as a notice the next key clears; an
+  edit that leaves the cursor on a header, such as a rename or `K`/`J`,
+  doesn't.
   `f` finds what the selected key
   could hold, in a list to pick from:
   - on `review_requests.teams`, your teams, ticked where the filter lets

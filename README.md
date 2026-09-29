@@ -255,6 +255,10 @@ manual_reviews = false            # run queued reviews by themselves; on unless 
 skip_titles = ["build(deps)*"]    # never auto-review these
 authors = ["*", "!dependabot"]    # whose PRs you owe a review; "*" unless set
 
+# When several `repos` entries match a PR, the most specific wins:
+# path-scoped, then repo, then org. Between equally specific ones, the
+# first in the file wins, so order matters; the config editor's K/J
+# moves profiles and their entries.
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                       # directories of SKILL.md skills
