@@ -24,5 +24,5 @@ expression: draw(&editor).backend()
 "│ What this config does ───────────────────────────────────────────────────────│"
 "│ Counting starts once the config loads.                                       │"
 "│──────────────────────────────────────────────────────────────────────────────│"
-"│ … checking       Space kind  ↵ edit  + glob  - remove  u unset remote  Esc ba│"
+"│ … checking            Esc back  Space kind  ↵ edit  + glob  - remove  ? keys │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

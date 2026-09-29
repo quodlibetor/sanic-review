@@ -63,11 +63,12 @@ impl ConfigEditor {
         };
         // Wrapped, each line takes as many rows as its text needs.
         let text_width = usize::from(inner.width.saturating_sub(2)).max(1);
+        let below = hang_bullets(below, text_width);
         let wrapped: usize = below
             .iter()
             .map(|line| line.width().div_ceil(text_width).max(1))
             .sum();
-        let below_height = u16::try_from(wrapped).unwrap_or(u16::MAX).clamp(1, 6) + 1;
+        let below_height = u16::try_from(wrapped).unwrap_or(u16::MAX).clamp(1, 8) + 1;
         let [file, below_area, footer] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(below_height),
@@ -76,7 +77,8 @@ impl ConfigEditor {
         .areas(inner);
         self.render_file(frame, file.inner(Margin::new(1, 0)));
         frame.render_widget(
-            Paragraph::new(below).wrap(Wrap { trim: true }).block(
+            // Untrimmed, so a bullet's later rows keep their indent.
+            Paragraph::new(below).wrap(Wrap { trim: false }).block(
                 Block::new()
                     .borders(Borders::TOP)
                     .title(below_title)
@@ -773,7 +775,8 @@ impl ConfigEditor {
         vec![Line::raw(help), Line::from(typing.dim())]
     }
 
-    /// What the config does, in sentences, from the counts so far.
+    /// What the config does, a bullet each, from the counts so far, and
+    /// how counting is going on a line of its own.
     pub(super) fn effects(&self) -> Vec<Line<'static>> {
         if let Some(why) = &self.offline {
             return vec![Line::from(Span::styled(
@@ -794,7 +797,6 @@ impl ConfigEditor {
             }
             return lines;
         }
-        let text = [self.watches(), self.owed(), self.yours(), self.window()].join(" ");
         // While it doesn't load, these are the counts of the last text that
         // did.
         let style = if matches!(self.check, Check::Fails(_)) {
@@ -802,7 +804,9 @@ impl ConfigEditor {
         } else {
             Style::new()
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        for bullet in [self.watches(), self.owed(), self.yours(), self.window()] {
+            lines.push(Line::from(Span::styled(format!("· {bullet}"), style)));
+        }
         let tally = Tally(&self.answers);
         let state = match &self.stopped {
             Some(Stopped::RateLimited(wait)) => Some(format!(
@@ -839,21 +843,21 @@ impl ConfigEditor {
         }
     }
 
-    /// `Watches 1,061 repos (1,040 in 3 orgs, 21 named directly).`
+    /// `Watches 1,059 repos (1,057 in 2 orgs, 2 named directly)`
     fn watches(&self) -> String {
         let repos = Tally(&self.answers).repos(&self.plan);
         match (repos.value, repos.failed) {
-            (_, true) => "Couldn't count the repos it watches.".into(),
+            (_, true) => "Couldn't count the repos it watches".into(),
             (None, false) => "Counting the repos it watches…".into(),
             (Some(total), false) => {
                 let named = self.plan.repos;
                 let orgs = self.plan.orgs.len();
                 let watches = format!("Watches {}", plural_count(total, "repo"));
                 match (orgs, named) {
-                    (0, _) => format!("{watches}, each named directly."),
-                    (_, 0) => format!("{watches} in {}.", plural(orgs, "org")),
+                    (0, _) => format!("{watches} (all named directly)"),
+                    (_, 0) => format!("{watches} (in {})", plural(orgs, "org")),
                     _ => format!(
-                        "{watches} ({} in {}, {} named directly).",
+                        "{watches} ({} in {}, {} named directly)",
                         thousands(total.saturating_sub(named)),
                         plural(orgs, "org"),
                         thousands(named)
@@ -863,18 +867,25 @@ impl ConfigEditor {
         }
     }
 
-    /// `You're asked for 15 reviews in 1 repo, maybe fewer: …`
+    /// `Matches up to 15 reviews in at least 1 repo (search can't apply
+    /// your team filter)`: "up to" only when a search can't apply
+    /// something, "at least" only when the repos were cut short.
     fn owed(&self) -> String {
         let tally = Tally(&self.answers);
         let owed = tally.owed(&self.plan);
         let Some(n) = owed.value.filter(|_| !owed.failed) else {
             return if owed.failed {
-                "Couldn't count the reviews you're asked for.".into()
+                "Couldn't count the reviews you're asked for".into()
             } else {
                 "Counting the reviews you're asked for…".into()
             };
         };
-        let mut text = format!("You're asked for {}", plural_count(n, "review"));
+        let bound = self.unsearchable();
+        let mut text = format!(
+            "Matches {}{}",
+            if bound.is_some() { "up to " } else { "" },
+            plural_count(n, "review")
+        );
         let asked_in = tally.asked_in(&self.plan);
         match (asked_in.value, asked_in.bound) {
             (Some(repos), Bound::AtLeast) => {
@@ -885,35 +896,25 @@ impl ConfigEditor {
             }
             (None, _) => {}
         }
-        match self.unsearchable() {
-            Some(what) => {
-                let _ = write!(text, ", maybe fewer: search can't apply {what}.");
-            }
-            None => text.push('.'),
+        if let Some(what) = bound {
+            let _ = write!(text, " (search can't apply {what})");
         }
         text
     }
 
-    /// `You have 2 open PRs.`
+    /// `Matches 2 of your open PRs`, or `up to` when globs apply.
     fn yours(&self) -> String {
         let yours = Tally(&self.answers).yours(&self.plan);
         match (yours.value, yours.failed) {
-            (_, true) => "Couldn't count your open PRs.".into(),
+            (_, true) => "Couldn't count your open PRs".into(),
             (None, false) => "Counting your open PRs…".into(),
-            // What you owe has just said why, when it's the same reason.
-            (Some(n), false)
-                if self.plan.globs && self.unsearchable() == Some("your path globs") =>
-            {
+            (Some(n), false) if self.plan.globs => {
                 format!(
-                    "You have {}, maybe fewer for the same reason.",
-                    plural_count(n, "open PR")
+                    "Matches up to {} of your open PRs (search can't apply your path globs)",
+                    thousands(n)
                 )
             }
-            (Some(n), false) if self.plan.globs => format!(
-                "You have {}, maybe fewer: search can't apply your path globs.",
-                plural_count(n, "open PR")
-            ),
-            (Some(n), false) => format!("You have {}.", plural_count(n, "open PR")),
+            (Some(n), false) => format!("Matches {} of your open PRs", thousands(n)),
         }
     }
 
@@ -921,15 +922,15 @@ impl ConfigEditor {
     fn window(&self) -> String {
         let window = self.watched.as_ref().and_then(|w| w.window);
         let mut text = match window {
-            Some(days) => format!("Only PRs updated in the last {days} days count."),
-            None => "PRs of any age count.".into(),
+            Some(days) => format!("Only PRs updated in the last {days} days count"),
+            None => "PRs of any age count".into(),
         };
         if let Some(super::Serving(serving)) = self.serve_window.filter(|s| s.0 != window) {
             match serving {
                 Some(days) => {
-                    let _ = write!(text, " serve is showing the last {days} days.");
+                    let _ = write!(text, " (serve is showing {days} days)");
                 }
-                None => text.push_str(" serve is showing PRs of any age."),
+                None => text.push_str(" (serve is showing any age)"),
             }
         }
         text
@@ -946,20 +947,49 @@ impl ConfigEditor {
             Check::Loads => Span::styled(" ✓ loads", Style::new().fg(Color::Green)),
             Check::Fails(_) => Span::styled(" ✗ doesn't load", ERROR),
         };
-        let keys = match (&self.notice, &self.typing, &self.entry) {
-            (Some(notice), _, _) => Span::styled(notice.clone(), Style::new().fg(Color::Yellow)),
-            (None, Some(_), _) => "↵ set  blank unsets  Esc cancel  Tab complete ".dim(),
-            (None, None, Some(_)) => {
-                "Space kind  ↵ edit  + glob  - remove  u unset remote  Esc back ".dim()
-            }
-            (None, None, None) => {
-                "↵ edit  + add  - remove  u unset  f find  ^S save  ? keys ".dim()
-            }
-        };
         let [left, right] =
             Layout::horizontal([Constraint::Length(18), Constraint::Fill(1)]).areas(line);
+        let room = usize::from(right.width);
+        let keys = match (&self.notice, &self.typing, &self.entry) {
+            (Some(notice), _, _) => {
+                Line::from(Span::styled(notice.clone(), Style::new().fg(Color::Yellow)))
+            }
+            (None, Some(_), _) => fitted_hints(
+                room,
+                &[
+                    ("↵", "set"),
+                    ("blank", "unsets"),
+                    ("Esc", "cancel"),
+                    ("Tab", "complete"),
+                ],
+            ),
+            (None, None, Some(_)) => fitted_hints(
+                room,
+                &[
+                    ("Esc", "back"),
+                    ("Space", "kind"),
+                    ("↵", "edit"),
+                    ("+", "glob"),
+                    ("-", "remove"),
+                    ("u", "unset remote"),
+                    ("?", "keys"),
+                ],
+            ),
+            (None, None, None) => fitted_hints(
+                room,
+                &[
+                    ("↵", "edit"),
+                    ("+", "add"),
+                    ("-", "remove"),
+                    ("u", "unset"),
+                    ("f", "find"),
+                    ("^S", "save"),
+                    ("?", "keys"),
+                ],
+            ),
+        };
         frame.render_widget(Paragraph::new(state), left);
-        frame.render_widget(Paragraph::new(Line::from(keys).right_aligned()), right);
+        frame.render_widget(Paragraph::new(keys.right_aligned()), right);
     }
 
     /// The open repo entry, over the file.
@@ -1108,15 +1138,22 @@ impl ConfigEditor {
                 &mut state,
             );
         }
-        let hint = match &suggest.what {
-            What::Model { .. } => " Enter set · Esc cancel",
-            What::Teams { .. } => " Space tick · Enter write · Esc cancel",
-            What::Repos { .. } => {
-                " Space pick · Enter add · s scan · d directory · </> depth · Esc cancel"
-            }
-            _ => " Space pick · Enter add · Esc cancel",
+        let hint: &[(&str, &str)] = match &suggest.what {
+            What::Model { .. } => &[("↵", "set"), ("Esc", "cancel")],
+            What::Teams { .. } => &[("Space", "tick"), ("↵", "write"), ("Esc", "cancel")],
+            What::Repos { .. } => &[
+                ("Space", "pick"),
+                ("↵", "add"),
+                ("s", "scan"),
+                ("d", "directory"),
+                ("</>", "depth"),
+                ("Esc", "cancel"),
+            ],
+            _ => &[("Space", "pick"), ("↵", "add"), ("Esc", "cancel")],
         };
-        frame.render_widget(Paragraph::new(hint.dim()), footer);
+        let mut hint = key_hints(hint);
+        hint.spans.insert(0, Span::raw(" "));
+        frame.render_widget(Paragraph::new(hint), footer);
     }
 
     fn render_diff(&self, frame: &mut Frame<'_>, scroll: u16, saving: bool) {
@@ -1194,6 +1231,35 @@ fn blank() -> FileLine {
     }
 }
 
+/// A key in the footer and the pick lists: bright, so it stands out
+/// from what it does.
+const KEY: Style = Style::new().fg(Color::LightGreen);
+
+/// `↵ edit  + add …`: each key bright, what it does dimmed.
+/// As many of `pairs` as fit in `room`, dropping whole hints from the
+/// right, but never `?`'s, which lists what's dropped.
+fn fitted_hints(room: usize, pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut kept = pairs.to_vec();
+    loop {
+        let line = key_hints(&kept);
+        if line.width() <= room || kept.len() <= 1 {
+            return line;
+        }
+        let pinned = kept.last().is_some_and(|(key, _)| *key == "?");
+        kept.remove(kept.len() - if pinned { 2 } else { 1 });
+    }
+}
+
+fn key_hints(pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (n, (key, what)) in pairs.iter().enumerate() {
+        let gap = if n + 1 == pairs.len() { " " } else { "  " };
+        spans.push(Span::styled((*key).to_owned(), KEY));
+        spans.push(Span::raw(format!(" {what}{gap}")).dim());
+    }
+    Line::from(spans)
+}
+
 /// A line of something the config doesn't take, as the file writes it,
 /// with its comment in the file's comment style.
 fn raw_line((code, comment): &(String, Option<String>)) -> FileLine {
@@ -1264,6 +1330,39 @@ fn toml_string(text: &str) -> String {
 }
 
 /// A default as TOML would write it: text quoted.
+/// `lines` with each bullet wrapped to `width`, its later rows indented
+/// under its text rather than under the `·`; other lines are left for the
+/// paragraph to wrap.
+fn hang_bullets(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    const BULLET: &str = "· ";
+    let mut out = Vec::new();
+    for line in lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let Some(rest) = text.strip_prefix(BULLET) else {
+            out.push(line);
+            continue;
+        };
+        let style = line.spans.first().map_or_else(Style::new, |s| s.style);
+        let indent = BULLET.chars().count();
+        let room = width.saturating_sub(indent).max(1);
+        let mut rows: Vec<String> = Vec::new();
+        for word in rest.split(' ') {
+            match rows.last_mut() {
+                Some(row) if row.chars().count() + 1 + word.chars().count() <= room => {
+                    row.push(' ');
+                    row.push_str(word);
+                }
+                _ => rows.push(word.to_owned()),
+            }
+        }
+        for (n, row) in rows.into_iter().enumerate() {
+            let lead = if n == 0 { BULLET } else { "  " };
+            out.push(Line::from(Span::styled(format!("{lead}{row}"), style)));
+        }
+    }
+    out
+}
+
 fn quoted(kind: Kind, value: &str) -> String {
     match kind {
         Kind::Text => toml_string(value),

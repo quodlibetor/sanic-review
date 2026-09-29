@@ -1,0 +1,28 @@
+---
+source: crates/cli/src/tui/config/tests.rs
+expression: narrow.backend()
+---
+"┌ /home/u/.config/sanic-review/config.toml → /hom┐"
+"│ # the review model for this profile's PRs      │"
+"│ # model = "auto"           (from runner.model) │"
+"│ # added to `review_requests.skip_titles` for t │"
+"│ # skip_titles = []                   (default) │"
+"│ # overrides `review_requests.skip_drafts` for  │"
+"│ # skip_dr…  (from review_requests.skip_drafts) │"
+"│ # draft fixes for comments on your own PRs, in │"
+"│ # auto_fix = false                   (default) │"
+"│ # what this profile reviews; the most specific │"
+"│ repos = [                                      │"
+"│   { github = "org" },        32 repos · 30 PRs │"
+"│ What this config does ─────────────────────────│"
+"│ · Watches 33 repos (32 in 1 org, 1 named       │"
+"│   directly)                                    │"
+"│ · Matches up to 12 reviews in 1 repo (search   │"
+"│   can't apply your path globs)                 │"
+"│ · Matches up to 40 of your open PRs (search    │"
+"│   can't apply your path globs)                 │"
+"│ · Only PRs updated in the last 14 days count   │"
+"│   (serve is showing 30 days)                   │"
+"│────────────────────────────────────────────────│"
+"│ ✓ loads                  ↵ edit  + add  ? keys │"
+"└────────────────────────────────────────────────┘"

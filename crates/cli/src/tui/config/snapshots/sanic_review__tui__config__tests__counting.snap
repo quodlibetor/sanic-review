@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ [profile.ring]                                                               │"
-"│ # files whose text goes in the agent's system prompt                         │"
 "│ # instructions = []                                                (default) │"
 "│ # skill directories the agent may read                                       │"
 "│ # skills = []                                                      (default) │"
@@ -20,8 +18,10 @@ expression: draw(&editor).backend()
 "│ repos = [                                                                    │"
 "│   { github = "org" },                                  counting… · counting… │"
 "│ What this config does ───────────────────────────────────────────────────────│"
-"│ Counting the repos it watches… Counting the reviews you're asked for…        │"
-"│ Counting your open PRs… Only PRs updated in the last 14 days count.          │"
+"│ · Counting the repos it watches…                                             │"
+"│ · Counting the reviews you're asked for…                                     │"
+"│ · Counting your open PRs…                                                    │"
+"│ · Only PRs updated in the last 14 days count                                 │"
 "│ Still counting…                                                              │"
 "│──────────────────────────────────────────────────────────────────────────────│"
 "│ ✓ loads            ↵ edit  + add  - remove  u unset  f find  ^S save  ? keys │"

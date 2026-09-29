@@ -532,6 +532,16 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
     editor.counted(answers);
     editor.set_serve_window(Some(30));
     insta::assert_snapshot!("counted", draw(&editor).backend());
+    // Narrower, each bullet wraps under its own text, inside the box.
+    let mut narrow = Terminal::new(TestBackend::new(50, 24)).unwrap();
+    narrow.draw(|frame| editor.render(frame)).unwrap();
+    insta::assert_snapshot!("counted_narrow", narrow.backend());
+    // The footer drops whole hints that don't fit, but keeps `?`, which
+    // lists them.
+    let footer = narrow.backend().to_string();
+    let footer = footer.lines().rev().nth(1).unwrap();
+    assert!(footer.contains("? keys"), "{footer}");
+    assert!(!footer.contains("u uns"), "{footer}");
 
     // Rate limited, the counts say so.
     editor.counted(vec![Counted::Stopped(Stopped::RateLimited(
@@ -571,7 +581,7 @@ fn a_failed_search_stays_on_the_counts_line_until_its_counted_again() {
     let said = effects(&editor);
     assert!(said.contains("A count failed: 422"), "{said}");
     assert!(
-        said.contains("Couldn't count the reviews you're asked for."),
+        said.contains("Couldn't count the reviews you're asked for"),
         "{said}"
     );
     assert!(!said.contains("rate limited"), "{said}");
@@ -581,7 +591,7 @@ fn a_failed_search_stays_on_the_counts_line_until_its_counted_again() {
     editor.counted(vec![Counted::Answer(owed, Answer::Count(2))]);
     let said = effects(&editor);
     assert!(!said.contains("count failed"), "{said}");
-    assert!(said.contains("You're asked for 2 reviews"), "{said}");
+    assert!(said.contains("· Matches 2 reviews"), "{said}");
 }
 
 /// What the Effects block says, as one text.

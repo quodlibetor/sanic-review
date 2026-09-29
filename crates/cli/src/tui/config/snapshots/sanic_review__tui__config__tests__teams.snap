@@ -22,7 +22,7 @@ expression: draw(&editor).backend()
 "│ #│                                                                        │  │"
 "│ #│                                                                        │) │"
 "│ W│                                                                        │──│"
-"│ C│ Space tick · Enter write · Esc cancel                                  │  │"
+"│ C│ Space tick  ↵ write  Esc cancel                                        │  │"
 "│──└────────────────────────────────────────────────────────────────────────┘──│"
 "│ ✓ loads            ↵ edit  + add  - remove  u unset  f find  ^S save  ? keys │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

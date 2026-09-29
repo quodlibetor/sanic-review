@@ -1258,7 +1258,9 @@ fonttools (run through `uv`, which only this task needs) to
   are shown to edit by hand. On a profile's header, or the row after the
   last table, `+` adds a profile after the others; on a header, `-`
   removes the profile after a yes, and `K`/`J` move it. The footer says
-  whether the config loads and lists the main keys; `?` lists them all.
+  whether the config loads and lists the main keys, each key bright, as
+  in the `f` lists' hints; `?` lists them all. Hints that don't fit are
+  dropped whole from the right, but `? keys` always stays.
   `f` finds what the selected key
   could hold, in a list to pick from:
   - on `review_requests.teams`, your teams, ticked where the filter lets
@@ -1303,9 +1305,10 @@ fonttools (run through `uv`, which only this task needs) to
   TOML can't be opened; one that is but doesn't load can, since fixing
   it is what the editor is for, and one that doesn't exist opens empty,
   written with a line saying where the format is described.
-  Under the file, "What this config does" says, in sentences, what it
-  watches, as it last loaded: its repos, how many in orgs and how many
-  named directly, the reviews you're asked for and how many repos
+  Under the file, "What this config does" says, a bullet each (wrapped
+  under its own text, not under the `·`), what it watches, as it last
+  loaded: its repos, how many in orgs and how many named directly, the
+  reviews you're asked for and how many repos
   they're in, and your own open PRs, within `poll.updated_within_days`,
   saying when `serve` is showing another window (one picked on the
   dashboard, or the config's before a save). While the text doesn't
@@ -1319,8 +1322,10 @@ fonttools (run through `uv`, which only this task needs) to
   that search returns, read a few pages at most, so past that, or past
   GitHub's thousand results, it's "at least". Path globs, and a team
   filter that leaves out one of your teams, can't be searched, so where
-  they'd cut a count it says "maybe fewer" and which. Each of a selected
-  profile's entries says its repos and PRs on both lists at the right of
+  they'd cut a count it says "up to" it, with which in brackets; a count
+  with neither is plain. How counting is going (still counting, rate
+  limited, a failed search, the config not loading) is a line of its
+  own. Each of a selected profile's entries says its repos and PRs on both lists at the right of
   its row, as "1 repo · 3 PRs", or "up to 12 PRs" where its globs can't
   be searched; an org's leave out the repos entries claim: left out of
   its search, or, when that doesn't fit in one, counted in searches of
@@ -1328,7 +1333,7 @@ fonttools (run through `uv`, which only this task needs) to
   entry they're for, found by what it covers (its checkout or org or
   repo, and its globs), so they follow it as it moves, and an entry the
   config didn't have when it last loaded shows none. A failed search
-  shows as "count failed", or "couldn't count" in the sentence it's part
+  shows as "count failed", or "couldn't count" in the bullet it's part
   of, and nowhere else. Under `teams`, while `review_requests` is
   selected, your teams show as comments with their requests and whether
   the filter counts them, and `updated_within_days` says how many PRs
