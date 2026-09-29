@@ -10,17 +10,21 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use sanic_core::{
+    config::Keys,
     pr::PrKey,
     skip::{TitleFilter, escape_title},
 };
 use sanic_store::OwedReview;
+
+use super::config::field::{TextField, Took};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgnoreEditor {
     pub key: PrKey,
     title: String,
     body: String,
-    pattern: String,
+    /// The pattern, typed with the config's keys.
+    pattern: TextField,
     /// Lines of the description scrolled past.
     scroll: u16,
     step: Step,
@@ -51,14 +55,14 @@ pub enum Outcome {
 
 impl IgnoreEditor {
     /// Starts with a pattern that matches exactly `pr`'s title, to edit
-    /// down.
+    /// down with `keys`.
     #[must_use]
-    pub fn new(pr: &OwedReview) -> Self {
+    pub fn new(pr: &OwedReview, keys: Keys) -> Self {
         Self {
             key: pr.key.clone(),
             title: pr.title.clone(),
             body: pr.body.clone(),
-            pattern: escape_title(&pr.title),
+            pattern: TextField::new(&escape_title(&pr.title), keys),
             scroll: 0,
             step: Step::Edit,
         }
@@ -68,23 +72,25 @@ impl IgnoreEditor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, self.step) {
             (KeyCode::Char('c'), _) if ctrl => return Outcome::Quit,
-            (KeyCode::Esc, _) => return Outcome::Cancel,
-            (KeyCode::Enter, Step::Edit) => {
-                if TitleFilter::check_pattern(&self.pattern).is_ok() && !self.pattern.is_empty() {
-                    self.step = Step::Target { selected: 0 };
-                }
-            }
-            (KeyCode::Char('u'), Step::Edit) if ctrl => self.pattern.clear(),
-            (KeyCode::Char(c), Step::Edit) if !ctrl => self.pattern.push(c),
-            (KeyCode::Backspace, Step::Edit) => {
-                self.pattern.pop();
-            }
+            (KeyCode::Esc, Step::Target { .. }) => return Outcome::Cancel,
             (KeyCode::Up | KeyCode::PageUp, Step::Edit) => {
                 self.scroll = self.scroll.saturating_sub(page(key.code));
             }
             (KeyCode::Down | KeyCode::PageDown, Step::Edit) => {
                 self.scroll = self.scroll.saturating_add(page(key.code));
             }
+            // A tab is never part of a title.
+            (KeyCode::Tab, Step::Edit) => {}
+            (_, Step::Edit) => match self.pattern.key(key) {
+                Took::Edit => {}
+                Took::Cancel => return Outcome::Cancel,
+                Took::Commit => {
+                    let pattern = self.pattern.text();
+                    if TitleFilter::check_pattern(&pattern).is_ok() && !pattern.is_empty() {
+                        self.step = Step::Target { selected: 0 };
+                    }
+                }
+            },
             (KeyCode::Up | KeyCode::Char('k'), Step::Target { selected }) => {
                 self.step = Step::Target {
                     selected: selected.saturating_sub(1),
@@ -97,7 +103,7 @@ impl IgnoreEditor {
             }
             (KeyCode::Enter, Step::Target { selected }) => {
                 return Outcome::Save {
-                    pattern: self.pattern.clone(),
+                    pattern: self.pattern.text(),
                     profile: selected
                         .checked_sub(1)
                         .and_then(|i| profiles.get(i))
@@ -141,7 +147,8 @@ impl IgnoreEditor {
             body,
         );
 
-        let preview = preview(&self.pattern, owed);
+        let typed = self.pattern.text();
+        let preview = preview(&typed, owed);
         let pattern_block = match &preview {
             Ok(_) => Block::bordered().title(" Pattern "),
             Err(err) => Block::bordered()
@@ -149,11 +156,7 @@ impl IgnoreEditor {
                 .title(format!(" Pattern: {err} ")),
         };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(self.pattern.as_str()),
-                "▏".dim(),
-            ]))
-            .block(pattern_block),
+            Paragraph::new(self.pattern.line()).block(pattern_block),
             pattern,
         );
 
@@ -176,12 +179,18 @@ impl IgnoreEditor {
             List::new(rows).block(Block::bordered().title(heading)),
             matches,
         );
-        frame.render_widget(
-            Paragraph::new(
-                " Enter save · Esc cancel · ↑/↓ scroll description · Ctrl-U clear".dim(),
-            ),
-            footer,
+        let mut keys = Line::default();
+        if let Some(mode) = self.pattern.mode() {
+            keys.push_span(Span::raw(format!(" -- {mode} --")).bold());
+        }
+        keys.push_span(
+            format!(
+                " Enter save · Esc {} · ↑/↓ scroll description",
+                self.pattern.esc_does()
+            )
+            .dim(),
         );
+        frame.render_widget(Paragraph::new(keys), footer);
 
         if let Step::Target { selected } = self.step {
             self.render_target(frame, profiles, selected);
@@ -200,7 +209,7 @@ impl IgnoreEditor {
             .area()
             .centered(Constraint::Length(56), Constraint::Length(height));
         frame.render_widget(Clear, area);
-        let block = Block::bordered().title(format!(" Add `{}` to ", self.pattern));
+        let block = Block::bordered().title(format!(" Add `{}` to ", self.pattern.text()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let [list, footer] =
@@ -284,5 +293,46 @@ mod tests {
         assert_eq!(numbers("nothing"), Vec::<u32>::new());
         assert!(preview("[", &owed).is_err());
         assert!(preview("", &owed).is_err());
+    }
+
+    fn press(editor: &mut IgnoreEditor, code: KeyCode, modifiers: KeyModifiers) -> Outcome {
+        editor.handle_key(KeyEvent::new(code, modifiers), &["p".into()])
+    }
+
+    #[test]
+    fn the_pattern_takes_the_configs_keys() {
+        let pr = owed(1, "build(deps): bump serde");
+        // Emacs: Ctrl-W kills a word, Tab types nothing, Esc cancels.
+        let mut editor = IgnoreEditor::new(&pr, Keys::Emacs);
+        let _ = press(&mut editor, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(editor.pattern.text(), "build(deps): bump ");
+        let _ = press(&mut editor, KeyCode::Char('*'), KeyModifiers::NONE);
+        let _ = press(&mut editor, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(editor.pattern.text(), "build(deps): bump *");
+        assert_eq!(
+            press(&mut editor, KeyCode::Enter, KeyModifiers::NONE),
+            Outcome::Open
+        );
+        assert_eq!(editor.step, Step::Target { selected: 0 });
+        let Outcome::Save { pattern, .. } = press(&mut editor, KeyCode::Enter, KeyModifiers::NONE)
+        else {
+            panic!("not saved");
+        };
+        assert_eq!(pattern, "build(deps): bump *");
+
+        // vi: the first Esc goes to normal mode, where `b` and `D` edit.
+        let mut editor = IgnoreEditor::new(&pr, Keys::Vi);
+        assert_eq!(
+            press(&mut editor, KeyCode::Esc, KeyModifiers::NONE),
+            Outcome::Open
+        );
+        assert_eq!(editor.pattern.mode(), Some("NORMAL"));
+        let _ = press(&mut editor, KeyCode::Char('b'), KeyModifiers::NONE);
+        let _ = press(&mut editor, KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert_eq!(editor.pattern.text(), "build(deps): bump ");
+        assert_eq!(
+            press(&mut editor, KeyCode::Esc, KeyModifiers::NONE),
+            Outcome::Cancel
+        );
     }
 }

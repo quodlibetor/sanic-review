@@ -195,6 +195,8 @@ pub struct Shared {
     pub me: String,
     /// `runner.manual_reviews`, as the config last loaded.
     pub manual_reviews: watch::Receiver<bool>,
+    /// `tui.keys`, as the config last loaded, for the ignore editor.
+    pub keys: watch::Receiver<Option<Keys>>,
     /// The keys text fields take where the config doesn't say, guessed
     /// once as `serve` starts.
     pub guessed_keys: Keys,
@@ -605,6 +607,8 @@ pub struct Overview {
     /// `runner.manual_reviews`: queued reviews are held, not waiting their
     /// turn.
     pub manual_reviews: bool,
+    /// The keys the ignore editor's pattern takes.
+    pub keys: Keys,
 }
 
 impl Overview {
@@ -639,6 +643,7 @@ impl Overview {
         drop(skips);
         Ok(Self {
             manual_reviews: *shared.manual_reviews.borrow(),
+            keys: shared.keys.borrow().unwrap_or(shared.guessed_keys),
             owed,
             skipped,
             profiles,
@@ -1153,7 +1158,12 @@ impl App {
             .and_then(|i| self.overview.owed.get(i))
             .filter(|_| self.focus == Pane::Owed);
         match selected {
-            Some(pr) => self.overlay = Some(Overlay::Ignore(Box::new(IgnoreEditor::new(pr)))),
+            Some(pr) => {
+                self.overlay = Some(Overlay::Ignore(Box::new(IgnoreEditor::new(
+                    pr,
+                    self.overview.keys,
+                ))));
+            }
             None => self.notice = Some("i skips reviews you owe by title".into()),
         }
     }
@@ -1885,6 +1895,7 @@ mod tests {
             waiting: HashMap::from([(pr("org/web", 78), Duration::from_secs(100))]),
             profiles: vec!["default".into(), "ring".into()],
             manual_reviews: false,
+            keys: Keys::Emacs,
             skipped: HashMap::from([(
                 pr("org/api", 490),
                 Skip::Title {
@@ -2092,6 +2103,7 @@ mod tests {
         let shared = Shared {
             me: "me".into(),
             manual_reviews: watch::channel(false).1,
+            keys: watch::channel(None).1,
             guessed_keys: Keys::Emacs,
             logs: LogLines::default(),
             due: watch::channel(DueTimes::new()).1,
@@ -2124,6 +2136,18 @@ mod tests {
         assert_eq!(owed(&shared), [2]);
         window_tx.send_replace(None);
         assert_eq!(owed(&shared), [1, 2]);
+
+        // The ignore editor's keys: the config's, else the guess.
+        let (keys_tx, keys) = watch::channel(None);
+        let shared = Shared {
+            keys,
+            guessed_keys: Keys::Vi,
+            ..shared
+        };
+        let keys = |shared: &Shared| Overview::load(&store, shared).unwrap().keys;
+        assert_eq!(keys(&shared), Keys::Vi);
+        keys_tx.send_replace(Some(Keys::Emacs));
+        assert_eq!(keys(&shared), Keys::Emacs);
     }
 
     #[test]

@@ -1186,7 +1186,12 @@ fonttools (run through `uv`, which only this task needs) to
   The status bar's key hint includes `o` where it fits.
   `i` on a review you owe opens an ignore editor: the PR's title and
   description, read-only, over a pattern prefilled with the title (glob
-  syntax escaped) to edit down, e.g. to `build(deps)*`. Under it, a live
+  syntax escaped) to edit down, e.g. to `build(deps)*`. The pattern is
+  typed as the config editor's fields are, with the keys `tui.keys`
+  names, taken from the config as `serve` last loaded it, or else the
+  guess `serve` made when it started, as the config editor's (see
+  below); it has no dropdown, as the patterns
+  already written are no start for one they'd have skipped. Under it, a live
   preview lists the reviews you owe it would skip; an invalid glob shows
   its error and can't be saved. Enter asks where it goes, `[review_requests]`
   or one profile, and adds it to that `skip_titles` unless it's already

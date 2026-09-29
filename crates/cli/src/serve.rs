@@ -23,7 +23,7 @@ use color_eyre::{
 };
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
-    config::{Config, DEFAULT_API_URL, Unloadable, default_config_path, default_data_dir},
+    config::{Config, DEFAULT_API_URL, Keys, Unloadable, default_config_path, default_data_dir},
     pr::PrKey,
     run::QueuedRun,
     skip::SkipRules,
@@ -204,6 +204,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             Shared {
                 me: me.clone(),
                 manual_reviews: live.manual_reviews.subscribe(),
+                keys: live.keys.subscribe(),
                 guessed_keys: crate::tui::guessed_keys(),
                 logs,
                 due,
@@ -328,6 +329,8 @@ struct Live {
     /// `runner.manual_reviews`: queued reviews are held until you start
     /// one. Sent only when it changes.
     manual_reviews: watch::Sender<bool>,
+    /// `tui.keys`, for the TUI's text fields.
+    keys: watch::Sender<Option<Keys>>,
     /// The recency window in force, in days, for the TUI.
     window: watch::Sender<Option<u32>>,
     /// The same, with where it comes from, for the dashboard.
@@ -349,6 +352,7 @@ impl Live {
         Self {
             skips: watch::Sender::new(config.skip_rules()),
             manual_reviews: watch::Sender::new(config.runner.manual_reviews),
+            keys: watch::Sender::new(config.tui.keys),
             window: watch::Sender::new(recency.days()),
             recency: watch::Sender::new(recency),
             progress: watch::Sender::new(None),
@@ -361,6 +365,7 @@ impl Live {
         let manual = config.runner.manual_reviews;
         self.manual_reviews
             .send_if_modified(|was| std::mem::replace(was, manual) != manual);
+        self.keys.send_replace(config.tui.keys);
         self.set_recency(|w| w.configured = config.poll.updated_within_days);
     }
 

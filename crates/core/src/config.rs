@@ -191,10 +191,11 @@ pub struct TuiSettings {
 }
 
 /// Which editing keys a text field takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Keys {
     /// Readline's defaults: Ctrl-A, Ctrl-E, Alt-F and the rest.
+    #[default]
     Emacs,
     /// Typing inserts; Esc goes to normal mode for vi's motions.
     Vi,
