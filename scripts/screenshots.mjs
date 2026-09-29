@@ -1,8 +1,8 @@
 // Screenshots of the demo dashboard and the config editor for the README:
 // builds and starts the `demo` example of sanic-web, has a test of
 // sanic-review draw the editor as a page, drives headless Chrome over the
-// DevTools protocol, and writes docs/images/*.png. `mise run screenshots`
-// runs it.
+// DevTools protocol, and writes the screenshots into docs/images/.
+// `mise run screenshots` runs it.
 //
 // Chrome is `$CHROME`, else `google-chrome` on PATH. PNGs go through
 // oxipng when it's installed.

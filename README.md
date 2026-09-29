@@ -1,5 +1,7 @@
 # sanic-review
 
+<img src="docs/images/banner.png" alt="A crudely drawn blue hedgehog-ish lump running fast and holding up a magnifying glass, beside the words sanic review.">
+
 Review things really really fast, if you consider AI reviewing things review.
 
 sanic-review watches GitHub as you: review requests, pushes, replies,

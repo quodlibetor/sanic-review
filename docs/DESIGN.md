@@ -1559,7 +1559,9 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
 ### Screenshots
 
 The README's screenshots in `docs/images/` come from `mise run screenshots`,
-which runs `scripts/screenshots.mjs` under a pinned Node:
+which runs `scripts/screenshots.mjs` under a pinned Node. The banner,
+`docs/images/banner.png`, is not a screenshot: it's rendered by hand from
+`banner.svg` beside it, with the command in that file's `<metadata>`.
 
 - It builds and starts `sanic-web`'s `demo` example: the dashboard on a free
   loopback port over a fresh store in a temp dir. The store is seeded through

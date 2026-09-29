@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- Source for banner.png, which the README shows because GitHub won't load
+       the @imported web font. Re-render it from docs/images with headless
+       Chrome, using the command in the metadata element below. -->
+  <metadata>google-chrome --headless --hide-scrollbars --virtual-time-budget=5000 --window-size=1280,640 --screenshot=banner.png banner.svg</metadata>
+  <defs>
+    <style>@import url("https://fonts.googleapis.com/css2?family=Gochi+Hand&amp;display=block");</style>
+    <!-- Wobble everything so no line is quite straight. -->
+    <filter id="wobble" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="4"/>
+      <feDisplacementMap in="SourceGraphic" scale="9"/>
+    </filter>
+    <filter id="crayon" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="1" seed="2" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.1 1.35" result="holes"/>
+      <feComposite in="SourceGraphic" in2="holes" operator="in"/>
+    </filter>
+    <path id="lump" d="M300 150 L175 60 L250 190 L110 175 L225 262 L95 300 L220 345 L120 420 L265 405
+                       C265 500 350 560 440 550 C545 540 590 450 575 340 C560 225 480 145 380 160 Z"/>
+    <clipPath id="inside"><use href="#lump"/></clipPath>
+  </defs>
+
+  <rect width="1280" height="640" fill="#fdf8ec"/>
+
+  <g filter="url(#wobble)" stroke-linecap="round" stroke-linejoin="round" fill="none" stroke="#14142b">
+    <!-- speed lines, uneven, one gave up halfway -->
+    <path d="M20 230h70M35 300h45M15 370h90M40 440h60M60 505h28" stroke-width="9"/>
+    <!-- dust puffs -->
+    <path d="M60 575c-20-30 25-45 35-20c10-30 55-15 40 15c30 0 25 35-5 30c-15 20-60 15-70-25z" fill="#e8dcc4" stroke-width="6"/>
+    <path d="M150 600c-10-20 20-30 28-12c10-18 40-5 28 12z" fill="#e8dcc4" stroke-width="5"/>
+
+    <!-- blue fill, off-register: coloured outside the lines -->
+    <use href="#lump" transform="translate(-14 10)" fill="#2f6cf0" stroke="none" filter="url(#crayon)"/>
+    <!-- scribble shading -->
+    <g clip-path="url(#inside)" stroke="#1d4fc4" stroke-width="7" opacity=".7">
+      <path d="M470 470 l90-90 M440 520 l130-130 M400 540 l170-170 M360 540 l80-80 M320 520 l40-40"/>
+    </g>
+    <!-- tan belly/face patch, also wonky -->
+    <path d="M340 330 C330 420 380 500 450 505 C520 505 555 440 548 360 C530 300 420 280 340 330 Z"
+          fill="#f2c98a" stroke-width="7" transform="translate(8 -6)"/>
+    <!-- outline -->
+    <use href="#lump" stroke-width="13"/>
+
+    <!-- stick arm holding a magnifying glass (it reviews things) -->
+    <path d="M555 380 L640 340 L660 290" stroke-width="10"/>
+    <path d="M662 268 L690 205" stroke="#7a4a1c" stroke-width="16"/>
+    <!-- the hand: seven fingers, confidently -->
+    <g transform="translate(662 288) scale(1.9) translate(-662 -288)">
+    <ellipse cx="662" cy="288" rx="20" ry="16" fill="#fff" stroke-width="7"/>
+    <path d="M646 280 l-22 -14 M648 272 l-16 -24 M656 268 l-4 -30 M666 267 l8 -30 M675 272 l20 -22 M680 282 l26 -8 M678 294 l24 8" stroke-width="7"/>
+    <circle cx="624" cy="266" r="5" fill="#fff" stroke-width="4"/>
+    </g>
+    <circle cx="715" cy="150" r="62" fill="#cfeaff" fill-opacity=".6" stroke-width="12"/>
+    <path d="M690 120 q15 -18 38 -14" stroke="#fff" stroke-width="9"/>
+
+    <!-- legs and giant red shoes -->
+    <!-- a third leg nobody asked for, drawn behind the other two -->
+    <path d="M428 552 L432 598" stroke-width="10"/>
+    <path d="M395 598 C398 578 450 580 468 592 C478 602 472 620 452 620 L402 620 C390 618 390 606 395 598Z" fill="#e0312b" stroke-width="8"/>
+    <path d="M380 548 L360 600 M470 545 L505 598" stroke-width="10"/>
+    <path d="M300 600 C300 575 360 580 385 590 C400 600 395 620 370 622 L305 622 C292 620 292 608 300 600Z" fill="#e0312b" stroke-width="8"/>
+    <path d="M308 612h70" stroke="#fff" stroke-width="6"/>
+    <path d="M480 595 C490 572 550 575 570 590 C585 602 580 622 555 622 L490 622 C476 620 474 606 480 595Z" fill="#e0312b" stroke-width="8"/>
+    <path d="M490 612h70" stroke="#fff" stroke-width="6"/>
+
+    <!-- mismatched eyes, looking two directions -->
+    <ellipse cx="420" cy="265" rx="55" ry="70" fill="#fff" stroke-width="9"/>
+    <ellipse cx="518" cy="282" rx="38" ry="50" fill="#fff" stroke-width="9"/>
+    <circle cx="445" cy="285" r="24" fill="#14142b" stroke="none"/>
+    <circle cx="524" cy="262" r="17" fill="#14142b" stroke="none"/>
+    <circle cx="452" cy="276" r="7" fill="#fff" stroke="none"/>
+    <!-- one eyebrow, determined -->
+    <path d="M370 190 L455 212" stroke-width="10"/>
+    <!-- nose -->
+    <ellipse cx="560" cy="345" rx="17" ry="13" fill="#14142b" stroke="none"/>
+    <!-- lopsided grin with one tooth and a tongue -->
+    <path d="M400 420 Q470 470 540 400" fill="#8a1f2a" stroke-width="9"/>
+    <path d="M462 440 q20 12 40 -4 q-18 -14 -40 4z" fill="#ff7a8a" stroke="none"/>
+    <path d="M440 432 l6 18 l14 -12" fill="#fff" stroke-width="5"/>
+    <!-- sweat drop (going very fast) -->
+    <path d="M610 240 q-18 30 0 38 q18 -8 0 -38z" fill="#9fd4ff" stroke-width="5"/>
+  </g>
+
+  <!-- title -->
+  <g filter="url(#wobble)">
+    <text x="800" y="310" font-family="'Gochi Hand',cursive" font-weight="700"
+          font-size="130" fill="#2f6cf0" stroke="#14142b" stroke-width="4" paint-order="stroke" transform="rotate(-4 800 300)">sanic</text>
+    <text x="820" y="410" font-family="'Gochi Hand',cursive" font-weight="700"
+          font-size="112" fill="#14142b" transform="rotate(3 820 400)">review</text>
+    <text x="800" y="500" font-family="'Gochi Hand',cursive"
+          font-size="46" fill="#4a4a60">gotta reveiw fasst</text>
+  </g>
+</svg>

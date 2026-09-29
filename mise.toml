@@ -43,8 +43,8 @@ run = [
 description = "Report test coverage (informational, not part of check)"
 run = "cargo llvm-cov nextest --workspace --locked"
 
-# Regenerates docs/images/*.png from the demo example and the config editor's
-# screenshot test; see scripts/screenshots.mjs.
+# Regenerates the README's screenshots in docs/images/ from the demo example
+# and the config editor's screenshot test; see scripts/screenshots.mjs.
 [tasks.screenshots]
 description = "Screenshot the demo dashboard and the config editor for the README (needs Chrome)"
 tools = { node = "26.10.0" }
