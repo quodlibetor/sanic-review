@@ -945,6 +945,8 @@ fn shown(f: &Files<'_>, path: &str, lines: &[&str], (from, to): (u32, u32), offs
 struct Loaded {
     run: ReviewRun,
     pr_head: String,
+    /// Your own PR: see [`Existing::own_pr`].
+    own_pr: bool,
     drafts: Vec<DraftRow>,
     threads: Vec<Thread>,
     posted: Posted,
@@ -959,17 +961,18 @@ impl Loaded {
             key,
             threads: &self.threads,
             head: &self.run.head_sha,
-            run: self.run.id,
+            run: Some(self.run.id),
             pr_head: &self.pr_head,
             diff: Some(&self.diff),
             me,
+            own_pr: self.own_pr,
             posted: &self.posted,
         }
     }
 
     fn load(app: &App, key: &PrKey, run_id: i64) -> Result<Self, Error> {
         let missing = || Error::NotFound(format!("{} has no run {run_id}", key.url()));
-        let (run, pr_head, drafts, threads, posted, revise) = {
+        let (run, pr_head, own_pr, drafts, threads, posted, revise) = {
             let store = app.store();
             let load = || -> color_eyre::Result<_> {
                 let Some(pr) = store.pr_page(key)? else {
@@ -981,7 +984,16 @@ impl Loaded {
                 let drafts = store.draft_rows(run.id)?;
                 let revise = pr::Revise::load(&store, key, &run)?;
                 let (threads, posted) = threads::load(&store, key, &app.me)?;
-                Ok(Some((run, pr.head_sha, drafts, threads, posted, revise)))
+                let own_pr = sanic_core::pr::is_login(&pr.author, &app.me);
+                Ok(Some((
+                    run,
+                    pr.head_sha,
+                    own_pr,
+                    drafts,
+                    threads,
+                    posted,
+                    revise,
+                )))
             };
             load().map_err(Error::pr(key))?.ok_or_else(missing)?
         };
@@ -990,6 +1002,7 @@ impl Loaded {
         Ok(Self {
             run,
             pr_head,
+            own_pr,
             drafts,
             threads,
             posted,

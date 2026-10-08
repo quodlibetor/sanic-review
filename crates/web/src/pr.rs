@@ -117,6 +117,14 @@ pub async fn page(
         chat: chat.is_some(),
         revisable,
     };
+    let existing = whole_pr(
+        &app,
+        &pr,
+        shown.as_ref(),
+        (&threads, &posted),
+        diff.as_ref(),
+    );
+    let ask = |thread: &Thread| ask_the_agent(&pr.key, shown.as_ref(), thread);
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
@@ -126,17 +134,10 @@ pub async fn page(
         } @else {
             p.dim { "No review has finished yet, so there are no drafts." }
         }
+        (threads::section(existing, &drafts, ask))
         // After the drafts: it's for once you've read them.
         @if let Some(chat) = &chat { (chat) }
-        p.help-foot {
-            (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
-            (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
-            " reject · " (keycap("u")) " undo · " (keycap("a")) " revise · "
-            (keycap("f")) " files · "
-            (keycap("p")) " preview · "
-            (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c")) " act on the PR · "
-            (keycap("q")) " index"
-        }
+        (keys_foot())
     };
     Ok(page::layout_in(
         &app,
@@ -437,6 +438,63 @@ impl Revise {
     }
 }
 
+/// The keys the PR page answers to, along its foot.
+fn keys_foot() -> Markup {
+    html! {
+        p.help-foot {
+            (keycap("j")) (keycap("k")) " draft · " (keycap("e")) " edit ("
+            (keycap("Esc")) " saves) · " (keycap("y")) " accept · " (keycap("n"))
+            " reject · " (keycap("u")) " undo · " (keycap("a")) " revise · "
+            (keycap("f")) " files · "
+            (keycap("p")) " preview · "
+            (keycap("t")) " threads · "
+            (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c")) " act on the PR · "
+            (keycap("q")) " index"
+        }
+    }
+}
+
+/// The PR's threads as the whole-PR section shows them: they're on it even
+/// when nothing here has reviewed it, so the run and its head are the
+/// shown review's only if there is one.
+fn whole_pr<'a>(
+    app: &'a App,
+    pr: &'a PrPage,
+    shown: Option<&'a ReviewRun>,
+    (threads, posted): (&'a [Thread], &'a Posted),
+    diff: Option<&'a DiffIndex>,
+) -> Existing<'a> {
+    Existing {
+        key: &pr.key,
+        threads,
+        head: shown.map_or(&pr.head_sha, |run| &run.head_sha),
+        run: shown.map(|run| run.id),
+        pr_head: &pr.head_sha,
+        diff,
+        me: &app.me,
+        own_pr: is_login(&pr.author, &app.me),
+        posted,
+    }
+}
+
+/// A thread's link to put the agent on it: revising the shown review with
+/// the thread quoted, or, with no review to revise, reviewing the PR.
+fn ask_the_agent(key: &PrKey, shown: Option<&ReviewRun>, thread: &Thread) -> Markup {
+    let href = match shown.filter(|run| run.status == "succeeded") {
+        Some(run) => {
+            let about = serde_urlencoded::to_string([("about", &thread.id)]).unwrap_or_default();
+            format!("{}/runs/{}/regenerate?{about}", pr_href(key), run.id)
+        }
+        None => format!("{}/review-now", pr_href(key)),
+    };
+    html! {
+        p.thread-act {
+            a.linkbtn data-dialog href=(href) { "Agent…" }
+            span.dim { "drafts an answer you review before it's posted" }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drafts_section(
     app: &App,
@@ -452,10 +510,11 @@ fn drafts_section(
         key: &pr.key,
         threads,
         head: &run.head_sha,
-        run: run.id,
+        run: Some(run.id),
         pr_head: &pr.head_sha,
         diff,
         me: &app.me,
+        own_pr: is_login(&pr.author, &app.me),
         posted,
     };
     let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
@@ -897,7 +956,10 @@ fn in_threads(
                         existing.diff,
                         thread,
                         existing.mine(thread),
-                        chosen.is_some_and(|c| c.id == thread.id),
+                        threads::Marks {
+                            chosen: chosen.is_some_and(|c| c.id == thread.id),
+                            waiting: existing.waiting(thread),
+                        },
                         &actions,
                     ))
                 }
@@ -1102,7 +1164,7 @@ fn decided(
     headers: &HeaderMap,
     change: impl FnOnce(&sanic_store::Store) -> color_eyre::Result<bool>,
 ) -> Result<Response, Error> {
-    let (draft, threads, posted, head, pr_head, revise) = {
+    let (draft, threads, posted, head, pr_head, own_pr, revise) = {
         let store = app.store();
         let Some(draft) = store.draft_row(id)? else {
             return Err(Error::NotFound(format!("there's no draft {id}")));
@@ -1123,12 +1185,13 @@ fn decided(
                 None => Revise::default(),
             };
             let head = run.map(|run| run.head_sha).unwrap_or_default();
-            let pr_head = store
-                .pr_page(&key)?
-                .map(|pr| pr.head_sha)
-                .unwrap_or_default();
+            let page = store.pr_page(&key)?;
+            let own_pr = page
+                .as_ref()
+                .is_some_and(|pr| is_login(&pr.author, &app.me));
+            let pr_head = page.map(|pr| pr.head_sha).unwrap_or_default();
             let (threads, posted) = threads::load(&store, &key, &app.me)?;
-            Ok((draft, threads, posted, head, pr_head, revise))
+            Ok((draft, threads, posted, head, pr_head, own_pr, revise))
         };
         load().map_err(Error::pr(&key))?
     };
@@ -1138,10 +1201,11 @@ fn decided(
             key: &draft.key,
             threads: &threads,
             head: &head,
-            run: draft.run_id,
+            run: Some(draft.run_id),
             pr_head: &pr_head,
             diff: diff.as_ref(),
             me: &app.me,
+            own_pr,
             posted: &posted,
         };
         return Ok(draft_card(app, &draft, diff.as_ref(), existing, &revise).into_response());

@@ -972,8 +972,9 @@ fonttools (run through `uv`, which only this task needs) to
 - **Existing threads.** Over the drafts, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, how
   many are resolved, and how many others the drafts shown were posted
-  as or posted a reply or 👍 in; the threads no draft overlaps are
-  folded under it, and those posted from here are with their drafts. A thread posted
+  as or posted a reply or 👍 in; the threads no draft overlaps link to
+  the Review threads section, and those posted from here are with their
+  drafts. A thread posted
   from here is its draft's posted form: the thread whose first comment
   is the one recorded for the draft, or, for a draft posted before that
   was recorded, the one whose first comment is yours, word for word the
@@ -1001,6 +1002,20 @@ fonttools (run through `uv`, which only this task needs) to
   comment's author and body, as Markdown; the diff shows each
   thread on the reviewed head under the line it ends on, with its first
   comment. The conversation isn't on lines, so it isn't listed.
+- **Review threads.** Under the drafts, every review thread the PR has,
+  whether or not anything here has reviewed it: the ones waiting on your
+  answer first, marked and counted in the heading, then the rest, with
+  the resolved ones folded. The conversation is listed here, shown as
+  "the conversation" since it's on no lines, because the status line
+  counts it; it stays out of the summary bar and the diff, which are
+  about lines. A thread already shown beside a draft is a line each
+  here, so none is shown twice. Waiting on your answer is the same rule
+  the status line's `N unanswered` counts, so the heading and the count
+  agree. Each thread offers "Agent…", which opens
+  the Agent card with an instruction to answer it, quoting its comments,
+  for you to edit; with no review to revise it offers Review now instead.
+  Nothing here posts: the agent drafts, and you submit as always. `t`
+  jumps to the section.
   An overlapping draft offers, in each thread it overlaps, a 👍 on one
   of the thread's comments (the first unless you pick another) instead
   of the draft, or the draft as a reply in that thread; its Accept reads
