@@ -24,7 +24,8 @@ expression: "readable(&f, &preview.body)"
 </span>
 <span class="crumb">/ submit</span>
 <span class="counts" id="counts">
-<b>0</b> queued · <b>0</b> running · <b class="cnt">0</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
+<a class="qlink" href="/queue" title="the run queue">
+<b>0</b> queued · <b>0</b> running</a> · <b class="cnt">0</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
 </header>
 <main>
 <h1>Post this review?</h1>
@@ -149,6 +150,24 @@ expression: "readable(&f, &preview.body)"
 <kbd>X</kbd>
 </th>
 <td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>Q</kbd>
+</th>
+<td>the run queue: what's running and what's next</td>
+</tr>
+<tr>
+<th>
+<kbd>K/J</kbd>
+</th>
+<td>in the queue: move the selected queued run up, down</td>
+</tr>
+<tr>
+<th>
+<kbd>c</kbd>
+</th>
+<td>in the queue: cancel the selected run (asks first)</td>
 </tr>
 <tr>
 <th>

@@ -1,0 +1,220 @@
+---
+source: crates/web/src/tests.rs
+expression: "readable(&f, &page.body)"
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
+<title>Queue · sanic-review</title>
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/syntax.css">
+<script src="/assets/htmx.min.js" defer>
+</script>
+<script src="/assets/app.js" defer>
+</script>
+</head>
+<body data-page="queue" hx-headers="{&quot;x-csrf-token&quot;:&quot;<token>&quot;}">
+<header class="topbar">
+<a class="home" href="/">sanic-review</a>
+<span class="crumb">/ queue</span>
+<span class="counts" id="counts">
+<a class="qlink" href="/queue" title="the run queue">
+<b>1</b> queued · <b>1</b> running</a> · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
+</header>
+<main>
+<div id="queue" hx-get="/queue" hx-trigger="every 5s" hx-select="#queue" hx-select-oob="#counts" hx-swap="outerHTML">
+<h1>Queue</h1>
+<ol class="queue">
+<li class="qrow running" id="run-3" data-row data-key="3" data-href="/pr/org/repo/9" data-cancel="/queue/3/cancel">
+<span class="qpos">▶</span>
+<span class="qwhat">
+<a class="t" href="/pr/org/repo/9">My change</a>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/9" title="https://github.com/org/repo/pull/9">org/repo#9 ↗</a> · me · review requested · <code>head9</code> · default</div>
+</span>
+<span class="qwhen">running · started <time>
+</span>
+<span class="a">
+<form class="qmove" method="post" action="/queue/3/move" data-dir="up" hx-post="/queue/3/move" hx-target="#queue" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="dir" value="up">
+<button class="linkbtn" id="move-up-3" type="submit" disabled title="move up the queue">↑ <span class="k">K</span>
+</button>
+</form>
+<form class="qmove" method="post" action="/queue/3/move" data-dir="down" hx-post="/queue/3/move" hx-target="#queue" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="dir" value="down">
+<button class="linkbtn" id="move-down-3" type="submit" disabled title="move down the queue">↓ <span class="k">J</span>
+</button>
+</form>
+<a class="linkbtn" data-dialog href="/queue/3/cancel">cancel <span class="k">c</span>
+</a>
+</span>
+</li>
+<li class="qrow" id="run-4" data-row data-key="4" data-href="/pr/org/repo/10" data-cancel="/queue/4/cancel" data-movable>
+<span class="qpos">1</span>
+<span class="qwhat">
+<a class="t" href="/pr/org/repo/10">WIP: try things</a>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol · review requested · <code>head10</code> · default</div>
+</span>
+<span class="qwhen">queued <time>
+</span>
+<span class="a">
+<form class="qmove" method="post" action="/queue/4/move" data-dir="up" hx-post="/queue/4/move" hx-target="#queue" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="dir" value="up">
+<button class="linkbtn" id="move-up-4" type="submit" disabled title="move up the queue">↑ <span class="k">K</span>
+</button>
+</form>
+<form class="qmove" method="post" action="/queue/4/move" data-dir="down" hx-post="/queue/4/move" hx-target="#queue" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="<token>">
+<input type="hidden" name="dir" value="down">
+<button class="linkbtn" id="move-down-4" type="submit" disabled title="move down the queue">↓ <span class="k">J</span>
+</button>
+</form>
+<a class="linkbtn" data-dialog href="/queue/4/cancel">cancel <span class="k">c</span>
+</a>
+</span>
+</li>
+</ol>
+<p class="help-foot">
+<span class="k">j</span>
+<span class="k">k</span> move · <span class="k">K</span>
+<span class="k">J</span> move a queued run up, down · <span class="k">c</span> cancel · <span class="k">Enter</span> open the PR · <span class="k">?</span> keys</p>
+</div>
+</main>
+<div class="overlay" id="help" hidden>
+<div class="popup">
+<h2>Keys</h2>
+<table>
+<tr>
+<th>
+<kbd>q</kbd>
+</th>
+<td>close this help; otherwise back to the index</td>
+</tr>
+<tr>
+<th>
+<kbd>Tab, Shift-Tab</kbd>
+</th>
+<td>next, previous list</td>
+</tr>
+<tr>
+<th>
+<kbd>j/k, Down/Up</kbd>
+</th>
+<td>move in the list</td>
+</tr>
+<tr>
+<th>
+<kbd>g/G, Home/End</kbd>
+</th>
+<td>first, last row</td>
+</tr>
+<tr>
+<th>
+<kbd>Enter</kbd>
+</th>
+<td>open the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>r</kbd>
+</th>
+<td>review now: failed, held or skipped (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>x</kbd>
+</th>
+<td>archive or unarchive the selected PR</td>
+</tr>
+<tr>
+<th>
+<kbd>X</kbd>
+</th>
+<td>show or hide archived PRs</td>
+</tr>
+<tr>
+<th>
+<kbd>Q</kbd>
+</th>
+<td>the run queue: what's running and what's next</td>
+</tr>
+<tr>
+<th>
+<kbd>K/J</kbd>
+</th>
+<td>in the queue: move the selected queued run up, down</td>
+</tr>
+<tr>
+<th>
+<kbd>c</kbd>
+</th>
+<td>in the queue: cancel the selected run (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>i</kbd>
+</th>
+<td>skip PRs with titles like the selected one</td>
+</tr>
+<tr>
+<th>
+<kbd>v</kbd>
+</th>
+<td>who reviewed the selected PR, and when; Esc closes</td>
+</tr>
+<tr>
+<th>
+<kbd>d</kbd>
+</th>
+<td>the selected PR's review run and drafts; Esc closes</td>
+</tr>
+<tr>
+<th>
+<kbd>c</kbd>
+</th>
+<td>chat with the agent that reviewed it: shows the command</td>
+</tr>
+<tr>
+<th>
+<kbd>f</kbd>
+</th>
+<td>on a PR page: the drafts, or the files changed with the drafts in them</td>
+</tr>
+<tr>
+<th>
+<kbd>s</kbd>
+</th>
+<td>in the files changed: one column, or old beside new</td>
+</tr>
+<tr>
+<th>
+<kbd>a</kbd>
+</th>
+<td>on a PR page: revise the selected draft with the agent, from a note</td>
+</tr>
+<tr>
+<th>
+<kbd>?, Esc</kbd>
+</th>
+<td>show, close this help</td>
+</tr>
+</table>
+<p class="dim">On a PR page j/k move between drafts, and r and a act on the PR. On a confirm page y confirms and Esc or q cancels.</p>
+</div>
+</div>
+<div class="overlay" id="dialog" hidden>
+<div class="popup dialog" role="dialog" aria-modal="true">
+</div>
+</div>
+<div id="notice" hidden>
+</div>
+</body>
+</html>

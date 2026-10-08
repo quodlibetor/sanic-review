@@ -103,6 +103,7 @@ impl LeadPop<'_> {
                         "succeeded, finished" (time(times.and_then(|t| t.finished_at.as_ref())))
                     }
                     Some("superseded") => "superseded: replaced before it finished",
+                    Some("cancelled") => "cancelled: you stopped it",
                     Some(status) => {
                         (status) (time(times.and_then(|t| t.finished_at.as_ref())))
                     }

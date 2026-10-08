@@ -47,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0022_draft_posted_comment.sql"),
     include_str!("migrations/0023_run_resume.sql"),
     include_str!("migrations/0024_draft_obsolete.sql"),
+    include_str!("migrations/0025_run_queue.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -62,7 +63,10 @@ pub use overview::{
     Activity, ActivityKind, Decided, LatestRun, MyPr, OwedReview, RowFacts, RunTimes,
 };
 pub use posted::{Posted, draft_span};
-pub use runs::{Draft, Refusal, Regeneration, RunCounts, RunRecord, SessionRun};
+pub use runs::{
+    Cancelled, Direction, Draft, Moved, QueueEntry, Refusal, Regeneration, RunCounts, RunRecord,
+    SessionRun,
+};
 
 /// A connection to the database. The poller and the runner each open their
 /// own, so file databases use WAL and a busy timeout.
@@ -359,7 +363,7 @@ impl Store {
         if archived {
             tx.execute(
                 &format!(
-                    "UPDATE runs SET status = 'superseded', finished_at = {NOW}
+                    "UPDATE runs SET status = 'superseded', finished_at = {NOW}, queue_pos = NULL
                      WHERE repo = ?1 AND number = ?2 AND status = 'queued'"
                 ),
                 params![repo, key.number],

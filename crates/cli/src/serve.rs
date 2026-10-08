@@ -32,13 +32,13 @@ use sanic_core::{
 };
 use sanic_github::{ApiError, Client, Token};
 use sanic_runner::{mirror::Mirrors, review::RunSettings, vcs::VcsResolver};
-use sanic_store::{Refusal, Regeneration, Store};
+use sanic_store::{Cancelled, Direction, Moved, Refusal, Regeneration, Store};
 use sanic_web::Dashboard;
 use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep_until},
 };
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::{
     ServeArgs, Stdout, Ui, config_edit, logging,
@@ -260,7 +260,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
             live.manual_reviews.subscribe(), me_for_scheduler,
         ) => result,
-        () = handle_requests(requests_rx, run_store, Starter {
+        () = handle_requests(requests_rx, run_store, Arc::clone(&worker), Starter {
             manual: live.manual_reviews.subscribe(),
             start: started,
         }) => Ok(()),
@@ -484,6 +484,32 @@ impl sanic_web::Control for DashboardControl {
             instruction,
         )
     }
+
+    fn cancel_run(&self, run: i64) -> Result<Cancelled> {
+        cancel_run(&self.store, &self.worker, run)
+    }
+}
+
+/// Cancels run `run`, stopping its agent if it's running.
+fn cancel_run(store: &Mutex<Store>, worker: &Worker, run: i64) -> Result<Cancelled> {
+    // Recorded first, so a run that finishes in between reads as finished
+    // rather than being lost.
+    let outcome = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .cancel_run(run)?;
+    match &outcome {
+        Cancelled::Queued { key } => info!(url = %key.url(), run, "a queued run was cancelled"),
+        Cancelled::Running { key } => {
+            info!(url = %key.url(), run, "cancelling a running review");
+            if !worker.cancel(run) {
+                warn!(url = %key.url(), run, "it was already finishing");
+            }
+        }
+        Cancelled::Finished { status } => debug!(run, "not cancelled: it's {status}"),
+        Cancelled::NoSuchRun => debug!(run, "not cancelled: no such run"),
+    }
+    Ok(outcome)
 }
 
 /// Queues a regeneration of run `source`, or of just `draft` of it, and
@@ -558,17 +584,20 @@ impl ProgressLog {
     }
 }
 
-/// Sends the runs a previous process left queued or running to `runs`,
-/// which holds those `manual` holds.
+/// Puts the runs a previous process left running back in the queue and
+/// sends them to `runs`, which holds those `manual` holds. The worker
+/// takes them from the store in the queue's order; the send is what tells
+/// it they're there, and what logs each held one.
 fn resume_queued(
     store: &Mutex<Store>,
     manual: &ManualReviews,
     runs: &mpsc::UnboundedSender<QueuedRun>,
 ) -> Result<()> {
-    let recovered = store
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .recover_runs()?;
+    let recovered = {
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.recover_runs()?;
+        store.queued_reviews()?
+    };
     let held = recovered
         .iter()
         .filter(|run| manual.holds(&run.request.profile))
@@ -602,6 +631,7 @@ struct Starter {
 async fn handle_requests(
     mut requests: mpsc::UnboundedReceiver<Request>,
     store: Arc<Mutex<Store>>,
+    worker: Arc<Worker>,
     starter: Starter,
 ) {
     // Open while the TUI or the dashboard can still send; `review`
@@ -613,6 +643,12 @@ async fn handle_requests(
             request = requests.recv(), if open => match request {
                 Some(Request::Rerun(key)) => review_now(&key, &store, &starter),
                 Some(Request::Archive { key, archived }) => archive(&key, archived, &store),
+                Some(Request::MoveRun { run, up }) => move_run(run, up, &store),
+                Some(Request::Cancel(run)) => {
+                    if let Err(err) = cancel_run(&store, &worker, run) {
+                        warn!(run, "cancelling failed: {err:?}");
+                    }
+                }
                 Some(Request::SaveLayout(sizes)) => save_layout(sizes, &store),
                 None => open = false,
             },
@@ -645,6 +681,24 @@ fn archive(key: &PrKey, archived: bool, store: &Mutex<Store>) {
         Ok(true) => info!(url = %url, "unarchived"),
         Ok(false) => warn!(url = %url, "not archived: the PR isn't tracked"),
         Err(err) => warn!(url = %url, "archiving failed: {err:?}"),
+    }
+}
+
+/// Moves a queued run one place, as the dashboard's buttons do.
+fn move_run(run: i64, up: bool, store: &Mutex<Store>) {
+    let dir = if up { Direction::Up } else { Direction::Down };
+    let moved = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .move_run(run, dir);
+    match moved {
+        Ok(Moved::Moved { key, from, to }) => {
+            info!(url = %key.url(), run, from, to, "a queued run was moved");
+        }
+        Ok(Moved::AlreadyThere { .. }) => {}
+        Ok(Moved::NotQueued { status }) => debug!(run, "not moved: it's {status}"),
+        Ok(Moved::NoSuchRun) => debug!(run, "not moved: no such run"),
+        Err(err) => warn!(run, "moving the run failed: {err:?}"),
     }
 }
 
@@ -1082,6 +1136,16 @@ mod tests {
 
     use super::*;
 
+    /// Enough config for a [`Worker`] that never runs anything here.
+    fn test_config() -> Config {
+        Config::parse(
+            "[profile.default]\nrepos = [{ github = \"org\" }]\n",
+            Path::new("/"),
+            &VcsResolver,
+        )
+        .unwrap()
+    }
+
     fn store_with_pr(key: &PrKey) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store.record(&pr_snapshot(key), "me", "p", &[]).unwrap();
@@ -1130,11 +1194,19 @@ mod tests {
             requests.send(request).unwrap();
         }
         let (start, mut started) = mpsc::unbounded_channel();
+        let data = tempfile::TempDir::new().unwrap();
+        let worker = Arc::new(Worker::new(
+            data.path(),
+            Arc::clone(store),
+            &test_config(),
+            "me",
+        ));
         let handled = tokio::time::timeout(
             Duration::from_secs(1),
             handle_requests(
                 requests_rx,
                 Arc::clone(store),
+                worker,
                 Starter {
                     manual: watch::channel(manual).1,
                     start,

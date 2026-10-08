@@ -1,5 +1,6 @@
 ---
 source: crates/cli/src/tui.rs
+assertion_line: 2033
 expression: "draw(&mut app, 80, 24).backend()"
 ---
 "┌ Reviews you owe (5) ─────────────────────────────────────────────────────────┐"
@@ -20,9 +21,9 @@ expression: "draw(&mut app, 80, 24).backend()"
 "│16:33:02│ e               edit the config                            │        │"
 "│16:33:01│ c               chat with the agent that reviewed it       │        │"
 "└────────│ o               open it in the dashboard, or the index     │────────┘"
-"┌ Log ───│ ?, Esc          close this help                            │────────┐"
-"│16:33:00│                                                            │        │"
-"│16:35:10│ Drafts are edited and submitted in the dashboard.          │ry      │"
-"│        └────────────────────────────────────────────────────────────┘        │"
-"└──────────────────────────────────────────────────────────────────────────────┘"
+"┌ Log ───│ Q               the run queue: K/J reorder, c cancels      │────────┐"
+"│16:33:00│ ?, Esc          close this help                            │        │"
+"│16:35:10│                                                            │ry      │"
+"│        │ Drafts are edited and submitted in the dashboard.          │        │"
+"└────────└────────────────────────────────────────────────────────────┘────────┘"
 " ? help · q quit       manual reviews · 1 queued · 0 running · 3 pending drafts "

@@ -1,6 +1,6 @@
 ---
 source: crates/web/src/tests.rs
-expression: "readable(&f, &page.body)"
+expression: "readable(&f, &waiting.body)"
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -8,7 +8,7 @@ expression: "readable(&f, &page.body)"
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content="{&quot;includeIndicatorStyles&quot;:false,&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false}">
-<title>Ignore by title · sanic-review</title>
+<title>Cancel run · sanic-review</title>
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/style.css">
 <link rel="stylesheet" href="/assets/syntax.css">
@@ -22,51 +22,30 @@ expression: "readable(&f, &page.body)"
 <a class="home" href="/">sanic-review</a>
 <span class="counts" id="counts">
 <a class="qlink" href="/queue" title="the run queue">
-<b>0</b> queued · <b>0</b> running</a> · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
+<b>1</b> queued · <b>1</b> running</a> · <b class="cnt">3</b> pending drafts <span class="muted-sep">|</span> <a href="/settings">settings</a> · <span class="k">?</span> keys</span>
 </header>
 <main>
-<h1>Ignore by title</h1>
-<p class="meta">
-<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a> by bob</p>
-<h2>Title</h2>
-<pre class="title">Fix &lt;script&gt; escaping</pre>
-<details class="description" open>
-<summary>Description</summary>
-<div class="md">
-<p>Fix &lt;script&gt; escaping, in detail.</p>
+<div class="cf">
+<p class="kind">Cancel run</p>
+<h1>Take this review out of the queue?</h1>
+<div class="who">
+<div class="t">WIP: try things</div>
+<div class="m">
+<a class="ref" href="https://github.com/org/repo/pull/10" title="https://github.com/org/repo/pull/10">org/repo#10 ↗</a> · carol · <code>head10</code>
 </div>
-</details>
-<form id="confirm" method="post" action="/pr/org/repo/8/ignore" data-resend>
+<p class="extra">It never started, so nothing has been spent.</p>
+</div>
+<p class="cost">Nothing is posted to GitHub. <span class="k">r</span> reviews it again later.</p>
+<div class="btns">
+<form id="confirm" method="post" action="/queue/4/cancel">
 <input type="hidden" name="csrf" value="<token>">
-<p>
-<label for="pattern">Pattern </label>
-<span class="dim">A glob over whole titles, ignoring case; only glob syntax is special. Edit it down, e.g. to <code>build(deps)*</code>.</span>
-</p>
-<input id="pattern" type="text" name="pattern" value="Fix &lt;script&gt; escaping" size="60" autocomplete="off" spellcheck="false" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="input changed delay:150ms" hx-include="[name='profile']:checked" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML">
-<div id="matches">
-<h2>Would skip (1)</h2>
-<ul>
-<li>
-<a class="gh" href="https://github.com/org/repo/pull/8">https://github.com/org/repo/pull/8</a> Fix &lt;script&gt; escaping</li>
-</ul>
-</div>
-<fieldset>
-<legend>Add it to skip_titles in</legend>
-<label>
-<input type="radio" name="profile" value="" checked hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[review_requests]</code>: every profile</label>
-<br>
-<label>
-<input type="radio" name="profile" value="default" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[profile.default]</code>
-</label>
-<br>
-<label>
-<input type="radio" name="profile" value="ring" hx-get="/pr/org/repo/8/ignore/preview" hx-trigger="change" hx-include="#pattern" hx-sync="#confirm:replace" hx-target="#matches" hx-swap="outerHTML"> <code>[profile.ring]</code>
-</label>
-</fieldset>
-<button type="submit">
-<kbd>y</kbd> Save to the config</button> <a id="cancel" href="/pr/org/repo/8">
-<kbd>Esc</kbd> Cancel</a>
+<button class="btn go" type="submit">Take it out of the queue <span class="k">y</span>
+</button>
 </form>
+<a class="btn" id="cancel" href="/queue">Keep it<span class="k">Esc</span>
+</a>
+</div>
+</div>
 </main>
 <div class="overlay" id="help" hidden>
 <div class="popup">

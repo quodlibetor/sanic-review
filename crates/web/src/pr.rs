@@ -1220,6 +1220,12 @@ pub async fn confirm_review_now(
             Some(html! { (COST) }),
             go("Rerun the review"),
         ),
+        Some(Why::Cancelled) => (
+            html! { "Review this again? You cancelled its last run." },
+            html! {},
+            Some(html! { (COST) }),
+            go("Review it again"),
+        ),
         Some(Why::Held) => (
             html! { "Start the held review now?" },
             html! {},
