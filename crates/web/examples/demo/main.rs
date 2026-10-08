@@ -20,7 +20,7 @@ use sanic_core::{
 };
 use sanic_github::{Client, Token};
 use sanic_runner::review::{AgentProfile, RunSettings};
-use sanic_store::{Refusal, Store};
+use sanic_store::{Cancelled, Refusal, Store};
 use sanic_web::{Bound, Context, Control, Dashboard, Sources};
 use tempfile::TempDir;
 use tokio::{
@@ -132,6 +132,10 @@ impl Control for DemoServe {
 
     fn regenerate(&self, _: i64, _: Option<i64>, _: &str) -> Result<Result<i64, Refusal>> {
         Ok(Err(Refusal::NoSession))
+    }
+
+    fn cancel_run(&self, _: i64) -> Result<Cancelled> {
+        Ok(Cancelled::NoSuchRun)
     }
 
     fn set_window(&self, choice: Option<WindowChoice>) -> Result<()> {

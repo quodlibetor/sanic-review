@@ -21,13 +21,18 @@
 
   function lists() {
     if (page === "index") return Array.from(document.querySelectorAll(".list"));
+    if (page === "queue") {
+      const queue = document.querySelector("#queue ol.queue");
+      return queue ? [queue] : [];
+    }
     const drafts = document.getElementById("drafts");
     return drafts ? [drafts] : [];
   }
 
   // The rows you can move to: a folded group's are skipped.
   function rows(list) {
-    const all = list.querySelectorAll(page === "index" ? "[data-row]" : ".draft");
+    const rowsOf = page === "index" || page === "queue" ? "[data-row]" : ".draft";
+    const all = list.querySelectorAll(rowsOf);
     return Array.from(all).filter(function (row) {
       return row.offsetParent !== null;
     });
@@ -310,7 +315,7 @@
       case "Enter": {
         const row = currentRow();
         if (!row || e.target !== document.body) return;
-        if (page === "index") go(row.dataset.href);
+        if (page === "index" || page === "queue") go(row.dataset.href);
         else editDraft(row);
         break;
       }
@@ -362,6 +367,33 @@
         else say("x archives the selected PR");
         break;
       }
+      case "Q":
+        go("/queue");
+        break;
+      case "K":
+      case "J": {
+        // Move the selected queued run itself, rather than the cursor.
+        const row = page === "queue" && currentRow();
+        if (!row) return;
+        const dir = e.key === "K" ? "up" : "down";
+        const form = row.querySelector('form.qmove[data-dir="' + dir + '"]');
+        const button = form && form.querySelector("button");
+        if (!button || button.disabled) {
+          // Disabled at the ends too, so say which it is.
+          if (!row.hasAttribute("data-movable")) {
+            say(
+              row.classList.contains("running")
+                ? "a running review can't be moved"
+                : "a regeneration isn't in the queue"
+            );
+          } else {
+            say(dir === "up" ? "already first in the queue" : "already last in the queue");
+          }
+          return;
+        }
+        form.requestSubmit();
+        break;
+      }
       case "X": {
         const panes = document.getElementById("panes");
         if (!panes) return;
@@ -377,6 +409,12 @@
         break;
       }
       case "c": {
+        if (page === "queue") {
+          const row = currentRow();
+          if (!row) return;
+          openDialog(row.dataset.cancel);
+          break;
+        }
         const target = subject();
         const href = target && target.dataset.chat;
         // On a PR page it names the card there, "#chat".
@@ -751,14 +789,23 @@
   // Each list's rows as they were before the index's lists swap, so a
   // selected PR the swap takes away passes to the nearest one left.
   let before = null;
-  // The filter's box that had focus, by its id. htmx puts focus back
-  // before the groups unfold again, so a box inside a folded "more" can't
-  // take it then.
+  // The filter box or queue button that had focus, by its id: htmx puts
+  // focus back before the groups unfold, and K or J needs the same button
+  // under the cursor to walk a run without chasing it.
   let refocus = null;
   document.body.addEventListener("htmx:beforeSwap", function (e) {
     const active = document.activeElement;
     reopen = popover(active) ? active.getAttribute("aria-describedby") : null;
-    refocus = active && active.id && active.closest("#filter") ? active.id : null;
+    const queue = document.getElementById("queue");
+    const keep =
+      active && active.id && (active.closest("#filter") || queue?.contains(active));
+    refocus = keep ? active.id : null;
+    // Leave a reorder alone: the poll would swap the list out from under
+    // the buttons. The next tick is seconds away and brings fresher HTML.
+    const poll = queue && e.detail.target === queue && e.detail.elt === queue;
+    if (poll && (refocus || queue.querySelector(".a:hover"))) {
+      e.detail.shouldSwap = false;
+    }
     if (page === "index" && e.detail.target && e.detail.target.id === "panes") {
       before = lists().map(function (list) {
         return rows(list).map(idOf);
@@ -794,6 +841,9 @@
     const pop = reopen && document.getElementById(reopen);
     if (pop && pop.parentElement) pop.parentElement.focus({ preventScroll: true });
     reopen = null;
+    const again = refocus && document.getElementById(refocus);
+    if (again && !again.disabled) again.focus({ preventScroll: true });
+    refocus = null;
     // One shown by hover came back unpinned, so the row would clip it.
     document.querySelectorAll(".rb:hover, .pp:hover").forEach(place);
   });

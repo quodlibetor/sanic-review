@@ -22,6 +22,7 @@ mod links;
 mod markdown;
 mod page;
 mod pr;
+mod queue;
 mod regenerate;
 mod settings;
 mod submit;
@@ -55,7 +56,7 @@ use sanic_core::{
 };
 use sanic_github::Client;
 use sanic_runner::{mirror::Mirrors, review::RunSettings};
-use sanic_store::{Refusal, Store};
+use sanic_store::{Cancelled, Refusal, Store};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -102,6 +103,13 @@ pub trait Control: Send + Sync {
         draft: Option<i64>,
         instruction: &str,
     ) -> Result<Result<i64, Refusal>>;
+
+    /// Cancels run `run`: a queued one never starts, and a running one's
+    /// agent is killed, its worktree removed and its drafts dropped. The
+    /// run ends `cancelled`, and nothing is posted to GitHub. Cancelling is
+    /// one-shot: a later trigger can review the same head again. Returns
+    /// once the store says so, so the page you land on agrees.
+    fn cancel_run(&self, run: i64) -> Result<Cancelled>;
 
     /// Picks the recency window for the lists and the poller in place of
     /// `poll.updated_within_days`, or with `None` goes back to it. It's
@@ -286,6 +294,12 @@ impl Dashboard {
                 "/pr/{owner}/{name}/{number}/runs/{run}/regenerate",
                 get(regenerate::confirm).post(regenerate::regenerate),
             )
+            .route("/queue", get(queue::page))
+            .route("/queue/{run}/move", post(queue::move_run))
+            .route(
+                "/queue/{run}/cancel",
+                get(queue::confirm_cancel).post(queue::cancel),
+            )
             .route("/window", post(index::set_window))
             .route("/settings", get(settings::page))
             .route(
@@ -400,6 +414,11 @@ enum Error {
 }
 
 impl Error {
+    /// Wraps a failure with no one PR behind it.
+    fn internal(report: eyre::Report) -> Self {
+        Self::Internal { url: None, report }
+    }
+
     /// Wraps a failure while handling `key`.
     fn pr(key: &PrKey) -> impl FnOnce(eyre::Report) -> Self {
         let url = key.url();

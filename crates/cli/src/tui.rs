@@ -43,7 +43,7 @@ use sanic_core::{
     start::Why,
     state::{PrState, Urgency},
 };
-use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, RunCounts, Store};
+use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, QueueEntry, RunCounts, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
@@ -60,6 +60,7 @@ use crate::{chat, config_edit, logging::LogLines, poll::Progress, schedule::DueT
 mod config;
 mod ignore;
 mod layout;
+mod queue;
 
 /// How often the store is reread.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -241,6 +242,7 @@ pub struct Shared {
 pub enum Page {
     Index,
     Pr(PrKey),
+    Queue,
 }
 
 impl Page {
@@ -249,6 +251,7 @@ impl Page {
         match self {
             Self::Index => index.to_owned(),
             Self::Pr(key) => format!("{}{}", index.trim_end_matches('/'), sanic_web::pr_href(key)),
+            Self::Queue => format!("{}/queue", index.trim_end_matches('/')),
         }
     }
 }
@@ -325,7 +328,9 @@ fn open_failed(page: &Page, url: &str, err: &color_eyre::eyre::Report) -> String
         Page::Pr(key) => {
             warn!(url = %key.url(), dashboard = url, "opening the dashboard failed: {err:?}");
         }
-        Page::Index => warn!(dashboard = url, "opening the dashboard failed: {err:?}"),
+        Page::Index | Page::Queue => {
+            warn!(dashboard = url, "opening the dashboard failed: {err:?}");
+        }
     }
     format!("couldn't open {url}: {err}")
 }
@@ -631,6 +636,8 @@ pub struct Overview {
     pub manual_reviews: ManualReviews,
     /// The keys the ignore editor's pattern takes.
     pub keys: Keys,
+    /// Queued and running runs, in the order they'll run.
+    pub queue: Vec<QueueEntry>,
 }
 
 impl Overview {
@@ -674,6 +681,7 @@ impl Overview {
             counts: store.run_counts()?,
             refreshing: *shared.progress.borrow(),
             running: store.running_reviews()?,
+            queue: store.run_queue()?,
             waiting,
         })
     }
@@ -789,6 +797,8 @@ enum Overlay {
     Ignore(Box<IgnoreEditor>),
     /// The config editor, over the whole screen.
     Config(Box<ConfigEditor>),
+    /// The run queue, which reorders and cancels through `serve`.
+    Queue(Box<queue::QueueView>),
     /// Waiting for a yes before asking for a review of this PR now.
     ConfirmRerun {
         key: PrKey,
@@ -846,6 +856,13 @@ pub enum Request {
         key: PrKey,
         archived: bool,
     },
+    /// Move a queued run one place earlier (`up`) or later.
+    MoveRun {
+        run: i64,
+        up: bool,
+    },
+    /// Cancel a queued or running run; a running one's agent is killed.
+    Cancel(i64),
     /// The panes' layout changed; keep it for the next start.
     SaveLayout(Sizes),
 }
@@ -877,6 +894,9 @@ impl App {
 
     pub fn set_overview(&mut self, overview: Overview) {
         self.loaded = overview;
+        if let Some(Overlay::Queue(view)) = &mut self.overlay {
+            view.update(self.loaded.queue.clone());
+        }
         self.refilter();
     }
 
@@ -958,6 +978,10 @@ impl App {
             let outcome = editor.handle_key(key);
             return self.config_editor_did(outcome);
         }
+        if let Some(Overlay::Queue(view)) = &mut self.overlay {
+            let outcome = view.handle_key(key);
+            return self.queue_did(outcome);
+        }
         if let Some(Overlay::ConfirmQuit(_)) = &self.overlay {
             self.overlay = self.behind_quit.take();
             return match key.code {
@@ -1004,6 +1028,7 @@ impl App {
             KeyCode::Char('e') => return Flow::EditConfig,
             KeyCode::Char('c') => return self.open_chat(),
             KeyCode::Char('o') => return Flow::Open(self.selected_page()),
+            KeyCode::Char('Q') => self.open_queue(),
             KeyCode::Char(c) if let Some(pane) = Pane::with_key(c) => return self.jump(pane),
             KeyCode::Char('z') => return self.resize(Sizes::cycle),
             KeyCode::Char('Z') => return self.resize(|sizes, _| *sizes = Sizes::default()),
@@ -1175,6 +1200,32 @@ impl App {
     }
 
     /// Opens the ignore editor on the selected review you owe.
+    /// Carries out what the queue overlay asked for.
+    fn queue_did(&mut self, outcome: queue::Outcome) -> Flow {
+        match outcome {
+            queue::Outcome::Open => Flow::Continue,
+            queue::Outcome::Quit => {
+                self.overlay = None;
+                self.quit()
+            }
+            queue::Outcome::Close => {
+                self.overlay = None;
+                Flow::Continue
+            }
+            queue::Outcome::Move { run, up } => Flow::Request(Request::MoveRun { run, up }),
+            queue::Outcome::Cancel(run) => Flow::Request(Request::Cancel(run)),
+            queue::Outcome::Dashboard => Flow::Open(Page::Queue),
+        }
+    }
+
+    /// Opens the queue. Not in `acts_on_rows`: it isn't about the focused
+    /// pane's rows, so it opens with every pane collapsed.
+    fn open_queue(&mut self) {
+        self.overlay = Some(Overlay::Queue(Box::new(queue::QueueView::new(
+            self.loaded.queue.clone(),
+        ))));
+    }
+
     fn open_ignore(&mut self) {
         let selected = self.lists[Pane::Owed.index()]
             .selected()
@@ -1373,6 +1424,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Some(Overlay::Help) => render_help(frame),
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
         Some(Overlay::Config(editor)) => editor.render(frame),
+        Some(Overlay::Queue(view)) => view.render(frame),
         Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, why),
         Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
         Some(Overlay::ConfirmAutomatic(held)) => render_confirm_automatic(frame, *held),
@@ -1686,6 +1738,7 @@ const HELP: &[(&str, &str)] = &[
     ("e", "edit the config"),
     ("c", "chat with the agent that reviewed it"),
     ("o", "open it in the dashboard, or the index"),
+    ("Q", "the run queue: K/J reorder, c cancels"),
     ("?, Esc", "close this help"),
 ];
 
@@ -1717,6 +1770,10 @@ fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: &Why) {
         Why::Failed => (
             " Rerun the review of".into(),
             " at its current head? This spends tokens.",
+        ),
+        Why::Cancelled => (
+            " You cancelled the last review of".into(),
+            " — review it again? This spends tokens.",
         ),
         Why::Held => (
             " Start the held review of".into(),
@@ -1928,6 +1985,7 @@ mod tests {
             profiles: vec!["default".into(), "ring".into()],
             manual_reviews: ManualReviews::default(),
             keys: Keys::Emacs,
+            queue: vec![],
             skipped: HashMap::from([(
                 pr("org/api", 490),
                 Skip::Title {
@@ -3153,5 +3211,156 @@ mod tests {
         let mut release = key(KeyCode::Char('q'));
         release.kind = KeyEventKind::Release;
         assert_eq!(app.handle_key(release), Flow::Continue);
+    }
+
+    fn entry(run_id: i64, number: u32, running: bool) -> QueueEntry {
+        QueueEntry {
+            run_id,
+            key: pr("org/api", number),
+            title: "t".into(),
+            author: "alice".into(),
+            kind: sanic_core::run::RunKind::Review,
+            trigger: "review_requested".into(),
+            profile: "default".into(),
+            head_sha: "h1".into(),
+            status: if running { "running" } else { "queued" }.into(),
+            queued_at: "2026-01-01T00:00:00Z".into(),
+            started_at: running.then(|| "2026-01-01T00:01:00Z".into()),
+            source_run: None,
+            instruction: None,
+            error: None,
+            archived: false,
+        }
+    }
+
+    /// An app whose queue has one running run and two queued behind it.
+    fn app_with_queue() -> App {
+        let mut app = app(false);
+        let mut overview = overview();
+        overview.queue = vec![
+            entry(1, 470, true),
+            entry(2, 481, false),
+            entry(3, 482, false),
+        ];
+        app.set_overview(overview);
+        app
+    }
+
+    fn queued_ids(app: &App) -> Vec<i64> {
+        match &app.overlay {
+            Some(Overlay::Queue(view)) => view.ids(),
+            _ => panic!("the queue isn't open"),
+        }
+    }
+
+    #[test]
+    fn capital_q_opens_the_queue() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        assert_eq!(queued_ids(&app), [1, 2, 3]);
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+    }
+
+    #[test]
+    fn shift_j_moves_a_queued_run_down_and_asks_serve() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        // Past the running run, onto the first queued one.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('J'))),
+            Flow::Request(Request::MoveRun { run: 2, up: false })
+        );
+        // Shown at once, before the store has caught up.
+        assert_eq!(queued_ids(&app), [1, 3, 2]);
+    }
+
+    #[test]
+    fn a_running_run_cant_be_moved() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('J'));
+        assert_eq!(queued_ids(&app), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_reload_doesnt_undo_a_move_still_in_flight() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('j'));
+        let _ = app.handle_key(key(KeyCode::Char('J')));
+        assert_eq!(queued_ids(&app), [1, 3, 2]);
+
+        // The store hasn't caught up yet: keep showing the move.
+        let mut stale = overview();
+        stale.queue = vec![
+            entry(1, 470, true),
+            entry(2, 481, false),
+            entry(3, 482, false),
+        ];
+        app.set_overview(stale);
+        assert_eq!(queued_ids(&app), [1, 3, 2]);
+
+        // Now it agrees, and the overlay follows the store again.
+        let mut fresh = overview();
+        fresh.queue = vec![
+            entry(1, 470, true),
+            entry(3, 482, false),
+            entry(2, 481, false),
+        ];
+        app.set_overview(fresh);
+        assert_eq!(queued_ids(&app), [1, 3, 2]);
+    }
+
+    #[test]
+    fn a_reload_drops_a_run_that_started_even_mid_move() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('j'));
+        let _ = app.handle_key(key(KeyCode::Char('J')));
+
+        let mut gone = overview();
+        gone.queue = vec![entry(1, 470, true), entry(2, 481, false)];
+        app.set_overview(gone);
+        assert_eq!(queued_ids(&app), [1, 2]);
+    }
+
+    #[test]
+    fn c_asks_before_cancelling_and_y_sends_it() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('c'));
+        insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Flow::Request(Request::Cancel(1))
+        );
+    }
+
+    #[test]
+    fn any_other_key_keeps_the_run_and_stays_open() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(queued_ids(&app), [1, 2, 3]);
+    }
+
+    #[test]
+    fn esc_closes_the_queue_and_o_opens_the_dashboards() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.overlay.is_none());
+
+        press(&mut app, KeyCode::Char('Q'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('o'))),
+            Flow::Open(Page::Queue)
+        );
+        assert_eq!(
+            Page::Queue.url("http://127.0.0.1:7117/"),
+            "http://127.0.0.1:7117/queue"
+        );
     }
 }

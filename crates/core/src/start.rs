@@ -8,6 +8,9 @@ use crate::skip::Skip;
 pub enum Why {
     /// The latest run failed or crashed.
     Failed,
+    /// You cancelled its latest run, so nothing will start it again until
+    /// the PR moves on.
+    Cancelled,
     /// Manual reviews (`runner.manual_reviews`, or its profile's own) are
     /// holding its queued review.
     Held,
@@ -27,6 +30,7 @@ impl Why {
         match (skip, latest_run) {
             (Some(skip), _) => Some(Self::Skipped(skip.clone())),
             (None, Some("failed" | "crashed")) => Some(Self::Failed),
+            (None, Some("cancelled")) => Some(Self::Cancelled),
             (None, Some("queued")) if manual_reviews => Some(Self::Held),
             _ => None,
         }
@@ -50,6 +54,10 @@ mod tests {
         assert_eq!(Why::of(None, Some("queued"), true), Some(Why::Held));
         // Without manual reviews a queued review runs by itself.
         assert_eq!(Why::of(None, Some("queued"), false), None);
+        assert_eq!(
+            Why::of(None, Some("cancelled"), false),
+            Some(Why::Cancelled)
+        );
         for status in [None, Some("running"), Some("succeeded"), Some("superseded")] {
             assert_eq!(Why::of(None, status, true), None, "{status:?}");
         }

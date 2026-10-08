@@ -25,6 +25,7 @@ pub enum Kind {
         pending: Option<u32>,
     },
     Pr,
+    Queue,
     Confirm,
     Other,
 }
@@ -34,6 +35,7 @@ impl Kind {
         match self {
             Self::Index { .. } => "index",
             Self::Pr => "pr",
+            Self::Queue => "queue",
             Self::Confirm => "confirm",
             Self::Other => "other",
         }
@@ -51,6 +53,9 @@ const KEYS: &[(&str, &str)] = &[
     ("r", "review now: failed, held or skipped (asks first)"),
     ("x", "archive or unarchive the selected PR"),
     ("X", "show or hide archived PRs"),
+    ("Q", "the run queue: what's running and what's next"),
+    ("K/J", "in the queue: move the selected queued run up, down"),
+    ("c", "in the queue: cancel the selected run (asks first)"),
     ("i", "skip PRs with titles like the selected one"),
     ("v", "who reviewed the selected PR, and when; Esc closes"),
     ("d", "the selected PR's review run and drafts; Esc closes"),
@@ -152,7 +157,10 @@ pub fn counts(app: &App, with_archived: bool, filtered: Option<u32>) -> Markup {
                 a.held href="/settings" { (badge) } " · "
             }
             @if let Some((c, pending)) = counts {
-                b { (c.queued) } " queued · " b { (c.running) } " running · "
+                a.qlink href="/queue" title="the run queue" {
+                    b { (c.queued) } " queued · " b { (c.running) } " running"
+                }
+                " · "
                 @if let Some(shown) = filtered {
                     b.cnt { (shown) } " of " b { (pending) } " pending drafts"
                 } @else {

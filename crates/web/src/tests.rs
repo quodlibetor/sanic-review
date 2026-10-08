@@ -59,6 +59,10 @@ struct FakeServe {
     manual: Mutex<Option<watch::Sender<ManualReviews>>>,
     /// Why the config file doesn't load, if it doesn't.
     unloadable: Mutex<Option<String>>,
+    /// The runs asked to be cancelled, in order.
+    cancelled: Mutex<Vec<i64>>,
+    /// What `cancel_run` answers; a queued run's cancel by default.
+    cancel_result: Mutex<Option<sanic_store::Cancelled>>,
 }
 
 impl Control for FakeServe {
@@ -105,6 +109,16 @@ impl Control for FakeServe {
             .lock()
             .unwrap()
             .ok_or(sanic_store::Refusal::NoSession))
+    }
+
+    fn cancel_run(&self, run: i64) -> color_eyre::Result<sanic_store::Cancelled> {
+        self.cancelled.lock().unwrap().push(run);
+        Ok(self
+            .cancel_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(sanic_store::Cancelled::Queued { key: key(9) }))
     }
 
     fn set_window(&self, choice: Option<WindowChoice>) -> color_eyre::Result<()> {
@@ -436,6 +450,38 @@ struct Reply {
 }
 
 impl Fixture {
+    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.dashboard.app.store()
+    }
+
+    /// Queues reviews of 9 and 10 and starts 9's, so the queue has one
+    /// running run and one waiting behind it.
+    fn with_queue(&self) -> (i64, i64) {
+        let request = |number: u32| ReviewRequest {
+            key: key(number),
+            profile: "default".into(),
+            head_sha: format!("head{number}"),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Requested,
+        };
+        let mut store = self.store();
+        let running = store.queue_review(&request(9)).unwrap().unwrap().id;
+        let queued = store.queue_review(&request(10)).unwrap().unwrap().id;
+        store.claim_run(running).unwrap();
+        (running, queued)
+    }
+
+    /// The queued runs, in the order the worker will take them.
+    fn queued_ids(&self) -> Vec<i64> {
+        self.store()
+            .run_queue()
+            .unwrap()
+            .into_iter()
+            .filter(|e| !e.is_running())
+            .map(|e| e.run_id)
+            .collect()
+    }
+
     fn router(&self) -> Router {
         self.dashboard.router()
     }
@@ -677,6 +723,7 @@ async fn drafts_are_edited_and_decided_with_htmx_or_plain_forms() {
 #[tokio::test]
 async fn state_changes_need_the_token_and_the_dashboards_own_origin() {
     let f = fixture(false).await;
+    let (_, queued) = f.with_queue();
     let status = format!("/drafts/{}/status", f.drafts[1]);
     let token = f.token();
     let refused = |reply: Reply| {
@@ -716,11 +763,15 @@ async fn state_changes_need_the_token_and_the_dashboards_own_origin() {
         "/pr/org/repo/8/review-now".into(),
         "/pr/org/repo/7/archive".into(),
         format!("/drafts/{}/thread", f.drafts[1]),
+        format!("/queue/{queued}/move"),
+        format!("/queue/{queued}/cancel"),
     ] {
         refused(f.send(form(&uri).body(Body::empty()).unwrap()).await);
     }
     assert_eq!(f.status(1), "pending");
     assert!(f.serve.started.lock().unwrap().is_empty());
+    assert!(f.serve.cancelled.lock().unwrap().is_empty());
+    assert_eq!(f.queued_ids(), [queued]);
 
     // Without Origin or Sec-Fetch-Site, the token alone is enough.
     let bare = Request::post(&status)
@@ -4766,4 +4817,190 @@ async fn a_thread_a_posted_reply_went_in_is_with_its_draft() {
     let card = card_of_draft(&page.body, f.drafts[1]);
     assert!(card.contains("Posted in this thread:"), "{card}");
     assert!(card.contains("#discussion_t-bob"), "{card}");
+}
+
+#[tokio::test]
+async fn the_queue_lists_running_and_queued_runs_in_order() {
+    let f = fixture(false).await;
+    f.with_queue();
+    let page = f.get("/queue").await;
+    assert_eq!(page.status, StatusCode::OK);
+    insta::assert_snapshot!(readable(&f, &page.body));
+}
+
+#[tokio::test]
+async fn the_queue_says_so_when_nothing_is_queued() {
+    let f = fixture(false).await;
+    let page = f.get("/queue").await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        page.body.contains("Nothing is queued or running."),
+        "{}",
+        page.body
+    );
+}
+
+#[tokio::test]
+async fn the_top_bar_links_the_queue() {
+    let f = fixture(false).await;
+    let index = f.get("/").await;
+    assert!(index.body.contains("href=\"/queue\""), "{}", index.body);
+}
+
+#[tokio::test]
+async fn moving_a_run_down_reorders_the_queue_and_comes_back() {
+    let f = fixture(false).await;
+    let (_, first) = f.with_queue();
+    // PR 8's run failed, so queueing its head again puts it back in line.
+    let second = {
+        let mut store = f.store();
+        store
+            .queue_review(&ReviewRequest {
+                key: key(8),
+                profile: "default".into(),
+                head_sha: "head8".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    assert_eq!(f.queued_ids(), [first, second]);
+
+    let reply = f
+        .post(&format!("/queue/{first}/move"), &[("dir", "down")])
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(
+        reply.headers[header::LOCATION],
+        format!("/queue#run-{first}").as_str()
+    );
+    assert_eq!(f.queued_ids(), [second, first]);
+}
+
+#[tokio::test]
+async fn a_move_answers_htmx_with_the_list_alone() {
+    let f = fixture(false).await;
+    let (_, queued) = f.with_queue();
+    let token = f.token();
+    let fields = [("dir", "up"), ("csrf", token.as_str())];
+    let request = form(&format!("/queue/{queued}/move"))
+        .header("hx-request", "true")
+        .body(encode(&fields))
+        .unwrap();
+    let reply = f.send(request).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(reply.body.contains("id=\"queue\""), "{}", reply.body);
+    assert!(!reply.body.contains("<!DOCTYPE"), "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_running_run_cant_be_moved() {
+    let f = fixture(false).await;
+    let (running, _) = f.with_queue();
+    let reply = f
+        .post(&format!("/queue/{running}/move"), &[("dir", "up")])
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert!(reply.body.contains("only a queued run"), "{}", reply.body);
+}
+
+#[tokio::test]
+async fn moving_a_run_that_isnt_there_is_not_found() {
+    let f = fixture(false).await;
+    let reply = f.post("/queue/9999/move", &[("dir", "up")]).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn moving_the_first_run_up_redraws_rather_than_failing() {
+    let f = fixture(false).await;
+    let (_, queued) = f.with_queue();
+    let reply = f
+        .post(&format!("/queue/{queued}/move"), &[("dir", "up")])
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(f.queued_ids(), [queued]);
+}
+
+#[tokio::test]
+async fn cancelling_asks_first_and_says_what_it_costs() {
+    let f = fixture(false).await;
+    let (running, queued) = f.with_queue();
+
+    let waiting = f.get(&format!("/queue/{queued}/cancel")).await;
+    assert_eq!(waiting.status, StatusCode::OK);
+    assert!(
+        waiting.body.contains("nothing has been spent"),
+        "{}",
+        waiting.body
+    );
+    insta::assert_snapshot!("queue_cancel_card", readable(&f, &waiting.body));
+
+    let started = f.get(&format!("/queue/{running}/cancel")).await;
+    assert_eq!(started.status, StatusCode::OK);
+    assert!(started.body.contains("agent is killed"), "{}", started.body);
+    insta::assert_snapshot!("queue_cancel_running_card", readable(&f, &started.body));
+    // Asking cancels nothing.
+    assert!(f.serve.cancelled.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_goes_through_serve_and_comes_back_to_the_queue() {
+    let f = fixture(false).await;
+    let (_, queued) = f.with_queue();
+    let reply = f.post(&format!("/queue/{queued}/cancel"), &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(reply.headers[header::LOCATION], "/queue");
+    assert_eq!(*f.serve.cancelled.lock().unwrap(), [queued]);
+}
+
+#[tokio::test]
+async fn cancelling_a_finished_run_is_refused() {
+    let f = fixture(false).await;
+    *f.serve.cancel_result.lock().unwrap() = Some(sanic_store::Cancelled::Finished {
+        status: "succeeded".into(),
+    });
+    let reply = f.post(&format!("/queue/{}/cancel", f.run), &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert!(reply.body.contains("nothing to cancel"), "{}", reply.body);
+}
+
+#[tokio::test]
+async fn cancelling_a_run_that_isnt_there_is_not_found() {
+    let f = fixture(false).await;
+    *f.serve.cancel_result.lock().unwrap() = Some(sanic_store::Cancelled::NoSuchRun);
+    let reply = f.post("/queue/9999/cancel", &[]).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_cancelled_run_reads_cancelled_and_can_be_started_again() {
+    let f = fixture(false).await;
+    // PR 8, whose run failed, so queueing its head again requeues it.
+    let run = {
+        let mut store = f.store();
+        store
+            .queue_review(&ReviewRequest {
+                key: key(8),
+                profile: "default".into(),
+                head_sha: "head8".into(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    f.store().cancel_run(run).unwrap();
+    let index = f.get("/").await;
+    assert!(index.body.contains("cancelled"), "{}", index.body);
+    let ask = f.get("/pr/org/repo/8/review-now").await;
+    assert_eq!(ask.status, StatusCode::OK);
+    assert!(
+        ask.body.contains("You cancelled its last run"),
+        "{}",
+        ask.body
+    );
 }

@@ -28,6 +28,72 @@ fn worktree_run(r: &str) -> String {
     )
 }
 
+/// Between one queued review's place and the next, so a reorder renumbers
+/// only the rows the run moves past.
+const QUEUE_GAP: i64 = 1024;
+
+/// A queue row's fields other than the PR it belongs to and its kind, which
+/// both need parsing.
+struct QueueFields {
+    run_id: i64,
+    number: u32,
+    title: String,
+    author: String,
+    trigger: String,
+    profile: String,
+    head_sha: String,
+    status: String,
+    queued_at: String,
+    started_at: Option<String>,
+    source_run: Option<i64>,
+    instruction: Option<String>,
+    error: Option<String>,
+    archived: bool,
+}
+
+fn row_fields(row: &Row<'_>) -> rusqlite::Result<QueueFields> {
+    Ok(QueueFields {
+        run_id: row.get(0)?,
+        number: row.get(2)?,
+        title: row.get(3)?,
+        author: row.get(4)?,
+        trigger: row.get(6)?,
+        profile: row.get(7)?,
+        head_sha: row.get(8)?,
+        status: row.get(9)?,
+        queued_at: row.get(10)?,
+        started_at: row.get(11)?,
+        source_run: row.get(12)?,
+        instruction: row.get(13)?,
+        error: row.get(14)?,
+        archived: row.get(15)?,
+    })
+}
+
+/// The PR a run belongs to, from inside a transaction.
+fn run_key(tx: &Transaction<'_>, id: i64) -> Result<PrKey> {
+    let (repo, number): (String, u32) =
+        tx.query_row("SELECT repo, number FROM runs WHERE id = ?1", [id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+    Ok(PrKey {
+        repo: RepoName::parse(&repo)?,
+        number,
+    })
+}
+
+/// The place at the back of the queue, for a review being queued now.
+/// Past every place in use, a running run's kept one included, so nothing
+/// collides with the place it comes back to when a shutdown requeues it.
+fn next_queue_pos(tx: &Transaction<'_>) -> Result<i64> {
+    let last: i64 = tx.query_row(
+        "SELECT coalesce(max(queue_pos), 0) FROM runs WHERE queue_pos IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(last + QUEUE_GAP)
+}
+
 /// A run's current state, as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRecord {
@@ -41,6 +107,88 @@ pub struct RunRecord {
     pub source_run: Option<i64>,
     /// For a `regenerate` run: what you asked for.
     pub instruction: Option<String>,
+}
+
+/// A queued or running run, as the queue page and the TUI show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub run_id: i64,
+    pub key: PrKey,
+    pub title: String,
+    pub author: String,
+    pub kind: RunKind,
+    pub trigger: String,
+    pub profile: String,
+    pub head_sha: String,
+    /// `queued` or `running`.
+    pub status: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    /// For a regeneration: the run it revises, and what you asked for.
+    pub source_run: Option<i64>,
+    pub instruction: Option<String>,
+    /// A previous attempt's error, when this run was queued again after one.
+    pub error: Option<String>,
+    pub archived: bool,
+}
+
+impl QueueEntry {
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.status == "running"
+    }
+
+    /// Whether it has a place in the queue to move. A regeneration never
+    /// joins the queue, and a running run's place is behind it.
+    #[must_use]
+    pub fn is_movable(&self) -> bool {
+        !self.is_running() && self.kind == RunKind::Review
+    }
+}
+
+/// Which way [`Store::move_run`] moves a queued run. Relative, so a move
+/// means the same thing however the queue changed since it was drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+/// What [`Store::move_run`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moved {
+    /// 1-based places, as the queue showed them.
+    Moved {
+        key: PrKey,
+        from: u32,
+        to: u32,
+    },
+    /// Already first, or already last.
+    AlreadyThere {
+        key: PrKey,
+    },
+    /// Running, cancelled or finished: only a queued run has a place.
+    NotQueued {
+        status: String,
+    },
+    NoSuchRun,
+}
+
+/// What [`Store::cancel_run`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cancelled {
+    /// It never started, so nothing was spent.
+    Queued {
+        key: PrKey,
+    },
+    /// Recorded, but its agent is still up: the worker has to stop it.
+    Running {
+        key: PrKey,
+    },
+    Finished {
+        status: String,
+    },
+    NoSuchRun,
 }
 
 /// A run whose agent session can be resumed.
@@ -189,18 +337,21 @@ impl Store {
         }
         tx.execute(
             &format!(
-                "UPDATE runs SET status = 'superseded', finished_at = {NOW}
+                "UPDATE runs SET status = 'superseded', finished_at = {NOW}, queue_pos = NULL
                  WHERE repo = ?1 AND number = ?2 AND kind = ?3 AND status = 'queued'"
             ),
             params![repo, number, REVIEW],
         )?;
+        // Taken inside the IMMEDIATE transaction, so two queuers can't pick
+        // the same place.
+        let pos = next_queue_pos(&tx)?;
         let id = if let Some((id, _)) = existing {
             tx.execute(
                 &format!(
                     "UPDATE runs SET trigger = ?2, profile = ?3, base_sha = ?4, from_sha = ?5,
                          status = 'queued', error = NULL, suggested_verdict = NULL,
                          session_id = NULL, transcript_path = NULL, resumed_from = NULL,
-                         worktree_run = NULL, no_update = NULL,
+                         worktree_run = NULL, no_update = NULL, queue_pos = ?6,
                          queued_at = {NOW}, started_at = NULL, finished_at = NULL
                      WHERE id = ?1"
                 ),
@@ -209,7 +360,8 @@ impl Store {
                     req.trigger.as_str(),
                     req.profile,
                     req.base_sha,
-                    from_sha
+                    from_sha,
+                    pos
                 ],
             )?;
             id
@@ -217,8 +369,8 @@ impl Store {
             tx.execute(
                 &format!(
                     "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
-                                       base_sha, from_sha, status, queued_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', {NOW})"
+                                       base_sha, from_sha, status, queue_pos, queued_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, {NOW})"
                 ),
                 params![
                     repo,
@@ -229,7 +381,8 @@ impl Store {
                     req.profile,
                     req.head_sha,
                     req.base_sha,
-                    from_sha
+                    from_sha,
+                    pos
                 ],
             )?;
             tx.last_insert_rowid()
@@ -393,6 +546,205 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// The PR run `id` belongs to; `None` if there's no such run.
+    fn run_key(&self, id: i64) -> Result<Option<PrKey>> {
+        let row: Option<(String, u32)> = self
+            .conn
+            .query_row("SELECT repo, number FROM runs WHERE id = ?1", [id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        row.map(|(repo, number)| {
+            Ok(PrKey {
+                repo: RepoName::parse(&repo)?,
+                number,
+            })
+        })
+        .transpose()
+    }
+
+    /// Queued and running runs in the order they'll run: running first,
+    /// then queued by their place. Both kinds, since a regeneration runs
+    /// beside a review even though it never joins the queue.
+    pub fn run_queue(&self) -> Result<Vec<QueueEntry>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.id, r.repo, r.number, p.title, p.author, r.kind, r.trigger, r.profile,
+                    r.head_sha, r.status, r.queued_at, r.started_at, r.source_run,
+                    r.instruction, r.error, p.archived
+             FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+             WHERE r.status IN ('queued', 'running')
+             ORDER BY r.status = 'queued', r.queue_pos IS NULL, r.queue_pos, r.id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let repo: String = row.get(1)?;
+                let kind: String = row.get(5)?;
+                Ok((repo, kind, row_fields(row)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(repo, kind, fields)| {
+                let key = PrKey {
+                    repo: RepoName::parse(&repo)?,
+                    number: fields.number,
+                };
+                Ok(QueueEntry {
+                    key,
+                    kind: if kind == REVIEW {
+                        RunKind::Review
+                    } else {
+                        RunKind::Regenerate
+                    },
+                    run_id: fields.run_id,
+                    title: fields.title,
+                    author: fields.author,
+                    trigger: fields.trigger,
+                    profile: fields.profile,
+                    head_sha: fields.head_sha,
+                    status: fields.status,
+                    queued_at: fields.queued_at,
+                    started_at: fields.started_at,
+                    source_run: fields.source_run,
+                    instruction: fields.instruction,
+                    error: fields.error,
+                    archived: fields.archived,
+                })
+            })
+            .collect()
+    }
+
+    /// Marks the first queued review running and returns it; `None` when
+    /// nothing is queued. A run whose profile `held` names is skipped
+    /// rather than taken, so manual reviews holding one profile don't stop
+    /// the rest of the queue. The claim is conditional, so a run another
+    /// claimer took first is passed over.
+    pub fn claim_next(&self, held: impl Fn(&str) -> bool) -> Result<Option<QueuedRun>> {
+        let queued: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id, profile FROM runs
+                 WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NOT NULL
+                 ORDER BY queue_pos, id",
+            )?;
+            stmt.query_map([REVIEW], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (id, profile) in queued {
+            if held(&profile) {
+                continue;
+            }
+            let row = self
+                .conn
+                .query_row(
+                    &format!(
+                        "UPDATE runs SET status = 'running', started_at = {NOW}
+                         WHERE id = ?1 AND status = 'queued'
+                         RETURNING id, repo, number, profile, head_sha, base_sha, from_sha"
+                    ),
+                    [id],
+                    queued_row,
+                )
+                .optional()?;
+            if let Some(row) = row {
+                return queued_run(row).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Moves a queued review one place earlier or later.
+    pub fn move_run(&mut self, id: i64, dir: Direction) -> Result<Moved> {
+        // Immediate: this reads the order before rewriting it.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let queued: Vec<(i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, queue_pos FROM runs
+                 WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NOT NULL
+                 ORDER BY queue_pos, id",
+            )?;
+            stmt.query_map([REVIEW], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let ids: Vec<i64> = queued.iter().map(|&(run, _)| run).collect();
+        let Some(from) = ids.iter().position(|&run| run == id) else {
+            let status: Option<String> = tx
+                .query_row("SELECT status FROM runs WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            return Ok(match status {
+                Some(status) => Moved::NotQueued { status },
+                None => Moved::NoSuchRun,
+            });
+        };
+        let key = run_key(&tx, id)?;
+        let to = match dir {
+            Direction::Up if from == 0 => return Ok(Moved::AlreadyThere { key }),
+            Direction::Down if from + 1 == ids.len() => return Ok(Moved::AlreadyThere { key }),
+            Direction::Up => from - 1,
+            Direction::Down => from + 1,
+        };
+        // They swap the places they hold: positions drift up as runs leave,
+        // so a place derived from the index would land the run elsewhere.
+        for (&(run, _), &(_, pos)) in [(&queued[from], &queued[to]), (&queued[to], &queued[from])] {
+            tx.execute(
+                "UPDATE runs SET queue_pos = ?2 WHERE id = ?1 AND status = 'queued'",
+                params![run, pos],
+            )?;
+        }
+        tx.commit()
+            .wrap_err_with(|| format!("moving run {id} in the queue"))?;
+        Ok(Moved::Moved {
+            key,
+            from: u32::try_from(from).unwrap_or(u32::MAX) + 1,
+            to: u32::try_from(to).unwrap_or(u32::MAX) + 1,
+        })
+    }
+
+    /// Records run `id` cancelled if it's queued. A running one is left for
+    /// the worker to stop, which records it with
+    /// [`Store::cancel_running_run`]. Cancelling is one-shot: a later
+    /// trigger can queue the same head again.
+    pub fn cancel_run(&self, id: i64) -> Result<Cancelled> {
+        let Some(key) = self.run_key(id)? else {
+            return Ok(Cancelled::NoSuchRun);
+        };
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE runs SET status = 'cancelled', finished_at = {NOW}, queue_pos = NULL
+                 WHERE id = ?1 AND status = 'queued'"
+            ),
+            [id],
+        )?;
+        if changed == 1 {
+            return Ok(Cancelled::Queued { key });
+        }
+        let status: String =
+            self.conn
+                .query_row("SELECT status FROM runs WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })?;
+        Ok(if status == "running" {
+            Cancelled::Running { key }
+        } else {
+            Cancelled::Finished { status }
+        })
+    }
+
+    /// Records a running run the worker stopped on your say-so. It keeps no
+    /// drafts: they'd be about a review you stopped.
+    pub fn cancel_running_run(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "UPDATE runs SET status = 'cancelled', finished_at = {NOW}, queue_pos = NULL
+                 WHERE id = ?1"
+            ),
+            [id],
+        )?;
+        Ok(())
     }
 
     /// Marks a queued run as running. `false` if it was superseded while it
@@ -765,15 +1117,16 @@ impl Store {
         Ok(())
     }
 
-    /// Requeues runs a previous process left running, and returns every
-    /// queued run, oldest first. Where a PR has both, only the most recently
-    /// queued survives: a queued run can only sit beside a running one if it
-    /// came later, so it's for the newer head, and the rest are superseded.
-    pub fn recover_runs(&mut self) -> Result<Vec<QueuedRun>> {
+    /// Requeues runs a previous process left running, and returns how many
+    /// reviews are queued for the worker to pull. Where a PR has both, only
+    /// the most recently queued survives: a queued run can only sit beside a
+    /// running one if it came later, so it's for the newer head, and the rest
+    /// are superseded.
+    pub fn recover_runs(&mut self) -> Result<u32> {
         let tx = self.conn.transaction()?;
         tx.execute(
             &format!(
-                "UPDATE runs SET status = 'superseded', finished_at = {NOW}
+                "UPDATE runs SET status = 'superseded', finished_at = {NOW}, queue_pos = NULL
                  WHERE status IN ('queued', 'running') AND EXISTS (
                      SELECT 1 FROM runs AS newer
                      WHERE newer.repo = runs.repo AND newer.number = runs.number
@@ -787,7 +1140,7 @@ impl Store {
         // didn't finish isn't started again unasked.
         tx.execute(
             &format!(
-                "UPDATE runs SET status = 'failed', finished_at = {NOW},
+                "UPDATE runs SET status = 'failed', finished_at = {NOW}, queue_pos = NULL,
                      error = 'interrupted when serve stopped; regenerate again'
                  WHERE kind = ?1 AND status IN ('queued', 'running')"
             ),
@@ -797,16 +1150,47 @@ impl Store {
             "UPDATE runs SET status = 'queued', started_at = NULL WHERE status = 'running'",
             [],
         )?;
+        // A queued run with no place goes to the back, oldest first. Ordered
+        // here, since a subquery would read places this same statement wrote.
+        let placeless: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM runs
+                 WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NULL
+                 ORDER BY queued_at, id",
+            )?;
+            stmt.query_map([REVIEW], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if !placeless.is_empty() {
+            let mut back: i64 = tx.query_row(
+                "SELECT coalesce(max(queue_pos), 0) FROM runs WHERE queue_pos IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            for run in placeless {
+                back = back.saturating_add(QUEUE_GAP);
+                tx.execute(
+                    "UPDATE runs SET queue_pos = ?2 WHERE id = ?1",
+                    params![run, back],
+                )?;
+            }
+        }
+        let queued: u32 = tx.query_row(
+            "SELECT count(*) FROM runs WHERE status = 'queued' AND kind = ?1",
+            [REVIEW],
+            |row| row.get(0),
+        )?;
         tx.commit().wrap_err("recovering interrupted runs")?;
-        self.queued_reviews()
+        Ok(queued)
     }
 
-    /// Every review queued but not started, oldest first: under
+    /// Every review queued but not started, in the order they'll run: under
     /// `runner.manual_reviews`, the held ones.
     pub fn queued_reviews(&self) -> Result<Vec<QueuedRun>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
-             FROM runs WHERE status = 'queued' AND kind = ?1 ORDER BY id",
+             FROM runs WHERE status = 'queued' AND kind = ?1
+             ORDER BY queue_pos, id",
         )?;
         let rows = stmt
             .query_map([REVIEW], queued_row)?
@@ -1735,6 +2119,36 @@ mod tests {
 
     fn status(store: &Store, id: i64) -> String {
         store.run(id).unwrap().unwrap().status
+    }
+
+    /// Records another PR, so several reviews can be queued at once: a
+    /// second review of the same PR supersedes the first.
+    fn other_pr(store: &mut Store, number: u32) -> PrKey {
+        let mut snap = snapshot();
+        snap.key.number = number;
+        snap.url = format!("https://github.com/org/repo/pull/{number}");
+        snap.threads.clear();
+        store.record(&snap, "me", "default", &[]).unwrap();
+        snap.key
+    }
+
+    /// Queues a review of `number`'s PR, recording it first.
+    fn queue_for(store: &mut Store, number: u32) -> QueuedRun {
+        let key = other_pr(store, number);
+        let mut req = request("h1");
+        req.key = key;
+        store.queue_review(&req).unwrap().unwrap()
+    }
+
+    /// The queued reviews, in the order the worker will take them.
+    fn queued_ids(store: &Store) -> Vec<i64> {
+        store
+            .run_queue()
+            .unwrap()
+            .into_iter()
+            .filter(|e| !e.is_running())
+            .map(|e| e.run_id)
+            .collect()
     }
 
     fn result() -> ReviewResult {
@@ -2685,7 +3099,7 @@ mod tests {
             panic!("refused");
         };
         store.claim_run(run.id).unwrap();
-        assert!(store.recover_runs().unwrap().is_empty());
+        assert_eq!(store.recover_runs().unwrap(), 0);
         assert_eq!(status(&store, run.id), "failed");
     }
 
@@ -2711,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_run_is_queued_again() {
+    fn a_run_stopped_by_shutdown_is_queued_again() {
         let mut store = store();
         let run = store.queue_review(&request("h1")).unwrap().unwrap();
         assert!(store.running_reviews().unwrap().is_empty());
@@ -2719,7 +3133,8 @@ mod tests {
         assert_eq!(store.running_reviews().unwrap(), [snapshot().key]);
         store.requeue_run(run.id).unwrap();
         assert_eq!(status(&store, run.id), "queued");
-        assert_eq!(store.recover_runs().unwrap(), [run]);
+        assert_eq!(store.recover_runs().unwrap(), 1);
+        assert_eq!(queued_ids(&store), [run.id]);
     }
 
     #[test]
@@ -2727,7 +3142,8 @@ mod tests {
         let mut store = store();
         let running = store.queue_review(&request("h1")).unwrap().unwrap();
         store.claim_run(running.id).unwrap();
-        assert_eq!(store.recover_runs().unwrap(), [running]);
+        assert_eq!(store.recover_runs().unwrap(), 1);
+        assert_eq!(queued_ids(&store), [running.id]);
         assert_eq!(store.run_counts().unwrap().queued, 1);
     }
 
@@ -2741,7 +3157,8 @@ mod tests {
             from_sha: "h1".into(),
         };
         let queued = store.queue_review(&push).unwrap().unwrap();
-        assert_eq!(store.recover_runs().unwrap(), [queued]);
+        assert_eq!(store.recover_runs().unwrap(), 1);
+        assert_eq!(queued_ids(&store), [queued.id]);
         assert_eq!(status(&store, running.id), "superseded");
         assert_eq!(store.run_counts().unwrap().queued, 1);
     }
@@ -3462,5 +3879,299 @@ mod tests {
             ctx.threads[0].comments[1].url,
             snapshot().threads[0].comments[0].url
         );
+    }
+
+    #[test]
+    fn the_queue_runs_in_the_order_it_was_filled() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        let third = queue_for(&mut store, 13);
+        assert_eq!(queued_ids(&store), [first.id, second.id, third.id]);
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, first.id);
+        assert_eq!(status(&store, first.id), "running");
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, second.id);
+    }
+
+    #[test]
+    fn claim_next_is_none_when_nothing_is_queued() {
+        let store = store();
+        assert!(store.claim_next(|_| false).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_held_profile_is_skipped_rather_than_blocking_the_queue() {
+        let mut store = store();
+        let held = queue_for(&mut store, 11);
+        let mut req = request("h1");
+        req.key = other_pr(&mut store, 12);
+        req.profile = "quick".into();
+        let quick = store.queue_review(&req).unwrap().unwrap();
+
+        // 11 is first in line, but `default` is held, so `quick` goes now.
+        let taken = store.claim_next(|p| p == "default").unwrap().unwrap();
+        assert_eq!(taken.id, quick.id);
+        assert_eq!(status(&store, held.id), "queued");
+        // Nothing left that isn't held.
+        assert!(store.claim_next(|p| p == "default").unwrap().is_none());
+        // Once it isn't held, it's taken, and it kept its place.
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, held.id);
+    }
+
+    #[test]
+    fn claim_next_never_takes_a_regeneration() {
+        let mut store = store();
+        let review = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(review.id).unwrap();
+        store.finish_review(review.id, &result()).unwrap();
+        let Regeneration::Queued(regen) = store
+            .queue_regeneration(review.id, "again", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert!(store.claim_next(|_| false).unwrap().is_none());
+        assert_eq!(status(&store, regen.id), "queued");
+        // Still listed, so the queue page can show what's about to run.
+        assert!(
+            store
+                .run_queue()
+                .unwrap()
+                .iter()
+                .any(|e| e.run_id == regen.id)
+        );
+    }
+
+    #[test]
+    fn moving_a_run_changes_what_runs_next() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        let third = queue_for(&mut store, 13);
+
+        let moved = store.move_run(third.id, Direction::Up).unwrap();
+        assert!(
+            matches!(moved, Moved::Moved { from: 3, to: 2, .. }),
+            "{moved:?}"
+        );
+        assert_eq!(queued_ids(&store), [first.id, third.id, second.id]);
+
+        store.move_run(third.id, Direction::Up).unwrap();
+        assert_eq!(queued_ids(&store), [third.id, first.id, second.id]);
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, third.id);
+    }
+
+    /// Places drift up as runs leave the queue, so a move that renumbered
+    /// from the row's index would land it ahead of runs it never passed.
+    #[test]
+    fn moving_one_place_passes_exactly_one_run() {
+        let mut store = store();
+        let gone = queue_for(&mut store, 11);
+        let also_gone = queue_for(&mut store, 12);
+        let head = queue_for(&mut store, 13);
+        store.cancel_run(gone.id).unwrap();
+        store.cancel_run(also_gone.id).unwrap();
+        let middle = queue_for(&mut store, 14);
+        let last = queue_for(&mut store, 15);
+        assert_eq!(queued_ids(&store), [head.id, middle.id, last.id]);
+
+        store.move_run(last.id, Direction::Up).unwrap();
+        assert_eq!(queued_ids(&store), [head.id, last.id, middle.id]);
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, head.id);
+    }
+
+    #[test]
+    fn moving_down_swaps_with_the_next_run() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        store.move_run(first.id, Direction::Down).unwrap();
+        assert_eq!(queued_ids(&store), [second.id, first.id]);
+    }
+
+    #[test]
+    fn moving_past_either_end_is_not_an_error() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        assert!(matches!(
+            store.move_run(first.id, Direction::Up).unwrap(),
+            Moved::AlreadyThere { .. }
+        ));
+        assert!(matches!(
+            store.move_run(second.id, Direction::Down).unwrap(),
+            Moved::AlreadyThere { .. }
+        ));
+        assert_eq!(queued_ids(&store), [first.id, second.id]);
+    }
+
+    #[test]
+    fn only_a_queued_run_has_a_place() {
+        let mut store = store();
+        let run = queue_for(&mut store, 11);
+        queue_for(&mut store, 12);
+        store.claim_run(run.id).unwrap();
+        assert_eq!(
+            store.move_run(run.id, Direction::Down).unwrap(),
+            Moved::NotQueued {
+                status: "running".into()
+            }
+        );
+        assert_eq!(
+            store.move_run(9999, Direction::Up).unwrap(),
+            Moved::NoSuchRun
+        );
+    }
+
+    #[test]
+    fn a_run_queued_during_a_reorder_goes_to_the_back() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        store.move_run(second.id, Direction::Up).unwrap();
+        let late = queue_for(&mut store, 13);
+        assert_eq!(queued_ids(&store), [second.id, first.id, late.id]);
+    }
+
+    #[test]
+    fn cancelling_a_queued_run_takes_it_out_of_the_queue() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        assert!(matches!(
+            store.cancel_run(first.id).unwrap(),
+            Cancelled::Queued { .. }
+        ));
+        assert_eq!(status(&store, first.id), "cancelled");
+        assert_eq!(queued_ids(&store), [second.id]);
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, second.id);
+    }
+
+    #[test]
+    fn cancelling_a_running_run_is_left_for_the_worker() {
+        let mut store = store();
+        let run = queue_for(&mut store, 11);
+        store.claim_run(run.id).unwrap();
+        assert!(matches!(
+            store.cancel_run(run.id).unwrap(),
+            Cancelled::Running { .. }
+        ));
+        // Still running: the agent has to be stopped before it's recorded.
+        assert_eq!(status(&store, run.id), "running");
+        store.cancel_running_run(run.id).unwrap();
+        assert_eq!(status(&store, run.id), "cancelled");
+    }
+
+    #[test]
+    fn cancelling_a_finished_run_says_so() {
+        let mut store = store();
+        let run = queue_for(&mut store, 11);
+        store.claim_run(run.id).unwrap();
+        store.finish_review(run.id, &result()).unwrap();
+        assert_eq!(
+            store.cancel_run(run.id).unwrap(),
+            Cancelled::Finished {
+                status: "succeeded".into()
+            }
+        );
+        assert_eq!(store.cancel_run(9999).unwrap(), Cancelled::NoSuchRun);
+    }
+
+    #[test]
+    fn cancelling_is_one_shot_so_a_later_trigger_reviews_the_head_again() {
+        let mut store = store();
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.cancel_run(run.id).unwrap();
+        assert_eq!(status(&store, run.id), "cancelled");
+        let again = store.queue_review(&request("h1")).unwrap().unwrap();
+        assert_eq!(again.id, run.id);
+        assert_eq!(status(&store, run.id), "queued");
+        assert_eq!(queued_ids(&store), [run.id]);
+    }
+
+    #[test]
+    fn a_run_requeued_by_shutdown_keeps_its_place() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, first.id);
+        store.requeue_run(first.id).unwrap();
+        assert_eq!(queued_ids(&store), [first.id, second.id]);
+    }
+
+    /// A run interrupted while running has no place once it's queued
+    /// again, and gets one in the order it was queued, not the order the
+    /// rows happen to be scanned in.
+    #[test]
+    fn recovered_runs_without_a_place_go_to_the_back_oldest_first() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        for run in [first.id, second.id] {
+            store.claim_run(run).unwrap();
+            store
+                .conn
+                .execute("UPDATE runs SET queue_pos = NULL WHERE id = ?1", [run])
+                .unwrap();
+        }
+        // The younger row is queued first, so a scan in rowid order would
+        // put the older one last.
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET queued_at = '2026-01-02T00:00:00Z' WHERE id = ?1",
+                [first.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET queued_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+                [second.id],
+            )
+            .unwrap();
+        assert_eq!(store.recover_runs().unwrap(), 2);
+        assert_eq!(queued_ids(&store), [second.id, first.id]);
+    }
+
+    #[test]
+    fn a_queued_regeneration_has_no_place_to_move() {
+        let mut store = store();
+        let review = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(review.id).unwrap();
+        store.finish_review(review.id, &result()).unwrap();
+        let Regeneration::Queued(regen) = store
+            .queue_regeneration(review.id, "again", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        let shown = store.run_queue().unwrap();
+        let entry = shown.iter().find(|e| e.run_id == regen.id).unwrap();
+        assert!(!entry.is_movable(), "a regeneration isn't in the queue");
+        assert_eq!(
+            store.move_run(regen.id, Direction::Up).unwrap(),
+            Moved::NotQueued {
+                status: "queued".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_queue_shows_running_runs_first() {
+        let mut store = store();
+        let first = queue_for(&mut store, 11);
+        let second = queue_for(&mut store, 12);
+        store.claim_run(second.id).unwrap();
+        let queue = store.run_queue().unwrap();
+        assert_eq!(
+            queue.iter().map(|e| e.run_id).collect::<Vec<_>>(),
+            [second.id, first.id]
+        );
+        assert!(queue[0].is_running());
+        assert_eq!(queue[1].status, "queued");
+        assert_eq!(queue[1].key.number, 11);
+        assert_eq!(queue[1].title, "Add thing");
+        assert_eq!(queue[1].author, "alice");
     }
 }

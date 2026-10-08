@@ -6,7 +6,7 @@
 
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
@@ -25,7 +25,7 @@ use sanic_core::{
 use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use sanic_store::Store;
 use tokio::{
-    sync::{Notify, Semaphore, mpsc},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
     task::{self, JoinError, JoinSet},
 };
 use tracing::{Instrument, Span, debug, error, info, info_span, warn};
@@ -80,7 +80,44 @@ fn active_key(run: &QueuedRun) -> ActiveKey {
 struct Active {
     run_id: i64,
     head_sha: String,
-    cancel: Arc<Notify>,
+    stop: Arc<Stopper>,
+}
+
+/// Why a running run was stopped, which decides how it's recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    NewerHead,
+    Shutdown,
+    Cancelled,
+}
+
+/// The signal that stops a running run, and why.
+#[derive(Default)]
+struct Stopper {
+    reason: Mutex<Option<Stop>>,
+    notify: Notify,
+}
+
+impl Stopper {
+    /// The first reason wins: a shutdown during a supersede is a supersede.
+    fn stop(&self, reason: Stop) {
+        let mut held = self.reason.lock().unwrap_or_else(PoisonError::into_inner);
+        held.get_or_insert(reason);
+        drop(held);
+        // `notify_one` keeps the wakeup if the run isn't waiting yet.
+        self.notify.notify_one();
+    }
+
+    fn reason(&self) -> Option<Stop> {
+        *self.reason.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    async fn stopped(&self) {
+        if self.reason().is_some() {
+            return;
+        }
+        self.notify.notified().await;
+    }
 }
 
 /// The parts of the config runs use. Replaced on reload; a run reads them
@@ -132,7 +169,7 @@ impl Worker {
         self.stopping.store(true, Ordering::SeqCst);
         let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         for run in active.values() {
-            run.cancel.notify_one();
+            run.stop.stop(Stop::Shutdown);
         }
         let mut keys: Vec<PrKey> = active.keys().map(|(key, _)| key.clone()).collect();
         keys.sort();
@@ -205,15 +242,80 @@ impl Worker {
     /// every started run has finished. A run whose task panics is recorded
     /// as crashed, and the others carry on.
     pub async fn work(self: Arc<Self>, jobs: mpsc::UnboundedReceiver<Job>) {
-        supervise(
+        dispatch(
             jobs,
-            |job| {
-                self.stop_older_review(&job.run);
-                Arc::clone(&self).execute(job)
+            Arc::clone(&self.limit),
+            Dispatch {
+                noticed: |job: &Job| {
+                    // A held newer head won't run, so stopping the running
+                    // review would spend its work for nothing.
+                    if job.automatic && self.holds_reviews(&job.run.request.profile) {
+                        debug!(run = job.run.id, "held: manual reviews hold its profile");
+                    } else {
+                        self.stop_older_review(&job.run);
+                    }
+                },
+                claim: || {
+                    if self.stopping.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    match self
+                        .store()
+                        .claim_next(|profile| self.holds_reviews(profile))
+                    {
+                        Ok(run) => run,
+                        Err(err) => {
+                            warn!("taking the next queued run failed: {err:?}");
+                            None
+                        }
+                    }
+                },
+                register: |run: &QueuedRun| self.register(run),
+                execute: |run, stop, permit| Arc::clone(&self).execute(run, stop, permit),
+                claim_started: |job: &Job| self.claim_started(job),
+                crashed: |run, panic| self.crashed(run, panic),
             },
-            |run, panic| self.crashed(run, panic),
         )
         .await;
+    }
+
+    /// Registers a claimed run before it is spawned, so a cancel always
+    /// finds it. `None` if its PR already has this run registered, which a
+    /// hand start sent twice does; the claim is undone, since the run is
+    /// `running` in the store by now and nothing else would record it.
+    fn register(&self, run: &QueuedRun) -> Option<Arc<Stopper>> {
+        let stop = self.start(run);
+        if stop.is_none() {
+            debug!(run = run.id, "already started; putting it back");
+            if let Err(err) = self.store().requeue_run(run.id) {
+                warn!(run = run.id, "putting the run back failed: {err:?}");
+            }
+        }
+        stop
+    }
+
+    /// Claims a job that skips the queue. `false` if it was superseded or
+    /// cancelled while it waited for a permit, or if manual reviews started
+    /// holding its profile, so it never starts.
+    fn claim_started(&self, job: &Job) -> bool {
+        if job.automatic && self.holds_reviews(&job.run.request.profile) {
+            debug!(
+                run = job.run.id,
+                "held: manual reviews were turned on before it started"
+            );
+            return false;
+        }
+        match self.store().claim_run(job.run.id) {
+            Ok(true) => true,
+            Ok(false) => {
+                debug!(run = job.run.id, "superseded before it started");
+                false
+            }
+            Err(err) => {
+                warn!(run = job.run.id, "claiming the run failed: {err:?}");
+                false
+            }
+        }
     }
 
     /// Whether manual reviews hold automatic runs of `profile`'s PRs, as
@@ -232,15 +334,27 @@ impl Worker {
         if let Some(older) = active.get(&(run.request.key.clone(), false))
             && older.head_sha != run.request.head_sha
         {
-            // `notify_one` keeps the wakeup if the run isn't waiting yet.
-            older.cancel.notify_one();
+            older.stop.stop(Stop::NewerHead);
         }
+    }
+
+    /// Stops run `id` because you asked: its agent is killed and its
+    /// worktree removed. `false` if it isn't running here, so the caller
+    /// can say so rather than claim it stopped. The dispatcher registers a
+    /// run before it spawns, so a claimed run is always findable here.
+    pub fn cancel(&self, id: i64) -> bool {
+        let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(run) = active.values().find(|a| a.run_id == id) else {
+            return false;
+        };
+        run.stop.stop(Stop::Cancelled);
+        true
     }
 
     /// Registers `run` as its PR's running review, returning the signal
     /// that stops it. `None` if this run is already registered: a review
     /// started by hand twice before the worker claimed it arrives twice.
-    fn start(&self, run: &QueuedRun) -> Option<Arc<Notify>> {
+    fn start(&self, run: &QueuedRun) -> Option<Arc<Stopper>> {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active
             .get(&active_key(run))
@@ -248,16 +362,16 @@ impl Worker {
         {
             return None;
         }
-        let cancel = Arc::new(Notify::new());
+        let stop = Arc::new(Stopper::default());
         active.insert(
             active_key(run),
             Active {
                 run_id: run.id,
                 head_sha: run.request.head_sha.clone(),
-                cancel: Arc::clone(&cancel),
+                stop: Arc::clone(&stop),
             },
         );
-        Some(cancel)
+        Some(stop)
     }
 
     fn finish(&self, run: &QueuedRun) {
@@ -268,45 +382,21 @@ impl Worker {
         }
     }
 
-    async fn execute(self: Arc<Self>, Job { run, automatic }: Job) {
-        let Ok(_permit) = self.limit.acquire().await else {
-            return;
-        };
-        // Shutting down: it stays queued for the next start.
+    /// Runs `run`, which the dispatcher has already claimed and registered,
+    /// holding `_permit` for as long as it takes.
+    async fn execute(
+        self: Arc<Self>,
+        run: QueuedRun,
+        stop: Arc<Stopper>,
+        _permit: OwnedSemaphorePermit,
+    ) {
+        // `cancel_all` may have run between the claim and here.
         if self.stopping.load(Ordering::SeqCst) {
-            return;
+            stop.stop(Stop::Shutdown);
         }
-        // Manual reviews were turned on while it waited: it stays queued,
-        // held like any other.
-        if automatic && self.holds_reviews(&run.request.profile) {
-            debug!("held: manual reviews were turned on before it started");
-            return;
-        }
-        // Registered before claiming: a newer head queued after the claim
-        // then always finds this run to stop, and one queued before it has
-        // already superseded the run in the store, so the claim fails.
-        let Some(cancel) = self.start(&run) else {
-            debug!("already started");
-            return;
-        };
-        // `cancel_all` may have run between the check above and `start`.
-        if self.stopping.load(Ordering::SeqCst) {
-            self.finish(&run);
-            return;
-        }
-        // Bound first so the store guard is dropped before the review awaits.
-        let claimed = self.store().claim_run(run.id);
-        let outcome = match claimed {
-            Ok(true) => self.review(&run, &cancel).await,
-            Ok(false) => {
-                self.finish(&run);
-                debug!("superseded before it started");
-                return;
-            }
-            Err(err) => Err(err),
-        };
+        let outcome = self.review(&run, &stop).await;
         self.finish(&run);
-        let stored = self.record(&run, outcome);
+        let stored = self.record(&run, &stop, outcome);
         if let Err(err) = stored {
             warn!(url = %run.request.key.url(), "recording the run failed: {err:?}");
         }
@@ -314,22 +404,33 @@ impl Worker {
     }
 
     /// Stores how `run` ended, as `outcome` says, and logs it.
-    fn record(&self, run: &QueuedRun, outcome: Result<Option<Reviewed>>) -> Result<()> {
+    fn record(
+        &self,
+        run: &QueuedRun,
+        stop: &Stopper,
+        outcome: Result<Option<Reviewed>>,
+    ) -> Result<()> {
         match outcome {
-            // Started by hand, so not started again unasked.
-            Ok(None) if self.stopping.load(Ordering::SeqCst) && run.revision.is_some() => {
-                info!("regeneration cancelled by shutdown");
-                self.store()
-                    .fail_run(run.id, "cancelled when serve stopped; regenerate again")
-            }
-            Ok(None) if self.stopping.load(Ordering::SeqCst) => {
-                info!("cancelled by shutdown; queued again for the next start");
-                self.store().requeue_run(run.id)
-            }
-            Ok(None) => {
-                info!("stopped: a newer head of the PR was queued");
-                self.store().supersede_run(run.id)
-            }
+            Ok(None) => match stop.reason() {
+                Some(Stop::Cancelled) => {
+                    info!("cancelled: you stopped it");
+                    self.store().cancel_running_run(run.id)
+                }
+                // Started by hand, so not started again unasked.
+                Some(Stop::Shutdown) if run.revision.is_some() => {
+                    info!("regeneration cancelled by shutdown");
+                    self.store()
+                        .fail_run(run.id, "cancelled when serve stopped; regenerate again")
+                }
+                Some(Stop::Shutdown) => {
+                    info!("cancelled by shutdown; queued again for the next start");
+                    self.store().requeue_run(run.id)
+                }
+                Some(Stop::NewerHead) | None => {
+                    info!("stopped: a newer head of the PR was queued");
+                    self.store().supersede_run(run.id)
+                }
+            },
             Ok(Some(Reviewed::Review { result, basis })) => {
                 let stored = match (&run.revision, &basis) {
                     (Some(revision), Some(basis)) => self
@@ -425,10 +526,10 @@ impl Worker {
         }
     }
 
-    /// `None` if `cancel` stopped it. A push review resumes the session
+    /// `None` if `stop` fired. A push review resumes the session
     /// of the PR's current run, if it has one and it can, and otherwise
     /// reviews the whole PR afresh.
-    async fn review(&self, run: &QueuedRun, cancel: &Notify) -> Result<Option<Reviewed>> {
+    async fn review(&self, run: &QueuedRun, stop: &Stopper) -> Result<Option<Reviewed>> {
         let req = &run.request;
         let settings = self.run_settings(&req.profile)?;
         let ctx = self
@@ -468,7 +569,7 @@ impl Worker {
                 .insert(run.id, resumed.clone());
             let reviewed = self
                 .runner
-                .review(&resumed, &ctx, &settings, cancel.notified())
+                .review(&resumed, &ctx, &settings, stop.stopped())
                 .await;
             self.resuming
                 .lock()
@@ -488,7 +589,7 @@ impl Worker {
             )
         })?;
         self.runner
-            .review(run, &ctx, &settings, cancel.notified())
+            .review(run, &ctx, &settings, stop.stopped())
             .await
     }
 
@@ -560,15 +661,46 @@ pub struct Job {
     pub automatic: bool,
 }
 
-/// Spawns `execute` for each run as it arrives, and hands any run whose
-/// task panicked to `crashed`, in that run's span.
-async fn supervise<E, EF, C, CF>(mut jobs: mpsc::UnboundedReceiver<Job>, execute: E, crashed: C)
-where
-    E: Fn(Job) -> EF,
+/// What [`dispatch`] calls as jobs arrive, are taken and finish.
+struct Dispatch<N, C, R, E, S, CR> {
+    /// Every job the scheduler sends, for the newer-head check.
+    noticed: N,
+    /// The next queued run, already claimed; `None` when there's none.
+    claim: C,
+    /// Registers a claimed run; `None` if it mustn't start after all.
+    register: R,
+    execute: E,
+    /// Claims a job that skips the queue; `false` if it can't start.
+    claim_started: S,
+    crashed: CR,
+}
+
+/// Runs what `claim` hands back, `limit` at a time, preferring jobs sent
+/// on `jobs` since those were asked for by hand. A run whose task panicked
+/// goes to `crashed`, in that run's span. Returns once `jobs` closes and
+/// the last task ends.
+async fn dispatch<N, C, R, E, EF, S, CR, CF>(
+    mut jobs: mpsc::UnboundedReceiver<Job>,
+    limit: Arc<Semaphore>,
+    handlers: Dispatch<N, C, R, E, S, CR>,
+) where
+    N: Fn(&Job),
+    C: FnMut() -> Option<QueuedRun>,
+    R: Fn(&QueuedRun) -> Option<Arc<Stopper>>,
+    E: Fn(QueuedRun, Arc<Stopper>, OwnedSemaphorePermit) -> EF,
     EF: Future<Output = ()> + Send + 'static,
-    C: Fn(QueuedRun, String) -> CF,
+    S: Fn(&Job) -> bool,
+    CR: Fn(QueuedRun, String) -> CF,
     CF: Future<Output = ()>,
 {
+    let Dispatch {
+        noticed,
+        mut claim,
+        register,
+        execute,
+        claim_started,
+        crashed,
+    } = handlers;
     let mut tasks = JoinSet::new();
     let mut started: HashMap<task::Id, QueuedRun> = HashMap::new();
     let finished = async |done: Result<(task::Id, ()), JoinError>,
@@ -590,19 +722,65 @@ where
                 .await;
         }
     };
+    let mut jump: VecDeque<Job> = VecDeque::new();
+    // Claimed, waiting only for a permit: taken from the store when `jobs`
+    // has closed and the queue is being drained.
+    let mut ready: VecDeque<QueuedRun> = VecDeque::new();
+    // Cleared when there's nothing to take, so the permit arm doesn't spin
+    // on an empty queue; set again by a job or a finish.
+    let mut work = true;
+    let mut open = true;
     loop {
-        tokio::select! {
-            job = jobs.recv() => match job {
-                Some(job) => {
-                    let span = run_span(&job.run);
-                    let run = job.run.clone();
-                    let task = tasks.spawn(execute(job).instrument(span));
-                    started.insert(task.id(), run);
+        // Nothing more will arrive: finish what's queued, then stop.
+        if !open && jump.is_empty() && ready.is_empty() && tasks.is_empty() {
+            match claim() {
+                Some(run) => {
+                    ready.push_back(run);
+                    work = true;
                 }
                 None => break,
-            },
+            }
+        }
+        tokio::select! {
+            biased;
             Some(done) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 finished(done, &mut started).await;
+                work = true;
+            }
+            job = jobs.recv(), if open => match job {
+                Some(job) => {
+                    noticed(&job);
+                    // An automatic job is only a nudge: the store holds the
+                    // order, and `claim` takes it from there.
+                    if !job.automatic {
+                        jump.push_back(job);
+                    }
+                    work = true;
+                }
+                None => open = false,
+            },
+            Ok(permit) = Arc::clone(&limit).acquire_owned(), if work => {
+                // A hand start that can't run, or one the registration
+                // refused, leaves the store's queue still worth a look.
+                let mut tried = false;
+                let taken = match jump.pop_front() {
+                    Some(job) => {
+                        tried = true;
+                        claim_started(&job).then_some(job.run)
+                    }
+                    None => ready.pop_front().or_else(&mut claim),
+                };
+                tried |= taken.is_some();
+                if let Some((run, stop)) =
+                    taken.and_then(|run| register(&run).map(|stop| (run, stop)))
+                {
+                    let task =
+                        tasks.spawn(execute(run.clone(), stop, permit).instrument(run_span(&run)));
+                    started.insert(task.id(), run);
+                } else {
+                    drop(permit);
+                    work = tried;
+                }
             }
         }
     }
@@ -706,25 +884,33 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(by_hand(&queued(1))).unwrap();
         // Run 2 is only sent once run 1's crash is handled, and closing the
-        // channel then lets `supervise` return.
+        // channel then lets `dispatch` return.
         let tx = Mutex::new(Some(tx));
         let ran = Arc::new(Mutex::new(Vec::new()));
         let crashes = Mutex::new(Vec::new());
-        supervise(
+        dispatch(
             rx,
-            |job| {
-                let ran = Arc::clone(&ran);
-                async move {
-                    assert!(job.run.id != 1, "boom");
-                    ran.lock().unwrap().push(job.run.id);
-                }
-            },
-            |run, panic| {
-                crashes.lock().unwrap().push((run.id, panic));
-                if let Some(tx) = tx.lock().unwrap().take() {
-                    tx.send(by_hand(&queued(2))).unwrap();
-                }
-                async {}
+            Arc::new(Semaphore::new(1)),
+            Dispatch {
+                noticed: |_: &Job| {},
+                claim: || None,
+                register: |_: &QueuedRun| Some(Arc::new(Stopper::default())),
+                execute: |run: QueuedRun, _stop, permit| {
+                    let ran = Arc::clone(&ran);
+                    async move {
+                        let _permit = permit;
+                        assert!(run.id != 1, "boom");
+                        ran.lock().unwrap().push(run.id);
+                    }
+                },
+                claim_started: |_: &Job| true,
+                crashed: |run: QueuedRun, panic| {
+                    crashes.lock().unwrap().push((run.id, panic));
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        tx.send(by_hand(&queued(2))).unwrap();
+                    }
+                    async {}
+                },
             },
         )
         .await;
@@ -733,6 +919,60 @@ mod tests {
     }
 
     /// `run`, started by hand.
+    /// Runs `dispatch` over `jobs`, taking `pending` as the store's queue,
+    /// and returns the run ids it started in order. `startable` says
+    /// whether a hand-started job may be claimed.
+    async fn dispatched(jobs: Vec<Job>, pending: Vec<QueuedRun>, startable: bool) -> Vec<i64> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        for job in jobs {
+            tx.send(job).unwrap();
+        }
+        drop(tx);
+        let queue = Mutex::new(VecDeque::from(pending));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        dispatch(
+            rx,
+            Arc::new(Semaphore::new(1)),
+            Dispatch {
+                noticed: |_: &Job| {},
+                claim: || queue.lock().unwrap().pop_front(),
+                register: |_: &QueuedRun| Some(Arc::new(Stopper::default())),
+                execute: |run: QueuedRun, _stop, permit| {
+                    let ran = Arc::clone(&ran);
+                    async move {
+                        let _permit = permit;
+                        ran.lock().unwrap().push(run.id);
+                    }
+                },
+                claim_started: |_: &Job| startable,
+                crashed: |_: QueuedRun, _| async {},
+            },
+        )
+        .await;
+        let ran = ran.lock().unwrap();
+        ran.clone()
+    }
+
+    #[tokio::test]
+    async fn the_queue_is_taken_in_order() {
+        let ran = dispatched(vec![], vec![queued(1), queued(2), queued(3)], true).await;
+        assert_eq!(ran, [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn a_hand_started_run_goes_before_the_queue() {
+        let ran = dispatched(vec![by_hand(&queued(9))], vec![queued(1)], true).await;
+        assert_eq!(ran, [9, 1]);
+    }
+
+    /// A hand start that can't be claimed must not strand the store's
+    /// queue: there is a free slot and a run waiting for it.
+    #[tokio::test]
+    async fn a_skipped_hand_start_still_leaves_the_queue_running() {
+        let ran = dispatched(vec![by_hand(&queued(9))], vec![queued(1)], false).await;
+        assert_eq!(ran, [1]);
+    }
+
     fn by_hand(run: &QueuedRun) -> Job {
         Job {
             run: run.clone(),
@@ -897,6 +1137,106 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_newer_head_stops_the_running_review_of_an_older_one() {
         newer_head_stops_older(1, 1).await;
+    }
+
+    /// Stops a running review either by cancelling it or by shutting down,
+    /// and returns its status and whether its worktree survived.
+    async fn stop_running_review(cancel: bool) -> (String, bool) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (base, first, _) = pushed_twice(&dir.path().join("github"));
+        let fake = dir.path().join("fake");
+        let script = hangs_on(&fake, &first);
+        let config = Config::parse(
+            &format!(
+                "[github]\ngit_url = \"{}\"\n\
+                 [runner]\nclaude = \"{}\"\nmax_concurrent = 1\n\
+                 [profile.p]\nrepos = [{{ github = \"org\" }}]\n",
+                dir.path().join("github").display(),
+                script.display()
+            ),
+            Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let key = PrKey {
+            repo: RepoName::new("org", "repo"),
+            number: 7,
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snapshot = sanic_core::pr::PrSnapshot {
+            key: key.clone(),
+            title: "t".into(),
+            body: String::new(),
+            url: key.url(),
+            author: "alice".into(),
+            head_sha: first.clone(),
+            base_sha: base.clone(),
+            is_draft: false,
+            review_requested: true,
+            requested_teams: vec![],
+            reviews: vec![],
+            threads: vec![],
+            files: None,
+            updated_at: None,
+            review_decision: None,
+            merge_state: None,
+            checks: None,
+            in_progress: None,
+        };
+        snapshot.head_sha = first.clone();
+        store.record(&snapshot, "me", "p", &[]).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let run = store
+            .lock()
+            .unwrap()
+            .queue_review(&sanic_core::run::ReviewRequest {
+                key,
+                profile: "p".into(),
+                head_sha: first,
+                base_sha: base,
+                trigger: sanic_core::run::ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap();
+
+        let data = dir.path().join("data");
+        let worker = Arc::new(Worker::new(&data, Arc::clone(&store), &config, "me"));
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        let working = tokio::spawn(Arc::clone(&worker).work(runs_rx));
+        runs.send(by_hand(&run)).unwrap();
+        while !fake.join("started").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        if cancel {
+            store.lock().unwrap().cancel_run(run.id).unwrap();
+            assert!(worker.cancel(run.id), "the run wasn't registered");
+        } else {
+            worker.cancel_all();
+        }
+        drop(runs);
+        tokio::time::timeout(std::time::Duration::from_secs(20), working)
+            .await
+            .expect("the review was not stopped")
+            .unwrap();
+
+        let status = store.lock().unwrap().run(run.id).unwrap().unwrap().status;
+        assert!(store.lock().unwrap().drafts(run.id).unwrap().is_empty());
+        (status, data.join(format!("worktrees/{}", run.id)).exists())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_running_review_records_it_cancelled() {
+        let (status, worktree) = stop_running_review(true).await;
+        assert_eq!(status, "cancelled");
+        assert!(!worktree, "the worktree was left behind");
+    }
+
+    /// The same stop by shutdown instead, so the two can't be confused: a
+    /// shutdown queues the run again, a cancel ends it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_review_stopped_by_shutdown_is_queued_again() {
+        let (status, _) = stop_running_review(false).await;
+        assert_eq!(status, "queued");
     }
 
     /// A held review started by hand twice reaches the worker twice. With a
