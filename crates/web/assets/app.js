@@ -34,6 +34,8 @@
     const rowsOf = page === "index" || page === "queue" ? "[data-row]" : ".draft";
     const all = list.querySelectorAll(rowsOf);
     return Array.from(all).filter(function (row) {
+      // The other tab's rows are hidden, but still its list to come back to.
+      if (page === "index") return !row.closest("details:not([open])");
       return row.offsetParent !== null;
     });
   }
@@ -292,8 +294,7 @@
         const n = lists().length;
         if (page !== "index" || n === 0) return;
         if (popover(document.activeElement)) document.activeElement.blur();
-        focus = (focus + (e.shiftKey ? n - 1 : 1)) % n;
-        draw(true);
+        setTab((focus + (e.shiftKey ? n - 1 : 1)) % n);
         break;
       }
       case "j":
@@ -873,6 +874,46 @@
     } catch (err) {
       // Private windows may refuse; it's only a convenience.
     }
+  }
+  // The index's tab, the list you move in, remembered the same way; the
+  // page's style shows only the list named on <html>, which refreshes keep.
+  const LIST_KEY = "sanic-review.list";
+  function markTabs() {
+    const shown = document.documentElement.dataset.tab;
+    document.querySelectorAll(".tab[data-tab]").forEach(function (tab) {
+      tab.setAttribute("aria-pressed", String(tab.dataset.tab === shown));
+    });
+  }
+  function showTab(i) {
+    const list = lists()[i];
+    if (!list) return;
+    focus = i;
+    document.documentElement.dataset.tab = list.id;
+    markTabs();
+  }
+  function setTab(i) {
+    showTab(i);
+    remember(LIST_KEY, document.documentElement.dataset.tab);
+    draw(true);
+  }
+  if (page === "index") {
+    const saved = remembered(LIST_KEY);
+    const at = lists().findIndex(function (list) {
+      return list.id === saved;
+    });
+    showTab(Math.max(at, 0));
+    document.body.addEventListener("htmx:afterSwap", markTabs);
+    document.addEventListener("click", function (e) {
+      const tab = e.target.closest(".tab[data-tab]");
+      if (!tab) return;
+      const at = lists().findIndex(function (list) {
+        return list.id === tab.dataset.tab;
+      });
+      if (at < 0) return;
+      setTab(at);
+      // A click leaves focus on the page, so Enter opens the selected row.
+      if (e.detail !== 0) tab.blur();
+    });
   }
   // The files view's layout, remembered the same way.
   const LAYOUT_KEY = "sanic-review.layout";

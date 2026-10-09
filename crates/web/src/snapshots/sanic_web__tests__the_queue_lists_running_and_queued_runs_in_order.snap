@@ -102,7 +102,7 @@ expression: "readable(&f, &page.body)"
 <th>
 <kbd>Tab, Shift-Tab</kbd>
 </th>
-<td>next, previous list</td>
+<td>next, previous tab</td>
 </tr>
 <tr>
 <th>

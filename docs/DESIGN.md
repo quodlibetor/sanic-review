@@ -767,7 +767,14 @@ fonttools (run through `uv`, which only this task needs) to
 
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by
-  what they ask of you:
+  what they ask of you. The lists are tabs, one shown at a time: each tab
+  carries its list's count and, when there are any, how many of the
+  filtered rows need you, so a list in the background still says when it
+  wants you. Clicking a tab or `Tab` switches, and the browser remembers
+  the last tab picked (`localStorage`, like the PR page's view); the
+  server renders both lists either way, so the refresh, the filter and
+  every back link are the same on both tabs. Without the script the lists
+  stack. The groups:
   - reviews you owe: **Needs you** (pending drafts, accepted drafts not
     yet posted, every draft rejected with no review of yours on that
     commit, a review you haven't looked at, comments to answer, or a run
@@ -1198,7 +1205,7 @@ fonttools (run through `uv`, which only this task needs) to
   rendering is kept, since pages redraw the same ones often.
 - Opening a PR page updates `views`.
 - **Keys.** The TUI's, where they make sense in a browser: `?` help, `Tab`
-  and Shift-Tab switch list, `j`/`k` or the arrows move, `g`/`G` jump, `r`
+  and Shift-Tab switch tab, `j`/`k` or the arrows move, `g`/`G` jump, `r`
   opens the review-now confirm, `x` archives or unarchives, `X` shows
   archived PRs, `i` opens the ignore editor, `c` the chat commands, `f`
   switches a PR page between its drafts and the files changed, `s` the

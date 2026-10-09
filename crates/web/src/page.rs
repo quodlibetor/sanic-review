@@ -46,7 +46,7 @@ impl Kind {
 /// the TUI has the key.
 const KEYS: &[(&str, &str)] = &[
     ("q", "close this help; otherwise back to the index"),
-    ("Tab, Shift-Tab", "next, previous list"),
+    ("Tab, Shift-Tab", "next, previous tab"),
     ("j/k, Down/Up", "move in the list"),
     ("g/G, Home/End", "first, last row"),
     ("Enter", "open the selected PR"),

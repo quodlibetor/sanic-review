@@ -531,6 +531,80 @@ details.fmore > summary {
   border-bottom-color: var(--accent);
 }
 
+/* With the script the lists are tabs, one shown at a time, and each tab
+   says what its heading did; without it they stack. */
+.tabs {
+  display: none;
+}
+
+.js .tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.25rem;
+  margin-top: 1rem;
+  border-bottom: 2px solid var(--line);
+}
+
+.tab {
+  margin-bottom: -2px;
+  padding: 0 0 0.3rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  outline: none;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab .dim {
+  font-weight: normal;
+  font-size: 13px;
+}
+
+.tab:hover,
+.tab:focus-visible,
+.js:not([data-tab="mine"]) .tab[data-tab="owed"],
+.js[data-tab="mine"] .tab[data-tab="mine"] {
+  color: var(--fg);
+}
+
+.js:not([data-tab="mine"]) .tab[data-tab="owed"],
+.js[data-tab="mine"] .tab[data-tab="mine"] {
+  border-bottom-color: var(--accent);
+}
+
+.js[data-tab="mine"] #owed,
+.js:not([data-tab="mine"]) #mine {
+  display: none;
+}
+
+.js .list {
+  margin-top: 0.5rem;
+}
+
+.js .list > h2 {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.js .list > h2:not(:has(.toggle-archived)) {
+  margin: 0;
+}
+
+/* Still a heading to a screen reader. */
+.js .list > h2 .ttl {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .list > h2 .dim {
   font-weight: normal;
   font-size: 13px;
