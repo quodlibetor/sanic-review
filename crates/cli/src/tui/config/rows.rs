@@ -309,6 +309,7 @@ repos = [{ github = "org" }, { repo = "~/s", paths = ["/v/**"] }]
     fn lists_get_a_row_per_item_or_one_when_empty() {
         let doc = ConfigDoc::parse(Some(CONFIG)).unwrap();
         let teams = Key::new(Table::ReviewRequests, "teams").unwrap();
+        let authors = Key::new(Table::ReviewRequests, "authors").unwrap();
         let titles = Key::new(Table::ReviewRequests, "skip_titles").unwrap();
         let drafts = Key::new(Table::ReviewRequests, "skip_drafts").unwrap();
         assert_eq!(
@@ -316,6 +317,7 @@ repos = [{ github = "org" }, { repo = "~/s", paths = ["/v/**"] }]
             [
                 Row::Item(teams.clone(), 0),
                 Row::Item(teams, 1),
+                Row::List(authors),
                 Row::List(titles.clone()),
                 Row::NewItem(titles),
                 Row::Scalar(drafts),

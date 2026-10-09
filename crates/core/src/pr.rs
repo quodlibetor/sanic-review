@@ -294,6 +294,18 @@ pub fn is_login(login: &str, other: &str) -> bool {
     login.eq_ignore_ascii_case(other)
 }
 
+/// `login` without a trailing `[bot]`, ignoring case: GraphQL names a
+/// GitHub App `dependabot` where REST and the web say `dependabot[bot]`.
+#[must_use]
+pub fn without_bot_suffix(login: &str) -> &str {
+    const SUFFIX: &str = "[bot]";
+    let cut = login.len().saturating_sub(SUFFIX.len());
+    match login.get(cut..) {
+        Some(tail) if tail.eq_ignore_ascii_case(SUFFIX) => &login[..cut],
+        _ => login,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +447,13 @@ mod tests {
             number: 7,
         };
         assert_eq!(key.url(), "https://github.com/org/repo/pull/7");
+    }
+
+    #[test]
+    fn bot_suffixes_come_off_ignoring_case() {
+        assert_eq!(without_bot_suffix("Dependabot[BOT]"), "Dependabot");
+        assert_eq!(without_bot_suffix("renovate"), "renovate");
+        assert_eq!(without_bot_suffix("[bot]"), "");
+        assert_eq!(without_bot_suffix("é[bot]"), "é");
     }
 }

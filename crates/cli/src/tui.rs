@@ -650,14 +650,16 @@ impl Overview {
             .map(|(key, due)| (key.clone(), due.saturating_duration_since(now)))
             .collect();
         let since = window_start(shared.clock.now(), *shared.window.borrow());
-        let owed = store.owed_reviews(&shared.me, since.as_deref())?;
+        let mut owed = store.owed_reviews(&shared.me, since.as_deref())?;
         let skips = shared.skips.borrow();
+        owed.retain(|pr| !skips.unlisted(&pr.profile, &pr.author));
         let skipped = owed
             .iter()
             .filter_map(|pr| {
                 let facts = PrFacts {
                     profile: &pr.profile,
                     title: &pr.title,
+                    author: &pr.author,
                     is_draft: pr.is_draft,
                     archived: pr.archived,
                     head_sha: &pr.head_sha,
@@ -2156,6 +2158,39 @@ mod tests {
         assert!(row.starts_with("│—         skipped: draft "), "{row}");
     }
 
+    /// What `Overview::load` reads, with no skip rules.
+    fn shared(clock: Arc<dyn Clock>, window: watch::Receiver<Option<u32>>) -> Shared {
+        Shared {
+            me: "me".into(),
+            manual_reviews: watch::channel(ManualReviews::default()).1,
+            keys: watch::channel(None).1,
+            guessed_keys: Keys::Emacs,
+            logs: LogLines::default(),
+            due: watch::channel(DueTimes::new()).1,
+            skips: watch::channel(SkipRules::default()).1,
+            window,
+            progress: watch::channel(None).1,
+            paused: watch::channel(None).1,
+            // Nothing here counts, so it's never called.
+            github: Arc::new(
+                sanic_github::Client::new(
+                    "http://127.0.0.1:1",
+                    sanic_github::Token::new("t".into()),
+                )
+                .unwrap(),
+            ),
+            clock,
+            requests: mpsc::unbounded_channel().0,
+            config_path: PathBuf::new(),
+            resolver: Arc::new(NoCheckouts),
+            data_dir: PathBuf::new(),
+            runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
+            chatting: Arc::default(),
+            dashboard: String::new(),
+            opener: Arc::new(Opened::default()),
+        }
+    }
+
     #[test]
     fn prs_quiet_for_longer_than_the_window_are_left_out() {
         struct FixedClock;
@@ -2190,35 +2225,7 @@ mod tests {
             store.record(&snapshot, "me", "p", &[]).unwrap();
         }
         let (window_tx, window) = watch::channel(Some(14));
-        let shared = Shared {
-            me: "me".into(),
-            manual_reviews: watch::channel(ManualReviews::default()).1,
-            keys: watch::channel(None).1,
-            guessed_keys: Keys::Emacs,
-            logs: LogLines::default(),
-            due: watch::channel(DueTimes::new()).1,
-            skips: watch::channel(SkipRules::default()).1,
-            window,
-            progress: watch::channel(None).1,
-            paused: watch::channel(None).1,
-            // Nothing here counts, so it's never called.
-            github: Arc::new(
-                sanic_github::Client::new(
-                    "http://127.0.0.1:1",
-                    sanic_github::Token::new("t".into()),
-                )
-                .unwrap(),
-            ),
-            clock: Arc::new(FixedClock),
-            requests: mpsc::unbounded_channel().0,
-            config_path: PathBuf::new(),
-            resolver: Arc::new(NoCheckouts),
-            data_dir: PathBuf::new(),
-            runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
-            chatting: Arc::default(),
-            dashboard: String::new(),
-            opener: Arc::new(Opened::default()),
-        };
+        let shared = shared(Arc::new(FixedClock), window);
         let owed = |shared: &Shared| -> Vec<u32> {
             let overview = Overview::load(&store, shared).unwrap();
             overview.owed.iter().map(|pr| pr.key.number).collect()
@@ -2238,6 +2245,71 @@ mod tests {
         assert_eq!(keys(&shared), Keys::Vi);
         keys_tx.send_replace(Some(Keys::Emacs));
         assert_eq!(keys(&shared), Keys::Emacs);
+    }
+
+    #[test]
+    fn prs_by_skipped_authors_are_left_off_the_reviews_you_owe() {
+        let mut store = Store::open_in_memory().unwrap();
+        for (number, author) in [(1, "dependabot"), (2, "alice")] {
+            let snapshot = sanic_core::pr::PrSnapshot {
+                key: pr("org/repo", number),
+                title: "t".into(),
+                body: String::new(),
+                url: String::new(),
+                author: author.into(),
+                head_sha: "h".into(),
+                base_sha: "b".into(),
+                is_draft: false,
+                review_requested: true,
+                requested_teams: vec![],
+                reviews: vec![],
+                threads: vec![],
+                files: None,
+                updated_at: None,
+                review_decision: None,
+                merge_state: None,
+                checks: None,
+                in_progress: None,
+            };
+            store.record(&snapshot, "me", "p", &[]).unwrap();
+        }
+        let request = store.review_request(&pr("org/repo", 1)).unwrap().unwrap();
+        let run = store.queue_review(&request).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        let result = sanic_core::run::ReviewResult {
+            summary: "s".into(),
+            summary_note: None,
+            verdict: sanic_core::run::Verdict::Comment,
+            comments: vec![],
+            session_id: None,
+            transcript_path: "t".into(),
+            resumed_from: None,
+        };
+        store.finish_review(run.id, &result).unwrap();
+        let config = sanic_core::config::Config::parse(
+            "[review_requests]\nauthors = [\"*\", \"!dependabot\"]\n\
+             [profile.p]\nrepos = [{ github = \"org\" }]\n",
+            std::path::Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let (skips_tx, skips) = watch::channel(config.skip_rules());
+        let shared = Shared {
+            skips,
+            ..shared(
+                Arc::new(sanic_core::clock::SystemClock),
+                watch::channel(None).1,
+            )
+        };
+        let owed = || -> (Vec<u32>, u32) {
+            let overview = Overview::load(&store, &shared).unwrap();
+            let pending = overview.owed.iter().map(|pr| pr.pending_drafts).sum();
+            let owed = overview.owed.iter().map(|pr| pr.key.number).collect();
+            (owed, pending)
+        };
+        assert_eq!(owed(), (vec![2], 0));
+        skips_tx.send_replace(SkipRules::default());
+        assert_eq!(owed(), (vec![1, 2], 1));
     }
 
     #[test]

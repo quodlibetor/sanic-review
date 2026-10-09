@@ -253,6 +253,7 @@ manual_reviews = false            # run queued reviews by themselves; on unless 
 
 [review_requests]
 skip_titles = ["build(deps)*"]    # never auto-review these
+authors = ["*", "!dependabot"]    # whose PRs you owe a review; "*" unless set
 
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]

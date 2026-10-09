@@ -1198,6 +1198,55 @@ impl Store {
         rows.into_iter().map(queued_run).collect()
     }
 
+    /// Supersedes every review queued but not started of a PR `pick`
+    /// picks by its profile and author as last polled, as archiving does.
+    /// Returns their PRs.
+    pub fn supersede_queued_reviews(
+        &mut self,
+        pick: impl Fn(&str, &str) -> bool,
+    ) -> Result<Vec<PrKey>> {
+        let tx = self.conn.transaction()?;
+        let queued: Vec<(i64, String, u32, String, String)> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT r.id, r.repo, r.number, p.profile, p.author
+                 FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+                 WHERE r.status = 'queued' AND r.kind = ?1",
+            )?;
+            stmt.query_map([REVIEW], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        let mut keys = Vec::new();
+        for (id, repo, number, profile, author) in queued {
+            if !pick(&profile, &author) {
+                continue;
+            }
+            tx.execute(
+                &format!(
+                    "UPDATE runs SET status = 'superseded', finished_at = {NOW}, queue_pos = NULL
+                     WHERE id = ?1 AND status = 'queued'"
+                ),
+                [id],
+            )?;
+            keys.push(PrKey {
+                repo: RepoName::parse(&repo)?,
+                number,
+            });
+        }
+        tx.commit()
+            .wrap_err("superseding reviews of skipped authors")?;
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
     /// How many [`Store::queued_reviews`] there are of PRs whose profile,
     /// as each was queued, is `counted`.
     pub fn queued_review_count(&self, counted: impl Fn(&str) -> bool) -> Result<u32> {
@@ -2036,6 +2085,7 @@ mod tests {
     use sanic_core::{
         pr::PrSnapshot,
         run::{Confidence, DraftComment, InlineComment, Severity, Side, Verdict},
+        skip::SkipRules,
     };
 
     use super::*;
@@ -2286,7 +2336,12 @@ mod tests {
                 running: 0,
             }
         );
-        assert_eq!(store.listed_pending_drafts("me", None, false).unwrap(), 2);
+        assert_eq!(
+            store
+                .listed_pending_drafts("me", None, false, &SkipRules::default())
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -3124,6 +3179,64 @@ mod tests {
         };
         assert!(store.queued_reviews().unwrap().is_empty());
         assert_eq!(store.queued_review_count(|_| true).unwrap(), 0);
+    }
+
+    struct NoCheckouts;
+
+    impl sanic_core::config::CheckoutResolver for NoCheckouts {
+        fn resolve(
+            &self,
+            path: &std::path::Path,
+            _: Option<&str>,
+        ) -> Result<(sanic_core::config::Vcs, RepoName)> {
+            color_eyre::eyre::bail!("unexpected checkout {}", path.display())
+        }
+    }
+
+    #[test]
+    fn queued_reviews_of_skipped_authors_are_superseded() {
+        let mut store = store();
+        let kept = store.queue_review(&request("h1")).unwrap().unwrap();
+        let mut by = |number: u32, author: &str, profile: &str| {
+            let mut snap = snapshot();
+            snap.key.number = number;
+            snap.author = author.into();
+            snap.threads.clear();
+            store.record(&snap, "me", profile, &[]).unwrap();
+            let mut req = request("h1");
+            req.key = snap.key;
+            store.queue_review(&req).unwrap().unwrap()
+        };
+        let dependabot = by(11, "dependabot", "default");
+        let running = by(12, "dependabot", "default");
+        let renovate = by(13, "renovate", "bots");
+        let elsewhere = by(14, "renovate", "default");
+        store.claim_run(running.id).unwrap();
+        let config = sanic_core::config::Config::parse(
+            r#"
+            [review_requests]
+            authors = ["*", "!dependabot"]
+            [profile.default]
+            repos = [{ github = "org" }]
+            [profile.bots]
+            authors = ["!renovate"]
+            repos = [{ github = "bots" }]
+            "#,
+            std::path::Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+
+        let rules = config.skip_rules();
+        let unlisted = |profile: &str, author: &str| rules.unlisted(profile, author);
+        let superseded = store.supersede_queued_reviews(unlisted).unwrap();
+        assert_eq!(superseded, [dependabot.request.key, renovate.request.key]);
+        assert_eq!(status(&store, dependabot.id), "superseded");
+        assert_eq!(status(&store, renovate.id), "superseded");
+        // Started runs finish as they are.
+        assert_eq!(status(&store, running.id), "running");
+        assert_eq!(queued_ids(&store), [kept.id, elsewhere.id]);
+        assert!(store.supersede_queued_reviews(unlisted).unwrap().is_empty());
     }
 
     #[test]

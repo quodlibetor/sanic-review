@@ -260,6 +260,8 @@ struct Fixture {
     github: MockServer,
     /// When the scheduler would queue each debounced review.
     due: watch::Sender<HashMap<PrKey, Instant>>,
+    /// The skip rules, as `serve` publishes them on a reload.
+    skips: watch::Sender<SkipRules>,
     /// The run of PR 7 with drafts: summary, an inline comment and an
     /// unanchored one, in that order.
     run: i64,
@@ -383,6 +385,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     *serve.manual.lock().unwrap() = Some(manual);
     let clock = Arc::new(FixedClock::default());
     let mirror = Arc::new(FakeMirror::default());
+    let (skips, skips_rx) = watch::channel(skip_rules());
     let dashboard = Dashboard::new(Context {
         me: "me".into(),
         manual_reviews: manual_rx,
@@ -393,7 +396,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         control: Arc::clone(&serve) as Arc<dyn Control>,
         sources: Arc::clone(&mirror) as Arc<dyn Sources>,
         due: due_rx,
-        skips: watch::channel(skip_rules()).1,
+        skips: skips_rx,
         window: window_rx,
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
     })
@@ -404,6 +407,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
         mirror,
         github,
         due,
+        skips,
         run,
         drafts: [ids[0], ids[1], ids[2]],
         data,
@@ -1898,6 +1902,61 @@ async fn ignore_preview(f: &Fixture, pattern: &str, profile: &str) -> String {
     f.get(&format!("/pr/org/repo/8/ignore/preview?{query}"))
         .await
         .body
+}
+
+#[tokio::test]
+async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
+    let f = fixture(false).await;
+    let text = "[profile.default]\nrepos = [{ github = \"org\" }]\nauthors = [\"!Alice\"]\n\
+                [profile.ring]\nrepos = [{ github = \"sec\" }]\n";
+    let config = Config::parse(text, std::path::Path::new("/"), &NoCheckouts).unwrap();
+    let row = r#"data-key="org/repo#7""#;
+    let index = f.get("/").await.body;
+    assert!(index.contains(row), "{index}");
+    assert!(
+        index.contains(r#"<b class="cnt">3</b> pending drafts"#),
+        "{index}"
+    );
+
+    f.skips.send_replace(config.skip_rules());
+    let index = f.get("/").await.body;
+    assert!(!index.contains(row), "{index}");
+    assert!(
+        index.contains(r#"<b class="cnt">0</b> pending drafts"#),
+        "{index}"
+    );
+    let page = f.get("/pr/org/repo/7").await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("skipped: author"), "{}", page.body);
+    assert!(
+        page.body
+            .contains(r#"href="/pr/org/repo/7/review-now" data-dialog>Review now"#),
+        "{}",
+        page.body
+    );
+    assert!(!page.body.contains("Ignore by title"), "{}", page.body);
+    assert!(!page.body.contains("data-ignore="), "{}", page.body);
+    let ignore = f.get("/pr/org/repo/7/ignore").await;
+    assert_eq!(ignore.status, StatusCode::CONFLICT, "{}", ignore.body);
+    let save = f
+        .post(
+            "/pr/org/repo/7/ignore",
+            &[("pattern", "Add*"), ("profile", "")],
+        )
+        .await;
+    assert_eq!(save.status, StatusCode::CONFLICT, "{}", save.body);
+    assert!(f.serve.skipped.lock().unwrap().is_empty());
+    let ask = f.get("/pr/org/repo/7/review-now").await;
+    assert_eq!(ask.status, StatusCode::OK, "{}", ask.body);
+    let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
+
+    f.skips.send_replace(skip_rules());
+    let index = f.get("/").await.body;
+    assert!(index.contains(row), "{index}");
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(page.contains("Ignore by title"), "{page}");
 }
 
 /// Exactly what Firefox sends for the dashboard's own "Review now" form

@@ -2,9 +2,10 @@
 //! editor can list them all and show a default in place of a missing one.
 
 use sanic_core::config::{
-    AUTO_MODEL, DEFAULT_API_URL, DEFAULT_CLAUDE, DEFAULT_GIT_URL, DEFAULT_MANUAL_REVIEWS,
-    DEFAULT_MAX_RUNS, DEFAULT_MIN_NOTIFICATION_POLL, DEFAULT_QUIET, DEFAULT_RECONCILE,
-    DEFAULT_RUN_TIMEOUT, DEFAULT_SKIP_DRAFTS, DEFAULT_TEAMS, DEFAULT_UPDATED_WITHIN_DAYS,
+    AUTO_MODEL, DEFAULT_API_URL, DEFAULT_AUTHORS, DEFAULT_CLAUDE, DEFAULT_GIT_URL,
+    DEFAULT_MANUAL_REVIEWS, DEFAULT_MAX_RUNS, DEFAULT_MIN_NOTIFICATION_POLL, DEFAULT_QUIET,
+    DEFAULT_RECONCILE, DEFAULT_RUN_TIMEOUT, DEFAULT_SKIP_DRAFTS, DEFAULT_TEAMS,
+    DEFAULT_UPDATED_WITHIN_DAYS,
 };
 
 use super::Table;
@@ -121,6 +122,12 @@ pub const REVIEW_REQUESTS: &[Field] = &[
         "which of your teams' requests count: the last glob that matches wins, `!` excludes",
     ),
     Field::new(
+        "authors",
+        Kind::List,
+        Fallback::Value(|| format!("{DEFAULT_AUTHORS:?}")),
+        "whose PRs count: the last glob that matches wins, `!` excludes",
+    ),
+    Field::new(
         "skip_titles",
         Kind::List,
         Fallback::Nothing,
@@ -215,6 +222,12 @@ pub const PROFILE: &[Field] = &[
         Kind::List,
         Fallback::Nothing,
         "added to `review_requests.skip_titles` for this profile's PRs",
+    ),
+    Field::new(
+        "authors",
+        Kind::List,
+        Fallback::Nothing,
+        "checked after `review_requests.authors` for this profile's PRs",
     ),
     Field::new(
         "skip_drafts",

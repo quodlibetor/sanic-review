@@ -9,6 +9,7 @@ use sanic_core::{
     repo::RepoName,
     reviewers::{ReviewRecord, Reviewer, SeenHead, reviewers},
     run::RunKind,
+    skip::SkipRules,
     state::{Awaiting, Merge, PrState, awaiting},
 };
 
@@ -311,23 +312,38 @@ impl Store {
 
     /// The pending drafts of the PRs [`Store::owed_reviews`] and
     /// [`Store::my_prs`] list with `since`, each counted as they count it,
-    /// leaving out archived ones unless `with_archived`: what the lists
-    /// show adds up to this.
+    /// leaving out archived ones unless `with_archived`, and owed ones
+    /// `skips` leaves unlisted: what the lists show adds up to this.
     pub fn listed_pending_drafts(
         &self,
         me: &str,
         since: Option<&str>,
         with_archived: bool,
+        skips: &SkipRules,
     ) -> Result<u32> {
         // Every page's top bar reads it, so it's cached as the lists are.
-        Ok(self
-            .conn
-            .prepare_cached(&format!(
-                "SELECT coalesce(sum({pending}), 0) FROM prs p
-                 WHERE (({OWED}) OR ({MINE})) AND (?3 OR NOT p.archived)",
-                pending = pending_drafts()
-            ))?
-            .query_row(params![me, since, with_archived], |row| row.get(0))?)
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT profile, author, n FROM (
+                 SELECT p.profile, p.author, {pending} AS n FROM prs p
+                 WHERE (({OWED}) OR ({MINE})) AND (?3 OR NOT p.archived))
+             WHERE n > 0",
+            pending = pending_drafts()
+        ))?;
+        let rows = stmt.query_map(params![me, since, with_archived], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+            ))
+        })?;
+        let mut total = 0;
+        for row in rows {
+            let (profile, author, n) = row?;
+            if is_login(&author, me) || !skips.unlisted(&profile, &author) {
+                total += n;
+            }
+        }
+        Ok(total)
     }
 
     /// What the index shows of `key` beyond its list entry, for `me`.
@@ -713,7 +729,9 @@ mod tests {
         let counts = |store: &Store| {
             let owed = store.owed_reviews("me", None).unwrap()[0].pending_drafts;
             let mine = store.my_prs("me", None).unwrap()[0].pending_drafts;
-            let total = store.listed_pending_drafts("me", None, false).unwrap();
+            let total = store
+                .listed_pending_drafts("me", None, false, &SkipRules::default())
+                .unwrap();
             (owed, mine, total)
         };
 
@@ -821,7 +839,9 @@ mod tests {
             store.finish_review(run.id, &commented(&["A"])).unwrap();
         }
         let total = |store: &Store, since: Option<&str>, archived: bool| {
-            store.listed_pending_drafts("me", since, archived).unwrap()
+            store
+                .listed_pending_drafts("me", since, archived, &SkipRules::default())
+                .unwrap()
         };
         assert_eq!(total(&store, None, false), 4);
         // What the recency window leaves out of the lists.
@@ -835,6 +855,67 @@ mod tests {
         store.mark_closed(&owed.key).unwrap();
         assert!(store.owed_reviews("me", None).unwrap().is_empty());
         assert_eq!(total(&store, None, false), 2);
+    }
+
+    struct NoCheckouts;
+
+    impl sanic_core::config::CheckoutResolver for NoCheckouts {
+        fn resolve(
+            &self,
+            path: &std::path::Path,
+            _: Option<&str>,
+        ) -> Result<(sanic_core::config::Vcs, RepoName)> {
+            color_eyre::eyre::bail!("unexpected checkout {}", path.display())
+        }
+    }
+
+    #[test]
+    fn the_total_leaves_out_prs_by_skipped_authors() {
+        let mut store = Store::open_in_memory().unwrap();
+        let prs = [
+            (2, "dependabot", "default"),
+            (3, "me", "default"),
+            (4, "renovate", "bots"),
+            (5, "renovate", "default"),
+        ];
+        for (number, author, profile) in prs {
+            let mut snap = snapshot(number, author);
+            snap.review_requested = true;
+            store.record(&snap, "me", profile, &[]).unwrap();
+            let run = store.queue_review(&request(&snap)).unwrap().unwrap();
+            store.claim_run(run.id).unwrap();
+            store.finish_review(run.id, &commented(&["A"])).unwrap();
+        }
+        let config = sanic_core::config::Config::parse(
+            r#"
+            [review_requests]
+            authors = ["*", "!dependabot", "!Me"]
+            [profile.default]
+            repos = [{ github = "org" }]
+            [profile.bots]
+            authors = ["!renovate"]
+            repos = [{ github = "bots" }]
+            "#,
+            std::path::Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let total = |skips: &SkipRules| {
+            store
+                .listed_pending_drafts("me", None, false, skips)
+                .unwrap()
+        };
+        assert_eq!(total(&SkipRules::default()), 8);
+        // Your own PR is counted even when `authors` excludes you.
+        assert_eq!(total(&config.skip_rules()), 4);
+        // The owed list itself still has them, for their pages.
+        let owed: Vec<u32> = store
+            .owed_reviews("me", None)
+            .unwrap()
+            .iter()
+            .map(|pr| pr.key.number)
+            .collect();
+        assert_eq!(owed, [2, 4, 5]);
     }
 
     #[test]

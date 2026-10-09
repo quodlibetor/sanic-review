@@ -21,6 +21,7 @@ use sanic_core::{
     manual::ManualReviews,
     pr::PrKey,
     run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
+    skip::SkipRules,
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
 use sanic_store::Store;
@@ -147,6 +148,23 @@ impl Settings {
     }
 }
 
+/// Supersedes the queued reviews of PRs `skips` leaves unlisted, which are
+/// never reviewed automatically; with `was`, only of those it listed.
+/// Failing is logged, not fatal.
+pub fn supersede_unlisted(store: &mut Store, skips: &SkipRules, was: Option<&SkipRules>) {
+    let newly = |profile: &str, author: &str| {
+        skips.unlisted(profile, author) && !was.is_some_and(|was| was.unlisted(profile, author))
+    };
+    match store.supersede_queued_reviews(newly) {
+        Ok(keys) => {
+            for key in keys {
+                info!(url = %key.url(), "queued review superseded: `authors` excludes its author");
+            }
+        }
+        Err(err) => warn!("superseding queued reviews of skipped authors failed: {err:?}"),
+    }
+}
+
 impl Worker {
     pub fn new(data_dir: &Path, store: Arc<Mutex<Store>>, config: &Config, me: &str) -> Self {
         Self {
@@ -195,6 +213,13 @@ impl Worker {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Supersedes the queued reviews of PRs a reload took off the reviews
+    /// you owe: unlisted by `skips` but listed by `was`. A review started by
+    /// hand on a PR that was already unlisted is left to run.
+    pub fn supersede_newly_unlisted(&self, was: &SkipRules, skips: &SkipRules) {
+        supersede_unlisted(&mut self.store(), skips, Some(was));
     }
 
     /// Applies a reloaded config to runs that start from now on. Lowering
@@ -1096,6 +1121,34 @@ mod tests {
             worker.run_settings("new").unwrap().reference_dirs,
             [PathBuf::from("/refs")]
         );
+    }
+
+    #[tokio::test]
+    async fn a_reload_supersedes_queued_reviews_of_skipped_authors() {
+        let (store, run) = store_with_queued_review();
+        let store = Arc::new(Mutex::new(store));
+        let worker = Worker::new(
+            Path::new("/data"),
+            Arc::clone(&store),
+            &config(1, "p"),
+            "me",
+        );
+        let record = |store: &Mutex<Store>| store.lock().unwrap().run(run.id).unwrap().unwrap();
+
+        let text = "[review_requests]\nauthors = [\"*\", \"!Alice\"]\n\
+                    [profile.p]\nrepos = [{ github = \"org\" }]\n";
+        let skipping = Config::parse(text, Path::new("/"), &NoCheckouts)
+            .unwrap()
+            .skip_rules();
+        let listing = config(1, "p").skip_rules();
+        worker.supersede_newly_unlisted(&listing, &listing);
+        assert_eq!(record(&store).status, "queued");
+        // Already unlisted, as a review started by hand from its page is.
+        worker.supersede_newly_unlisted(&skipping, &skipping);
+        assert_eq!(record(&store).status, "queued");
+        worker.supersede_newly_unlisted(&listing, &skipping);
+        assert_eq!(record(&store).status, "superseded");
+        assert!(store.lock().unwrap().queued_reviews().unwrap().is_empty());
     }
 
     /// Runs git isolated from the user's config, returning trimmed stdout.

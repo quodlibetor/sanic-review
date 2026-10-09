@@ -175,6 +175,10 @@ fn skip_words(skip: &Skip) -> Markup {
     html! {
         @match skip {
             Skip::Archived => "archived by you: not reviewed automatically",
+            Skip::Author { login, .. } => {
+                "not listed or reviewed automatically: " code { "authors" }
+                " excludes " code { (login) }
+            }
             Skip::Draft => "not reviewed automatically: it's a draft PR",
             Skip::Reviewed { .. } => {
                 "not reviewed automatically: someone reviewed the current head (see reviewed by)"

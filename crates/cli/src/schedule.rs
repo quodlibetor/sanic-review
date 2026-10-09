@@ -295,6 +295,7 @@ fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Optio
         rules.decide(&PrFacts {
             profile: &pr.profile,
             title: &pr.title,
+            author: &pr.author,
             is_draft: pr.is_draft,
             archived: pr.archived,
             head_sha: &pr.head_sha,
@@ -549,6 +550,42 @@ mod tests {
         assert!(runs.try_recv().is_err());
 
         skips_tx.send_replace(skipping("other*"));
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        let run = runs.recv().await.unwrap();
+        assert_eq!(run.request.head_sha, "h2");
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prs_by_skipped_authors_are_not_queued() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let config = sanic_core::config::Config::parse(
+            "[review_requests]\nauthors = [\"*\", \"!Alice\"]\n\
+             [profile.default]\nrepos = [{ github = \"org\" }]\n",
+            std::path::Path::new("/"),
+            &NoCheckouts,
+        )
+        .unwrap();
+        let (skips_tx, skips) = watch::channel(config.skip_rules());
+        let task = tokio::spawn(schedule(
+            rx,
+            store(),
+            runs_tx,
+            due_tx,
+            skips,
+            watch::channel(ManualReviews::default()).1,
+            "me".into(),
+        ));
+
+        // The stored author is "alice".
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(runs.try_recv().is_err());
+
+        skips_tx.send_replace(SkipRules::default());
         tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
         let run = runs.recv().await.unwrap();
         assert_eq!(run.request.head_sha, "h2");

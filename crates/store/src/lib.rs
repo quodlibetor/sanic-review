@@ -80,6 +80,7 @@ pub struct Store {
 pub struct PrSummary {
     pub profile: String,
     pub title: String,
+    pub author: String,
     pub is_draft: bool,
     pub archived: bool,
     pub head_sha: String,
@@ -310,13 +311,14 @@ impl Store {
         let Some(mut summary) = self
             .conn
             .query_row(
-                "SELECT profile, title, is_draft, archived, head_sha FROM prs
+                "SELECT profile, title, is_draft, archived, head_sha, author FROM prs
                  WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
                     Ok(PrSummary {
                         profile: row.get(0)?,
                         title: row.get(1)?,
+                        author: row.get(5)?,
                         is_draft: row.get(2)?,
                         archived: row.get(3)?,
                         head_sha: row.get(4)?,
@@ -828,6 +830,7 @@ mod tests {
             Some(PrSummary {
                 profile: "other".into(),
                 title: "build(deps): bump".into(),
+                author: "alice".into(),
                 is_draft: false,
                 archived: false,
                 head_sha: "h1".into(),

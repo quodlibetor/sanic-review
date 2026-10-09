@@ -36,6 +36,9 @@ use crate::{
 /// What the index shows, read from the store and `serve`'s shared state.
 pub struct Overview {
     pub owed: Vec<OwedReview>,
+    /// Owed reviews by an author `authors` excludes: left off the list, but
+    /// their pages still work.
+    pub unlisted: Vec<OwedReview>,
     pub mine: Vec<MyPr>,
     /// How long until each debounced review is queued.
     pub waiting: HashMap<PrKey, Duration>,
@@ -73,13 +76,15 @@ impl Overview {
         let since = since(app);
         let store = app.store();
         let owed = store.owed_reviews(&app.me, since.as_deref())?;
-        let skipped = {
+        let (skipped, (owed, unlisted)) = {
             let skips = app.skips.borrow();
-            owed.iter()
+            let skipped = owed
+                .iter()
                 .filter_map(|pr| {
                     let facts = PrFacts {
                         profile: &pr.profile,
                         title: &pr.title,
+                        author: &pr.author,
                         is_draft: pr.is_draft,
                         archived: pr.archived,
                         head_sha: &pr.head_sha,
@@ -88,13 +93,18 @@ impl Overview {
                     };
                     Some((pr.key.clone(), skips.decide(&facts)?))
                 })
-                .collect()
+                .collect();
+            let lists = owed
+                .into_iter()
+                .partition(|pr| !skips.unlisted(&pr.profile, &pr.author));
+            (skipped, lists)
         };
         Ok(Self {
             skipped,
             mine: store.my_prs(&app.me, since.as_deref())?,
             unseen: store.unseen()?,
             owed,
+            unlisted,
             waiting,
             facts: HashMap::new(),
             hidden: Hidden::default(),
@@ -116,6 +126,19 @@ impl Overview {
             mine: store.hidden(List::Mine, days)?,
         };
         Ok(())
+    }
+
+    /// Whether `key` is on the reviews-you-owe list.
+    pub fn is_listed(&self, key: &PrKey) -> bool {
+        self.owed.iter().any(|pr| &pr.key == key)
+    }
+
+    /// The owed review of `key`, listed or not.
+    pub fn owed_review(&self, key: &PrKey) -> Option<&OwedReview> {
+        self.owed
+            .iter()
+            .chain(&self.unlisted)
+            .find(|pr| &pr.key == key)
     }
 
     fn decided(&self, key: &PrKey) -> Option<&Decided> {
@@ -143,9 +166,14 @@ pub(crate) fn since(app: &App) -> Option<String> {
     window_start(app.clock.now(), app.window.borrow().days())
 }
 
-/// Just the reviews you owe, as [`Overview::load`] reads them.
-pub fn owed_reviews(app: &App) -> Result<Vec<OwedReview>> {
-    app.store().owed_reviews(&app.me, since(app).as_deref())
+/// Just the reviews you owe, listed and unlisted, as [`Overview::load`]
+/// reads them.
+pub fn owed_reviews(app: &App) -> Result<(Vec<OwedReview>, Vec<OwedReview>)> {
+    let owed = app.store().owed_reviews(&app.me, since(app).as_deref())?;
+    let skips = app.skips.borrow();
+    Ok(owed
+        .into_iter()
+        .partition(|pr| !skips.unlisted(&pr.profile, &pr.author)))
 }
 
 /// An owed review's status, as the TUI's status column words it, and the

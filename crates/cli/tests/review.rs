@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use sanic_core::{pr::PrKey, repo::RepoName};
+use sanic_core::{pr::PrKey, repo::RepoName, skip::SkipRules};
 use sanic_store::Store;
 use serde_json::json;
 use tempfile::TempDir;
@@ -321,7 +321,12 @@ async fn serve_drafts_a_requested_review() {
     }
 
     let store = Store::open(&w.data.join("state.db")).unwrap();
-    assert_eq!(store.listed_pending_drafts("me", None, false).unwrap(), 3);
+    assert_eq!(
+        store
+            .listed_pending_drafts("me", None, false, &SkipRules::default())
+            .unwrap(),
+        3
+    );
     let drafts = store.drafts(1).unwrap();
     assert_eq!(drafts[0].kind, "summary");
     assert!(!drafts[1].unanchored);
@@ -349,7 +354,12 @@ async fn a_request_debounced_across_a_restart_is_still_reviewed() {
         number: 7,
     };
     assert_eq!(store.review_runs(&key).unwrap().len(), 1);
-    assert_eq!(store.listed_pending_drafts("me", None, false).unwrap(), 3);
+    assert_eq!(
+        store
+            .listed_pending_drafts("me", None, false, &SkipRules::default())
+            .unwrap(),
+        3
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -565,6 +575,11 @@ async fn a_relative_data_dir_still_reviews() {
         "{line}"
     );
     let store = Store::open(&w.data.join("state.db")).unwrap();
-    assert_eq!(store.listed_pending_drafts("me", None, false).unwrap(), 3);
+    assert_eq!(
+        store
+            .listed_pending_drafts("me", None, false, &SkipRules::default())
+            .unwrap(),
+        3
+    );
     assert!(!w.data.join("worktrees/1").exists());
 }

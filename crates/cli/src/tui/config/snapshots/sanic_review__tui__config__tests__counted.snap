@@ -3,13 +3,13 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # skills = []                                                      (default) │"
-"│ # the review model for this profile's PRs                                    │"
 "│ # model = "auto"                                         (from runner.model) │"
 "│ # overrides `runner.manual_reviews` for this profile's PRs                   │"
 "│ # manual_reviews = true                         (from runner.manual_reviews) │"
 "│ # added to `review_requests.skip_titles` for this profile's PRs              │"
 "│ # skip_titles = []                                                 (default) │"
+"│ # checked after `review_requests.authors` for this profile's PRs             │"
+"│ # authors = []                                                     (default) │"
 "│ # overrides `review_requests.skip_drafts` for this profile's PRs             │"
 "│ # skip_drafts = true                      (from review_requests.skip_drafts) │"
 "│ # draft fixes for comments on your own PRs, in a workspace of their checkout │"

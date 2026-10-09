@@ -173,6 +173,7 @@ Each profile lists the targets it applies to in `repos`. An entry is one of:
 
 [review_requests]
 teams = ["*", "!sanic-speedsters"]     # which of your teams' requests count
+authors = ["*", "!dependabot"]         # whose PRs count; the rest aren't listed
 skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # skip_drafts = true                   # never auto-review draft PRs
 
@@ -192,6 +193,7 @@ instructions = ["~/.config/sanic-review/instructions/general.md"]
 skills = []                            # skill dirs made available to the agent
 model = "claude-sonnet-5"
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
+# authors = ["!renovate"]              # checked after review_requests.authors
 # skip_drafts = false                  # overrides review_requests.skip_drafts
 # manual_reviews = false               # overrides runner.manual_reviews
 repos = [{ github = "my-org" }]
@@ -308,9 +310,9 @@ against stored state, never from notification payloads.
   review requests for reviews you owe, and your own PRs, kept to watched
   orgs and repos. The watched orgs and repos are split across as many
   searches as it takes to fit GitHub's longest query, and their counts
-  added up. A count can't apply the team filter or path globs, and
-  it leaves out PRs you've reviewed whose request has cleared. It's kept
-  with the window it was counted under.
+  added up. A count can't apply the team filter, path globs or
+  `authors`, and it leaves out PRs you've reviewed whose request has
+  cleared. It's kept with the window it was counted under.
 - **Newest items only.** PR snapshots fetch the newest reviews, threads and
   comments per connection, and log a warning when older ones were cut off.
   A new reply in an old thread that falls outside the newest threads is
@@ -373,6 +375,16 @@ Rules:
   reloaded `quiet_secs` applies from the next trigger on.
 - **Skips.** These PRs are never reviewed automatically:
   - archived ones (see Archive);
+  - ones whose author `authors` excludes. It works as `teams` does: globs,
+    the last pattern that matches decides, a leading `!` excludes, and an
+    author no pattern matches is excluded. `[review_requests]`'s are
+    checked first, unset `["*"]`, then the PR's profile's, so a profile
+    can exclude more or let someone back in. Case is ignored, and so is a
+    login's trailing `[bot]`: GraphQL names an app `dependabot` where
+    GitHub's pages say `dependabot[bot]`, and `dependabot` matches both. A
+    pattern that can't match a login, with a `/` (`app/dependabot`) or
+    ending in `[bot]` (a character class in a glob), is refused when the
+    config loads;
   - drafts, while `skip_drafts` is on (the default; a profile's own
     `skip_drafts` overrides `[review_requests]`);
   - ones already reviewed: someone, you included, left a submitted review
@@ -389,7 +401,21 @@ Rules:
   count. A skipped review is logged on the PR, e.g. "review skipped: title
   matches `build(deps)*`" or "review skipped: already reviewed by alice at
   0123abcd". When several reasons apply, the first in the list above wins.
-  The PR is still tracked and shown everywhere.
+  The PR is still tracked and shown everywhere, except that a PR by an
+  author `authors` excludes is left off the reviews you owe, in the TUI and on
+  the dashboard, lists and counts alike. It's still polled, so its
+  dashboard page works by URL, says `skipped: author`, and offers Review
+  now, but not ignore by title. That holds even while it has drafts
+  waiting on you: they stay on its page. Like archiving, a config reload
+  that makes `authors` exclude a PR's author supersedes every review of it
+  that's queued but not started, a hand-started one included; a review
+  started from its page once it's unlisted is left to run, and a running
+  one finishes. `serve`'s startup supersedes every review of an unlisted
+  PR that a previous process left queued or running, a hand-started one
+  included: runs don't record who started them. Letting the author back
+  in lists the PR again at once, and the next trigger reviews it.
+  There's no pattern for every bot: GitHub gives app logins without
+  `[bot]`, so a glob can't tell them from people's.
 - **Archive.** Archiving a PR is yours alone to set and clear: new pushes
   and comments don't clear it. An archived PR is silent: it gets no
   automatic runs of any kind, and archiving supersedes every run of it
@@ -1286,7 +1312,9 @@ fonttools (run through `uv`, which only this task needs) to
     is requested, or you've left one in any state. Submitting a review
     clears GitHub's request and a push can dismiss the review, so a PR stays
     here through both. The push and ready-for-review triggers use the same
-    rule (`PrSnapshot::is_reviewer`). Each row has its PR state (below),
+    rule (`PrSnapshot::is_reviewer`). PRs by an author `authors` excludes
+    aren't listed (see Skips), so `r` can't reach them; their dashboard
+    page or `sanic-review review` can. Each row has its PR state (below),
     then the latest run's status (queued, held by manual reviews,
     running, drafted, no update, failed, crashed) and the pending draft
     count. A review still waiting

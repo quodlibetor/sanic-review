@@ -59,10 +59,16 @@ fn preview_list(pattern: &str, profile: Option<&str>, owed: &[OwedReview]) -> Ma
     }
 }
 
-/// The reviews you owe, and the one at `path`.
+/// The listed reviews you owe, and the one at `path`.
 fn load(app: &App, path: &PrPath) -> Result<(Vec<OwedReview>, OwedReview), Error> {
     let key = path.key()?;
-    let owed = owed_reviews(app).map_err(Error::pr(&key))?;
+    let (owed, unlisted) = owed_reviews(app).map_err(Error::pr(&key))?;
+    if unlisted.iter().any(|pr| pr.key == key) {
+        return Err(Error::Refused(format!(
+            "{} isn't listed: `authors` excludes its author",
+            key.url()
+        )));
+    }
     let pr = owed
         .iter()
         .find(|pr| pr.key == key)

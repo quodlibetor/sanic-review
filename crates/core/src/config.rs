@@ -21,7 +21,7 @@ use crate::{
     manual::ManualReviews,
     pr::TeamRef,
     repo::RepoName,
-    skip::{ProfileSkips, SkipRules, TitleFilter},
+    skip::{AuthorFilter, ProfileSkips, SkipRules, TitleFilter},
 };
 
 // What each key means when the config leaves it unset, for the loader and
@@ -32,6 +32,7 @@ pub const DEFAULT_MIN_NOTIFICATION_POLL: Duration = Duration::from_secs(60);
 pub const DEFAULT_QUIET: Duration = Duration::from_mins(2);
 pub const DEFAULT_UPDATED_WITHIN_DAYS: u32 = 14;
 pub const DEFAULT_TEAMS: &[&str] = &["*"];
+pub const DEFAULT_AUTHORS: &[&str] = &["*"];
 pub const DEFAULT_SKIP_DRAFTS: bool = true;
 pub const DEFAULT_GIT_URL: &str = "https://github.com";
 pub const DEFAULT_CLAUDE: &str = "claude";
@@ -121,6 +122,9 @@ pub struct PollSettings {
 pub struct ReviewRequestSettings {
     /// Which of your teams' review requests count as requests to you.
     pub teams: TeamFilter,
+    /// Whose PRs count as reviews you owe; the rest are neither listed nor
+    /// reviewed automatically.
+    pub authors: AuthorFilter,
     /// PRs with a matching title are never reviewed automatically.
     pub skip_titles: TitleFilter,
     /// Draft PRs are never reviewed automatically.
@@ -225,6 +229,8 @@ pub struct Profile {
     pub auto_fix: bool,
     /// Added to `review_requests.skip_titles` for PRs this profile matches.
     pub skip_titles: TitleFilter,
+    /// Checked after `review_requests.authors` for PRs this profile matches.
+    pub authors: AuthorFilter,
     /// Overrides `review_requests.skip_drafts` for PRs this profile matches.
     pub skip_drafts: Option<bool>,
     /// Overrides `runner.manual_reviews` for PRs this profile matches.
@@ -396,6 +402,7 @@ impl Config {
     pub fn skip_rules(&self) -> SkipRules {
         SkipRules {
             titles: self.review_requests.skip_titles.clone(),
+            authors: self.review_requests.authors.clone(),
             drafts: self.review_requests.skip_drafts,
             profile_names: self.profiles.iter().map(|p| p.name.clone()).collect(),
             profiles: self
@@ -404,6 +411,7 @@ impl Config {
                 .map(|p| {
                     let own = ProfileSkips {
                         titles: p.skip_titles.clone(),
+                        authors: p.authors.clone(),
                         drafts: p.skip_drafts,
                     };
                     (p.name.clone(), own)
@@ -544,6 +552,12 @@ impl Config {
                         .unwrap_or_else(|| DEFAULT_TEAMS.iter().map(|&t| t.into()).collect()),
                 )
                 .wrap_err("in `review_requests.teams`")?,
+                authors: AuthorFilter::new(
+                    raw.review_requests
+                        .authors
+                        .unwrap_or_else(|| DEFAULT_AUTHORS.iter().map(|&a| a.into()).collect()),
+                )
+                .wrap_err("in `review_requests.authors`")?,
                 skip_titles: TitleFilter::new(raw.review_requests.skip_titles)
                     .wrap_err("in `review_requests.skip_titles`")?,
                 skip_drafts: raw
@@ -670,6 +684,7 @@ fn resolve_profile(
         model: resolve_model(raw.model, default_model)?,
         auto_fix: raw.auto_fix,
         skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
+        authors: AuthorFilter::new(raw.authors).wrap_err("in `authors`")?,
         skip_drafts: raw.skip_drafts,
         manual_reviews: raw.manual_reviews,
         targets,
@@ -833,6 +848,7 @@ struct RawPoll {
 #[serde(deny_unknown_fields)]
 struct RawReviewRequests {
     teams: Option<Vec<String>>,
+    authors: Option<Vec<String>>,
     #[serde(default)]
     skip_titles: Vec<String>,
     skip_drafts: Option<bool>,
@@ -848,6 +864,8 @@ struct RawProfile {
     model: Option<String>,
     #[serde(default)]
     auto_fix: bool,
+    #[serde(default)]
+    authors: Vec<String>,
     #[serde(default)]
     skip_titles: Vec<String>,
     skip_drafts: Option<bool>,
@@ -1144,6 +1162,51 @@ mod tests {
         let err = parse("[profile.a]\nskip_titles = [\"[\"]\nrepos = [{ github = \"org\" }]\n")
             .unwrap_err();
         assert!(format!("{err:#}").contains("in profile `a`"), "{err:#}");
+    }
+
+    #[test]
+    fn authors_are_global_then_per_profile_and_default_to_everyone() {
+        let everyone = parse(EXAMPLE).unwrap().skip_rules();
+        assert!(!everyone.unlisted("default", "dependabot"));
+
+        let config = parse(
+            r#"
+            [review_requests]
+            authors = ["*", "!dependabot", "!bot-*"]
+            [profile.a]
+            authors = ["!renovate", "bot-ok"]
+            repos = [{ github = "org" }]
+            [profile.b]
+            repos = [{ github = "other" }]
+            "#,
+        )
+        .unwrap();
+        let rules = config.skip_rules();
+        assert!(rules.unlisted("b", "Dependabot"));
+        assert!(rules.unlisted("b", "bot-ok"));
+        assert!(!rules.unlisted("b", "renovate"));
+        assert!(rules.unlisted("a", "renovate"));
+        assert!(!rules.unlisted("a", "bot-ok"));
+        assert!(rules.unlisted("a", "dependabot"));
+
+        let repos = "repos = [{ github = \"org\" }]";
+        for (text, context) in [
+            (
+                format!("[review_requests]\nauthors = [\"app/x\"]\n[profile.a]\n{repos}\n"),
+                "in `review_requests.authors`",
+            ),
+            (
+                format!("[review_requests]\nauthors = [\"!x[bot]\"]\n[profile.a]\n{repos}\n"),
+                "without `[bot]`",
+            ),
+            (
+                format!("[profile.a]\nauthors = [\"[\"]\n{repos}\n"),
+                "in profile `a`",
+            ),
+        ] {
+            let err = format!("{:#}", parse(&text).unwrap_err());
+            assert!(err.contains(context), "{text}: {err}");
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ use crate::{
     tui::standalone::{self, Edited, Until},
     tui::{self, Request, Shared, Sizes, SystemBrowser, Tui},
     watch::ConfigWatcher,
-    work::{Job, Worker},
+    work::{self, Job, Worker},
 };
 
 /// Why `serve` can't start without a config file, and how to get one.
@@ -176,7 +176,12 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let (runs, runs_rx) = mpsc::unbounded_channel();
     // Reviews started by hand, which skip any manual reviews hold.
     let (started, started_rx) = mpsc::unbounded_channel();
-    resume_queued(&run_store, &config.manual_reviews(), &runs)?;
+    resume_queued(
+        &run_store,
+        &config.manual_reviews(),
+        &config.skip_rules(),
+        &runs,
+    )?;
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config, &me));
 
     let (requests, requests_rx) = mpsc::unbounded_channel();
@@ -584,18 +589,21 @@ impl ProgressLog {
     }
 }
 
-/// Puts the runs a previous process left running back in the queue and
-/// sends them to `runs`, which holds those `manual` holds. The worker
+/// Puts the runs a previous process left running back in the queue,
+/// superseding those of PRs `skips` leaves unlisted, and sends them to
+/// `runs`, which holds those `manual` holds. The worker
 /// takes them from the store in the queue's order; the send is what tells
 /// it they're there, and what logs each held one.
 fn resume_queued(
     store: &Mutex<Store>,
     manual: &ManualReviews,
+    skips: &SkipRules,
     runs: &mpsc::UnboundedSender<QueuedRun>,
 ) -> Result<()> {
     let recovered = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
         store.recover_runs()?;
+        work::supersede_unlisted(&mut store, skips, None);
         store.queued_reviews()?
     };
     let held = recovered
@@ -1048,10 +1056,13 @@ fn reload<G: GithubApi>(poller: &mut Poller<G>, path: &Path, worker: &Worker, li
             if config.github.api_url != poller.config().github.api_url {
                 warn!("`github.api_url` changed; restart to use it");
             }
+            let was = live.skips.borrow().clone();
             // The worker first: a review manual reviews held, and
             // turning them off releases, asks it whether they still hold.
             worker.configure(&config);
             live.publish(&config);
+            // After publishing, so a review queued under the old rules is caught.
+            worker.supersede_newly_unlisted(&was, &config.skip_rules());
             poller.set_config(config);
             info!(config = %path.display(), "config reloaded");
             true
@@ -1288,6 +1299,49 @@ mod tests {
             )
             .await
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn resuming_supersedes_reviews_of_skipped_authors() {
+        let kept = key();
+        let skipped = PrKey { number: 8, ..key() };
+        let mut store = store_with_pr(&kept);
+        let mut snap = pr_snapshot(&skipped);
+        snap.author = "dependabot".into();
+        store.record(&snap, "me", "p", &[]).unwrap();
+        let mut queue = |key: &PrKey| {
+            store
+                .queue_review(&store.review_request(key).unwrap().unwrap())
+                .unwrap()
+                .unwrap()
+        };
+        let resumed = queue(&kept);
+        let interrupted = queue(&skipped);
+        store.claim_run(interrupted.id).unwrap();
+        let config = Config::parse(
+            "[review_requests]\nauthors = [\"*\", \"!dependabot\"]\n\
+             [profile.p]\nrepos = [{ github = \"org\" }]\n",
+            Path::new("/"),
+            &VcsResolver,
+        )
+        .unwrap();
+        let store = Mutex::new(store);
+        let (runs, mut sent) = mpsc::unbounded_channel();
+
+        resume_queued(
+            &store,
+            &ManualReviews::default(),
+            &config.skip_rules(),
+            &runs,
+        )
+        .unwrap();
+        let sent: Vec<QueuedRun> = std::iter::from_fn(|| sent.try_recv().ok()).collect();
+        assert_eq!(sent, [resumed]);
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.run(interrupted.id).unwrap().unwrap().status,
+            "superseded"
         );
     }
 

@@ -143,10 +143,12 @@ fn icon_and_style() -> Markup {
 /// rather than failing the page they head.
 pub fn counts(app: &App, with_archived: bool, filtered: Option<u32>) -> Markup {
     let since = crate::index::since(app);
+    let skips = app.skips.borrow().clone();
     let counts = {
         let store = app.store();
         store.run_counts().and_then(|runs| {
-            let pending = store.listed_pending_drafts(&app.me, since.as_deref(), with_archived)?;
+            let pending =
+                store.listed_pending_drafts(&app.me, since.as_deref(), with_archived, &skips)?;
             Ok((runs, pending))
         })
     }

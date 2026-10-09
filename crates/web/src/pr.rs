@@ -49,7 +49,7 @@ pub async fn page(
 ) -> Result<Markup, Error> {
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
-    let owed = overview.owed.iter().find(|o| o.key == key);
+    let owed = overview.owed_review(&key);
     let (pr, state, runs, shown, drafts, threads, posted) = {
         let store = app.store();
         let load = || -> color_eyre::Result<_> {
@@ -182,6 +182,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
     let state = h.state.filter(|state| !state.is_blank());
     let status = h.owed.map(|o| owed_status(o, h.overview));
     let why = h.owed.and_then(|o| why(o, h.overview));
+    let ignorable = h.owed.filter(|o| h.overview.is_listed(&o.key));
     let href = pr_href(&pr.key);
     html! {
         div.prh {
@@ -197,7 +198,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                 @if let Some(state) = state { " · " (state_cell(state)) }
                 span.sp #pr-actions
                     data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
-                    data-ignore=[h.owed.map(|_| format!("{href}/ignore"))]
+                    data-ignore=[ignorable.map(|_| format!("{href}/ignore"))]
                     data-chat=[h.chat.then_some("#chat")] {
                     @if h.revisable {
                         @if let Some(run) = h.shown {
@@ -210,7 +211,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                     @if why.is_some() {
                         a.btn href={ (href) "/review-now" } data-dialog { "Review now" (keycap("r")) }
                     }
-                    @if h.owed.is_some() {
+                    @if ignorable.is_some() {
                         a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
                     }
                     @if h.chat { a.btn href="#chat" { "Chat" (keycap("c")) } }
@@ -1225,7 +1226,7 @@ pub async fn confirm_review_now(
 ) -> Result<Markup, Error> {
     let key = path.key()?;
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
-    let owed = overview.owed.iter().find(|pr| pr.key == key);
+    let owed = overview.owed_review(&key);
     let why = owed.and_then(|pr| why(pr, &overview));
     let pr = app
         .store()
@@ -1337,7 +1338,7 @@ pub async fn review_now(
     let key = path.key()?;
     // As the confirm page decided, again: it may be stale, or sent twice.
     let overview = Overview::load(&app).map_err(Error::pr(&key))?;
-    let Some(owed) = overview.owed.iter().find(|pr| pr.key == key) else {
+    let Some(owed) = overview.owed_review(&key) else {
         return Err(Error::NotFound(format!(
             "{} isn't a tracked review you owe",
             key.url()

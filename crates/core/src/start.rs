@@ -14,8 +14,9 @@ pub enum Why {
     /// Manual reviews (`runner.manual_reviews`, or its profile's own) are
     /// holding its queued review.
     Held,
-    /// It isn't reviewed automatically, for this reason: archived, a draft,
-    /// already reviewed by someone, or a skipped title.
+    /// It isn't reviewed automatically, for this reason: archived, a
+    /// skipped author, a draft, already reviewed by someone, or a skipped
+    /// title.
     Skipped(Skip),
 }
 
