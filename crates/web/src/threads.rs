@@ -3,7 +3,7 @@
 //! and the rest folded away. A thread a draft was posted as is that
 //! draft's posted form, and an existing thread to every other draft.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use maud::{Markup, html};
 use sanic_core::{
@@ -121,6 +121,7 @@ impl<'a> Existing<'a> {
                 chosen: false,
                 waiting: self.waiting(thread),
             },
+            &html! {},
             &html! {},
         )
     }
@@ -312,7 +313,6 @@ pub fn section(
                 }
             };
         }
-        let under = html! { (code.of(thread)) (ask(thread)) };
         thread_box_with(
             existing.at(),
             existing.diff,
@@ -322,7 +322,8 @@ pub fn section(
                 chosen: false,
                 waiting,
             },
-            &under,
+            &code.of(thread),
+            &ask(thread),
         )
     };
     html! {
@@ -350,23 +351,34 @@ pub fn section(
 /// A thread in full: where it is, its state, a link, and each comment,
 /// its suggestions against the lines `diff` has.
 pub fn thread_box(at: At<'_>, diff: Option<&DiffIndex>, thread: &Thread) -> Markup {
-    thread_box_with(at, diff, thread, Mine::Theirs, Marks::default(), &html! {})
+    thread_box_with(
+        at,
+        diff,
+        thread,
+        Mine::Theirs,
+        Marks::default(),
+        &html! {},
+        &html! {},
+    )
 }
 
-/// [`thread_box`], labelled with whose it is, marked as `marks` says, with
-/// `actions` under its comments.
+/// [`thread_box`], labelled with whose it is, marked as `marks` says,
+/// with `above` between its heading and its comments, where the code it
+/// sits on goes, and `actions` under them.
 pub fn thread_box_with(
     at: At<'_>,
     diff: Option<&DiffIndex>,
     thread: &Thread,
     mine: Mine,
     marks: Marks,
+    above: &Markup,
     actions: &Markup,
 ) -> Markup {
     let cx = markdown::Context::thread(diff, thread, at.reviewed);
     html! {
         div.thread.resolved[thread.resolved].chosen[marks.chosen].waiting[marks.waiting] {
             (thread_head_with(at, thread, mine, marks.waiting))
+            (above)
             ul.said {
                 @for comment in &thread.comments {
                     li { b { (comment.author) } (markdown::render(&comment.body, &cx)) }
@@ -524,55 +536,30 @@ pub fn excerpt_of(body: &str, max: usize) -> String {
 }
 
 /// The code each thread is on, for [`section`]: the reviewed diff where
-/// it has those lines, else the file read from the mirror at the commit
-/// the thread's lines belong to.
+/// it has those lines, else the hunk GitHub itself shows the thread
+/// against, which needs no local checkout.
+#[derive(Debug, Clone, Copy)]
 pub struct Code<'a> {
     existing: Existing<'a>,
-    /// `(commit, path)` to the file's text, for the threads the diff
-    /// can't show.
-    files: &'a HashMap<(String, String), String>,
 }
 
 impl<'a> Code<'a> {
-    pub fn new(existing: Existing<'a>, files: &'a HashMap<(String, String), String>) -> Self {
-        Self { existing, files }
-    }
-
-    /// Which threads need a file from the mirror, as `(commit, path)`:
-    /// the ones the run's diff doesn't place. Only `Right` lines, since a
-    /// `Left` thread's are lines of the base, not of the commit named.
-    pub fn wanted(existing: Existing<'_>) -> Vec<(String, String)> {
-        existing
-            .every_thread()
-            .filter_map(placed)
-            .filter(|&(commit, _, side, _)| {
-                // The diff places only its own head's lines, and there's
-                // no diff at all until a review has run.
-                let in_diff = existing.diff.is_some() && commit == existing.head;
-                side == Side::Right && !in_diff
-            })
-            .map(|(commit, path, _, _)| (commit.to_owned(), path.to_owned()))
-            .collect()
+    pub fn new(existing: Existing<'a>) -> Self {
+        Self { existing }
     }
 
     fn of(&self, thread: &Thread) -> Markup {
-        let Some((commit, path, side, lines)) = placed(thread) else {
-            return html! {};
-        };
-        if commit == self.existing.head
+        if let Some((commit, path, side, lines)) = placed(thread)
+            && commit == self.existing.head
             && let Some(diff) = self.existing.diff
             && let Some(shown) = crate::diff::at(diff, path, side, lines, self.existing)
         {
             return shown;
         }
-        if side != Side::Right {
-            return html! {};
-        }
-        let key = (commit.to_owned(), path.to_owned());
-        let Some(text) = self.files.get(&key) else {
+        let Some(hunk) = &thread.diff_hunk else {
             return html! {};
         };
-        crate::diff::from_file(text, lines).unwrap_or_else(|| html! {})
+        crate::diff::from_hunk(hunk, thread.line).unwrap_or_else(|| html! {})
     }
 }
 

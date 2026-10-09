@@ -832,6 +832,7 @@ mod tests {
             path: Some("src/a.rs".into()),
             line,
             resolved: false,
+            diff_hunk: None,
             place,
             comments: Vec::new(),
         };

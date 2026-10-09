@@ -1012,11 +1012,13 @@ fonttools (run through `uv`, which only this task needs) to
   here, so none is shown twice. Waiting on your answer is the same rule
   the status line's `N unanswered` counts, so the heading and the count
   agree.
-  Each thread shows the code it's on, three lines either side: the run's
-  diff where it has those lines, else the file read from the mirror at
-  the commit the thread's lines belong to. A thread on the old side is
-  read from the diff only, since its lines are the base's and not that
-  commit's; one whose commit the mirror no longer has shows no code. Each thread offers "Agent…", which opens
+  Each thread shows the code it's on, between its heading and its
+  comments as GitHub lays it out: the run's diff where it has those
+  lines, else the thread's own `diffHunk`, which GitHub gives with every
+  inline review comment and the store keeps (`threads.diff_hunk`). That
+  needs no checkout, so a PR nothing here has reviewed shows its code
+  too. A thread recorded before the hunk was asked for, or one whose
+  hunk doesn't parse, shows none. Each thread offers "Agent…", which opens
   the Agent card with an instruction to answer it, quoting its comments,
   for you to edit; with no review to revise it offers Review now instead.
   Nothing here posts: the agent drafts, and you submit as always. `t`

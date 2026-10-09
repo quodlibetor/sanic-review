@@ -593,6 +593,7 @@ mod tests {
                     path: None,
                     line: None,
                     resolved: false,
+                    diff_hunk: None,
                     place: Placement::default(),
                     comments: vec![comment(
                         "mallory",
@@ -604,6 +605,7 @@ mod tests {
                     path: Some("src/lib.rs".into()),
                     line: Some(3),
                     resolved: true,
+                    diff_hunk: None,
                     place: Placement {
                         start_line: Some(1),
                         side: Some(Side::Right),
@@ -616,6 +618,7 @@ mod tests {
                     path: Some("src/old.rs".into()),
                     line: None,
                     resolved: false,
+                    diff_hunk: None,
                     place: Placement {
                         side: Some(Side::Left),
                         outdated: true,
@@ -632,6 +635,7 @@ mod tests {
                     path: None,
                     line: None,
                     resolved: false,
+                    diff_hunk: None,
                     place: Placement::default(),
                     comments: vec![],
                 },
@@ -671,6 +675,7 @@ mod tests {
             path: Some("src/fetch.rs".into()),
             line: Some(51),
             resolved: false,
+            diff_hunk: None,
             place: Placement {
                 start_line: Some(46),
                 side: Some(Side::Right),

@@ -965,6 +965,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![comment("bob", "2026-01-02T00:00:00Z")],
         }];
@@ -1095,6 +1096,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![asked],
         }];

@@ -570,6 +570,7 @@ pub(crate) mod tests {
                 path: None,
                 line: None,
                 resolved: false,
+                diff_hunk: None,
                 place: Placement::default(),
                 comments: vec![],
             }],
@@ -945,6 +946,7 @@ pub(crate) mod tests {
             path: Some("src/lib.rs".into()),
             line: Some(3),
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![comment("c1", "bob")],
         });
@@ -981,6 +983,7 @@ pub(crate) mod tests {
             path: Some("src/lib.rs".into()),
             line: Some(9),
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![comment("c4", "me")],
         });

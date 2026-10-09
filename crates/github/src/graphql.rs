@@ -81,7 +81,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 fragment comment on Comment {
   id author { __typename login } body createdAt
   ... on IssueComment { url }
-  ... on PullRequestReviewComment { url }
+  ... on PullRequestReviewComment { url diffHunk }
   ... on Reactable { reactionGroups { viewerHasReacted } }
 }";
 
@@ -793,6 +793,10 @@ struct RawComment {
     /// Only asked for on thread comments.
     #[serde(default)]
     original_commit: Option<RawCommit>,
+    /// Only asked for on thread comments: the lines GitHub shows the
+    /// comment against.
+    #[serde(default)]
+    diff_hunk: Option<String>,
     // Always asked for; hand-written mocks may omit it.
     #[serde(default)]
     reaction_groups: Vec<RawReactionGroup>,
@@ -969,6 +973,7 @@ impl RawPr {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: self
                 .comments
@@ -979,17 +984,20 @@ impl RawPr {
         }];
         for t in self.review_threads.into_nodes("review threads", &key) {
             let comments = t.comments.into_nodes("thread comments", &key);
-            // The thread's first comment is where it was left.
+            // The thread's first comment is where it was left, and
+            // carries the lines GitHub shows it against.
             let original_commit = comments
                 .first()
                 .and_then(|c| c.original_commit.as_ref())
                 .map(|c| c.oid.clone());
+            let diff_hunk = comments.first().and_then(|c| c.diff_hunk.clone());
             threads.push(Thread {
                 comments: comments.into_iter().map(|c| c.into_comment(me)).collect(),
                 id: t.id,
                 path: t.path,
                 line: t.line,
                 resolved: t.is_resolved,
+                diff_hunk,
                 place: Placement {
                     start_line: t.start_line,
                     side: t.diff_side,

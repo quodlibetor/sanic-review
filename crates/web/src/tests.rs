@@ -290,6 +290,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
                 path: Some("src/lib.rs".into()),
                 line: Some(2),
                 resolved: false,
+                diff_hunk: None,
                 place: Placement::default(),
                 comments: vec![
                     said("c1", "me", "2026-09-20T00:00:00Z"),
@@ -2418,6 +2419,7 @@ async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
         path: None,
         line: None,
         resolved: false,
+        diff_hunk: None,
         place: Placement::default(),
         comments,
     };
@@ -3148,6 +3150,7 @@ fn review_thread(id: &str, path: &str, line: Option<u32>, author: &str, body: &s
         path: Some(path.into()),
         line,
         resolved: false,
+        diff_hunk: None,
         place: Placement {
             side: Some(Side::Right),
             head: Some("head7".into()),
@@ -5111,6 +5114,7 @@ async fn the_conversation_is_in_the_section_the_status_line_counts() {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![
                 says("cv1", "me", "ready?", "2026-09-20T00:00:00Z"),
@@ -5143,14 +5147,14 @@ async fn the_conversation_is_in_the_section_the_status_line_counts() {
     assert!(page.body.contains("1 unanswered"), "{}", page.body);
 }
 
-/// With no review there's no diff, so a thread's code comes from the
-/// mirror at the commit its lines belong to.
+/// A PR nothing here has reviewed has no diff and no mirror, so the code
+/// comes from the hunk GitHub shows the thread against.
 #[tokio::test]
-async fn a_threads_code_is_read_from_the_mirror_when_no_review_has_a_diff() {
+async fn a_threads_code_comes_from_githubs_hunk_without_a_review() {
     let f = fixture(false).await;
-    f.mirror.add("head9", "src/lib.rs", &numbered(20));
     let mut thread = review_thread("t-9", "src/lib.rs", Some(8), "erin", "why this way?");
-    thread.place.head = Some("head9".into());
+    thread.diff_hunk =
+        Some("@@ -5,4 +5,5 @@ fn main() {\n ctx one\n-gone\n+taken\n+kept\n ctx two".into());
     let snap = PrSnapshot {
         threads: vec![thread],
         ..snapshot(9, "me", "My change")
@@ -5162,25 +5166,30 @@ async fn a_threads_code_is_read_from_the_mirror_when_no_review_has_a_diff() {
         .unwrap();
     let page = f.get("/pr/org/repo/9").await;
     let section = threads_section(&page.body);
-    // Its own line, marked, with three either side.
-    assert!(section.contains("line 8"), "{section}");
-    assert!(section.contains("line 5"), "{section}");
-    assert!(section.contains("line 11"), "{section}");
-    assert!(!section.contains("line 4"), "{section}");
-    assert!(!section.contains("line 12"), "{section}");
+    assert!(section.contains("taken"), "{section}");
+    assert!(section.contains("gone"), "{section}");
+    assert!(section.contains(r#"<tr class="del""#), "{section}");
+    // The thread's line is new line 8, the row the hunk ends on.
+    assert!(section.contains(r#"<tr class="ctx anchor""#), "{section}");
+    assert!(section.contains(r#"<td class="num">8</td>"#), "{section}");
+    // Above the conversation, as GitHub shows it.
+    let code = section.find("<table class=\"diff\"").unwrap();
+    let said = section.find("<ul class=\"said\"").unwrap();
+    assert!(code < said, "the code goes above the comments: {section}");
+    // Nothing was asked of the mirror.
+    assert!(!std::path::Path::new(&f.data.path().join("mirrors")).exists());
 }
 
-/// A thread on the old side names lines of the base, not of the commit
-/// its placement names, so reading that file would show the wrong code.
+/// A hunk GitHub didn't give, or one that isn't a hunk, leaves the thread
+/// without code rather than showing the wrong lines.
 #[tokio::test]
-async fn a_left_side_thread_gets_no_code_from_the_mirror() {
+async fn a_thread_without_a_usable_hunk_shows_no_code() {
     let f = fixture(false).await;
-    f.mirror.add("head9", "src/lib.rs", &numbered(20));
-    let mut thread = review_thread("t-left", "src/lib.rs", Some(8), "erin", "was this right?");
-    thread.place.head = Some("head9".into());
-    thread.place.side = Some(Side::Left);
+    let mut junk = review_thread("t-junk", "src/lib.rs", Some(8), "erin", "junk hunk");
+    junk.diff_hunk = Some("not a hunk at all".into());
+    let none = review_thread("t-none", "src/other.rs", Some(3), "erin", "no hunk");
     let snap = PrSnapshot {
-        threads: vec![thread],
+        threads: vec![junk, none],
         ..snapshot(9, "me", "My change")
     };
     f.dashboard
@@ -5190,32 +5199,9 @@ async fn a_left_side_thread_gets_no_code_from_the_mirror() {
         .unwrap();
     let page = f.get("/pr/org/repo/9").await;
     let section = threads_section(&page.body);
-    assert!(section.contains("was this right?"), "{section}");
-    assert!(!section.contains("line 8"), "{section}");
-}
-
-/// The mirror may not have the commit any more; the thread still shows,
-/// just without code.
-#[tokio::test]
-async fn a_thread_whose_file_the_mirror_lacks_still_shows() {
-    let f = fixture(false).await;
-    let mut thread = review_thread("t-gone", "src/lib.rs", Some(8), "erin", "gone from here");
-    thread.place.head = Some("head-unknown".into());
-    let snap = PrSnapshot {
-        threads: vec![thread],
-        head_sha: "head-unknown".into(),
-        ..snapshot(9, "me", "My change")
-    };
-    f.dashboard
-        .app
-        .store()
-        .record(&snap, "me", "default", &[])
-        .unwrap();
-    let page = f.get("/pr/org/repo/9").await;
-    assert_eq!(page.status, StatusCode::OK);
-    let section = threads_section(&page.body);
-    assert!(section.contains("gone from here"), "{section}");
-    assert!(!section.contains("table class=\"diff"), "{section}");
+    assert!(section.contains("junk hunk"), "{section}");
+    assert!(section.contains("no hunk"), "{section}");
+    assert!(!section.contains("<table class=\"diff\""), "{section}");
 }
 
 /// A thread on the reviewed commit's lines gets its code from the run's

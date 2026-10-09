@@ -81,27 +81,66 @@ pub fn at(
     })
 }
 
-/// The lines around `start..=line` of a file read whole from the mirror,
-/// its own lines marked. For a thread on a PR no review here has fetched
-/// a diff for, where there's no hunk to show.
-pub fn from_file(text: &str, (start, line): (u32, u32)) -> Option<Markup> {
-    let all: Vec<&str> = text.lines().collect();
-    let (first, last) = (usize::try_from(start).ok()?, usize::try_from(line).ok()?);
-    // The lines are 1-based, and a thread can name a line the file no
-    // longer has.
-    let (first, last) = (first.checked_sub(1)?, last.checked_sub(1)?);
-    if first > last || last >= all.len() {
+/// The starting old and new line of a `@@ -a,b +c,d @@` header, or `None`
+/// if it isn't one. The counts are ignored: the body says how many.
+fn hunk_start(header: &str) -> Option<(u32, u32)> {
+    let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;
+    let (old, new) = inner.split_once(' ')?;
+    let first = |part: &str, sign: char| -> Option<u32> {
+        part.strip_prefix(sign)?
+            .split(',')
+            .next()?
+            .parse::<u32>()
+            .ok()
+    };
+    Some((first(old, '-')?, first(new, '+')?))
+}
+
+/// GitHub's own `diffHunk` for a review thread, rendered as the drafts'
+/// context is, with the thread's line marked. `None` if the hunk isn't
+/// one, so a thread shows no code rather than the wrong code.
+pub fn from_hunk(hunk: &str, line: Option<u32>) -> Option<Markup> {
+    let mut lines = hunk.lines();
+    let (mut old, mut new) = hunk_start(lines.next()?)?;
+    let mut rows = Vec::new();
+    for text in lines {
+        // GitHub sends "\ No newline at end of file" like git does.
+        if text.starts_with('\\') {
+            continue;
+        }
+        let (class, body) = match text.chars().next() {
+            Some('+') => ("add", &text[1..]),
+            Some('-') => ("del", &text[1..]),
+            Some(' ') => ("ctx", &text[1..]),
+            // An empty line is a context line GitHub trimmed.
+            None => ("ctx", text),
+            Some(_) => return None,
+        };
+        let (at_old, at_new) = match class {
+            "add" => (None, Some(new)),
+            "del" => (Some(old), None),
+            _ => (Some(old), Some(new)),
+        };
+        if at_old.is_some() {
+            old += 1;
+        }
+        if at_new.is_some() {
+            new += 1;
+        }
+        rows.push((class, body.to_owned(), at_old, at_new));
+    }
+    if rows.is_empty() {
         return None;
     }
-    let from = first.saturating_sub(AROUND);
-    let to = (last + AROUND + 1).min(all.len());
     Some(html! {
-        table.diff.whole {
-            @for (i, text) in all[from..to].iter().enumerate() {
-                @let n = from + i;
-                tr.ctx.anchor[(first..=last).contains(&n)] {
-                    td.num { (n + 1) }
-                    td.code { span.sign { " " } (text) }
+        table.diff {
+            @for (class, text, at_old, at_new) in &rows {
+                @let sign = match *class { "add" => "+", "del" => "-", _ => " " };
+                @let marked = line.is_some() && *at_new == line;
+                tr.(*class).anchor[marked] {
+                    td.num { (at_old.map(|n| n.to_string()).unwrap_or_default()) }
+                    td.num { (at_new.map(|n| n.to_string()).unwrap_or_default()) }
+                    td.code { span.sign { (sign) } (text) }
                 }
             }
         }

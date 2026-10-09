@@ -157,6 +157,7 @@ mod tests {
             path: Some("src/a.rs".into()),
             line: Some(line),
             resolved: false,
+            diff_hunk: None,
             place: Placement {
                 start_line: start,
                 side: Some(Side::Right),

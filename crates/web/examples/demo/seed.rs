@@ -761,6 +761,7 @@ fn thread(
         path: Some(path.into()),
         line: Some(line),
         resolved: false,
+        diff_hunk: None,
         place: Placement {
             start_line: None,
             side: Some(Side::Right),
