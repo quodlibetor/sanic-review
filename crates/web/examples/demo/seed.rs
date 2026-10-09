@@ -121,6 +121,11 @@ fn owed(store: &mut Store, s: &mut Seeded) -> Result<()> {
             &pr,
             "sundays-1",
             ("src/wheel.rs", 12),
+            &[
+                (' ', "    /// Which way the wheel turns."),
+                ('-', "    pub fn spin(&mut self) {"),
+                ('+', "    pub fn spin(&mut self, widdershins: bool) {"),
+            ],
             &[(ME, 2, "Does the hamster get a say in which way it runs?")],
         )],
         ..pr
@@ -218,6 +223,10 @@ fn mine_prs(store: &mut Store, s: &mut Seeded) -> Result<()> {
             &pr,
             "spr-1",
             ("src/stack.rs", 88),
+            &[
+                (' ', "    let mut syrup = Stack::new();"),
+                ('+', "    syrup.pour(pancakes.len());"),
+            ],
             &[(
                 "chilidog-enjoyer",
                 1,
@@ -249,6 +258,11 @@ fn showcase(store: &mut Store, s: &mut Seeded) -> Result<()> {
             &pr,
             "frob-1",
             ("src/count.rs", 6),
+            &[
+                (' ', "/// How many widgets we have counted so far."),
+                ('-', "pub fn count() -> u16 {"),
+                ('+', "pub fn count() -> u32 {"),
+            ],
             &[
                 (
                     "ringcollector",
@@ -360,6 +374,11 @@ fn to_answer(store: &mut Store, s: &mut Seeded) -> Result<()> {
             &pr,
             "wheel-1",
             ("src/wheel.rs", 31),
+            &[
+                (' ', "        if self.turns > 0 {"),
+                ('+', "            self.squeak();"),
+                (' ', "        }"),
+            ],
             &[
                 (ME, 20, body),
                 (
@@ -750,10 +769,30 @@ fn review(pr: &PrSnapshot, author: &str, state: ReviewState, hours: u32) -> Revi
 
 /// An open thread on `line` of `path` at `pr`'s head, of `(author, hours
 /// ago, body)` comments, whose ids are `<id>-c<i>`.
+/// The hunk GitHub shows a thread against: `code` as `(sign, text)`,
+/// ending on the thread's own line, so the last row is the one commented
+/// on. The counts come from the signs, as a real hunk's do.
+fn hunk(line: u32, code: &[(char, &str)]) -> String {
+    use std::fmt::Write;
+    let rows = u32::try_from(code.len()).unwrap_or(1);
+    let start = line.saturating_sub(rows.saturating_sub(1)).max(1);
+    let count = |keep: [char; 2]| code.iter().filter(|(c, _)| keep.contains(c)).count();
+    let mut body = String::new();
+    for (sign, text) in code {
+        let _ = write!(body, "\n{sign}{text}");
+    }
+    format!(
+        "@@ -{start},{} +{start},{} @@{body}",
+        count([' ', '-']),
+        count([' ', '+'])
+    )
+}
+
 fn thread(
     pr: &PrSnapshot,
     id: &str,
     (path, line): (&str, u32),
+    code: &[(char, &str)],
     comments: &[(&str, u32, &str)],
 ) -> Thread {
     Thread {
@@ -761,6 +800,7 @@ fn thread(
         path: Some(path.into()),
         line: Some(line),
         resolved: false,
+        diff_hunk: Some(hunk(line, code)),
         place: Placement {
             start_line: None,
             side: Some(Side::Right),

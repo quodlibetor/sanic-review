@@ -282,40 +282,43 @@ fn decision_from<'a>(reviews: &[ReviewFact<'a>]) -> Option<&'static str> {
     }
 }
 
-/// Threads that aren't resolved and have someone else's comment (not a
-/// bot's) newer than your latest answer: your own comment, or your
-/// reaction to any comment in the thread.
+/// Whether `thread` waits on your answer: not resolved, and someone
+/// else's comment (not a bot's) is newer than your latest answer, your own
+/// comment or your reaction to any comment in it. `mine` is your own PR,
+/// where every thread can need you; on someone else's only the threads
+/// you've commented in can, as for reply triggers.
+#[must_use]
+pub fn is_unanswered(thread: &Thread, me: &str, mine: bool) -> bool {
+    let is_me = |login: &str| is_login(login, me);
+    if thread.resolved {
+        return false;
+    }
+    if !mine && !thread.comments.iter().any(|c| is_me(&c.author)) {
+        return false;
+    }
+    let answered = thread
+        .comments
+        .iter()
+        .filter(|c| is_me(&c.author))
+        .map(|c| c.created_at.as_str())
+        .chain(
+            thread
+                .comments
+                .iter()
+                .filter_map(|c| c.reacted_at.as_deref()),
+        )
+        .max();
+    thread.comments.iter().any(|c| {
+        !is_me(&c.author) && !c.by_bot && answered.is_none_or(|at| c.created_at.as_str() > at)
+    })
+}
+
+/// How many of `facts`' threads wait on your answer.
 fn unanswered(facts: &StateFacts<'_>) -> u32 {
-    let is_me = |login: &str| is_login(login, facts.me);
     let count = facts
         .threads
         .iter()
-        .filter(|thread| !thread.resolved)
-        .filter(|thread| {
-            let commented = thread.comments.iter().any(|c| is_me(&c.author));
-            // On someone else's PR, as for reply triggers: threads you've
-            // commented in, the conversation included.
-            if !facts.mine && !commented {
-                return false;
-            }
-            let answered = thread
-                .comments
-                .iter()
-                .filter(|c| is_me(&c.author))
-                .map(|c| c.created_at.as_str())
-                .chain(
-                    thread
-                        .comments
-                        .iter()
-                        .filter_map(|c| c.reacted_at.as_deref()),
-                )
-                .max();
-            thread.comments.iter().any(|c| {
-                !is_me(&c.author)
-                    && !c.by_bot
-                    && answered.is_none_or(|at| c.created_at.as_str() > at)
-            })
-        })
+        .filter(|thread| is_unanswered(thread, facts.me, facts.mine))
         .count();
     // A poll fetches far fewer threads than that.
     u32::try_from(count).unwrap_or(u32::MAX)
@@ -434,6 +437,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments,
         }
@@ -567,6 +571,32 @@ mod tests {
         let mut older = thread(vec![comment("bob", "01"), comment("carol", "05")]);
         older.comments[0].reacted_at = Some("2026-01-01T00:00:03Z".into());
         assert_eq!(count(&[older], true), 1);
+    }
+
+    /// The dashboard marks threads with [`is_unanswered`] and the status
+    /// line counts them, so a page that disagreed with its own badge
+    /// would be the bug this guards.
+    #[test]
+    fn the_count_is_the_threads_the_predicate_picks() {
+        let mut resolved = thread(vec![comment("bob", "01")]);
+        resolved.resolved = true;
+        let threads = [
+            thread(vec![comment("me", "01"), comment("bob", "02")]),
+            thread(vec![comment("bob", "01"), comment("me", "02")]),
+            thread(vec![comment("bob", "01")]),
+            resolved,
+        ];
+        for mine in [true, false] {
+            let picked = threads
+                .iter()
+                .filter(|t| is_unanswered(t, "Me", mine))
+                .count();
+            assert_eq!(
+                u32::try_from(picked).unwrap(),
+                count(&threads, mine),
+                "{mine}"
+            );
+        }
     }
 
     #[test]

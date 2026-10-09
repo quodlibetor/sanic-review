@@ -48,6 +48,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0023_run_resume.sql"),
     include_str!("migrations/0024_draft_obsolete.sql"),
     include_str!("migrations/0025_run_queue.sql"),
+    include_str!("migrations/0026_thread_diff_hunk.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -593,15 +594,16 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
         tx.execute(
             "INSERT INTO threads (repo, number, thread_id, path, line, resolved, start_line,
                                   side, head_sha, outdated, original_start_line,
-                                  original_line, original_commit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                  original_line, original_commit, diff_hunk)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT (repo, number, thread_id) DO UPDATE SET
                  path = excluded.path, line = excluded.line, resolved = excluded.resolved,
                  start_line = excluded.start_line, side = excluded.side,
                  head_sha = excluded.head_sha, outdated = excluded.outdated,
                  original_start_line = excluded.original_start_line,
                  original_line = excluded.original_line,
-                 original_commit = excluded.original_commit",
+                 original_commit = excluded.original_commit,
+                 diff_hunk = excluded.diff_hunk",
             params![
                 repo,
                 number,
@@ -615,7 +617,8 @@ fn write_threads(tx: &Transaction<'_>, snap: &PrSnapshot) -> Result<()> {
                 place.outdated,
                 place.original_start_line,
                 place.original_line,
-                place.original_commit
+                place.original_commit,
+                thread.diff_hunk
             ],
         )?;
         for c in &thread.comments {
@@ -712,6 +715,7 @@ mod tests {
                 path: Some("src/lib.rs".into()),
                 line: Some(3),
                 resolved: false,
+                diff_hunk: None,
                 place: Placement::default(),
                 comments: vec![Comment {
                     id: "c1".into(),

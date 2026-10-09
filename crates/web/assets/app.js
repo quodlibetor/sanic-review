@@ -447,6 +447,16 @@
         other.click();
         break;
       }
+      case "t": {
+        // The PR's own review threads, below the drafts.
+        const section = page === "pr" && document.getElementById("threads");
+        if (!section) {
+          if (page === "pr") say("t jumps to the PR's review threads, when it has some");
+          return;
+        }
+        section.scrollIntoView({ block: "start" });
+        break;
+      }
       case "s": {
         // The files view's other layout.
         const other = page === "pr" && document.querySelector("#layouts a[data-layout]:not(.cur)");

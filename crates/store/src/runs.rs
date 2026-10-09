@@ -1454,7 +1454,7 @@ impl Store {
         let repo = key.repo.to_string();
         let mut threads_stmt = self.conn.prepare_cached(
             "SELECT thread_id, path, line, resolved, start_line, side, head_sha, outdated,
-                    original_start_line, original_line, original_commit
+                    original_start_line, original_line, original_commit, diff_hunk
              FROM threads WHERE repo = ?1 AND number = ?2 ORDER BY rowid",
         )?;
         let mut comments_stmt = self.conn.prepare_cached(
@@ -1492,6 +1492,7 @@ impl Store {
                     path: row.get(1)?,
                     line: row.get(2)?,
                     resolved: row.get(3)?,
+                    diff_hunk: row.get(11)?,
                     place: Placement {
                         start_line: row.get(4)?,
                         side: side.map(|side| {
@@ -2060,6 +2061,7 @@ mod tests {
                 path: Some("src/lib.rs".into()),
                 line: Some(3),
                 resolved: false,
+                diff_hunk: None,
                 place: Placement {
                     start_line: Some(2),
                     side: Some(Side::Left),
@@ -3781,6 +3783,7 @@ mod tests {
             path: Some("src/lib.rs".into()),
             line: Some(4),
             resolved: false,
+            diff_hunk: None,
             place: Placement {
                 start_line: Some(start),
                 side: Some(Side::Right),

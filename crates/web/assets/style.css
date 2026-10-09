@@ -2230,6 +2230,39 @@ table.diff tr.thread-row.resolved td {
   box-shadow: inset 3px 0 var(--ok);
 }
 
+.thread.waiting {
+  border-color: var(--held);
+  box-shadow: inset 3px 0 var(--held);
+}
+
+.thread .chip.hot {
+  color: var(--held);
+  border-color: var(--held);
+}
+
+#threads > h2 {
+  font-size: 15px;
+  margin: 1.2rem 0 0.4rem;
+}
+
+#threads > h2 .hot {
+  color: var(--held);
+}
+
+.threads-resolved > summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+p.thread-act {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  align-items: baseline;
+  margin: 0.3rem 0 0.1rem;
+}
+
 form.choose {
   display: flex;
   flex-wrap: wrap;

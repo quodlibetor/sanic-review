@@ -9,6 +9,7 @@ use maud::{Markup, html};
 use sanic_core::{
     pr::{CONVERSATION_THREAD, Comment, PrKey, Thread, is_login},
     run::Side,
+    state::is_unanswered,
 };
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, Posted, Store, ThreadChoice, draft_span};
@@ -25,14 +26,18 @@ pub struct Existing<'a> {
     pub key: &'a PrKey,
     pub threads: &'a [Thread],
     pub head: &'a str,
-    /// The run whose drafts are shown.
-    pub run: i64,
+    /// The run whose drafts are shown; `None` when the PR has no review to
+    /// show its threads beside, so nothing was posted from here.
+    pub run: Option<i64>,
     /// The PR's head as last polled, for links to GitHub.
     pub pr_head: &'a str,
     /// The run's diff, for the lines a suggestion in a thread replaces.
     pub diff: Option<&'a DiffIndex>,
     /// The login the page is for, whose threads are labelled yours.
     pub me: &'a str,
+    /// Your own PR, where any thread can wait on you; see
+    /// [`sanic_core::state::is_unanswered`].
+    pub own_pr: bool,
     pub posted: &'a Posted,
 }
 
@@ -58,8 +63,10 @@ impl<'a> Existing<'a> {
     /// them: not the ones the run's drafts were posted as, which are with
     /// those drafts. The conversation isn't on any lines.
     pub fn inline(self) -> impl Iterator<Item = &'a Thread> {
-        self.with_comments()
-            .filter(move |t| !self.posted.posted_in_run(self.run, t))
+        self.with_comments().filter(move |t| {
+            self.run
+                .is_none_or(|run| !self.posted.posted_in_run(run, t))
+        })
     }
 
     /// The PR's inline review threads with comments, posted from here or
@@ -68,6 +75,12 @@ impl<'a> Existing<'a> {
         self.threads
             .iter()
             .filter(|t| t.id != CONVERSATION_THREAD && !t.comments.is_empty())
+    }
+
+    /// [`Self::with_comments`] and the conversation, which is on no lines
+    /// but is a thread the status line counts.
+    pub fn every_thread(self) -> impl Iterator<Item = &'a Thread> {
+        self.threads.iter().filter(|t| !t.comments.is_empty())
     }
 
     /// The thread draft `id` was posted as, if it's on the PR.
@@ -91,6 +104,12 @@ impl<'a> Existing<'a> {
         if yours { Mine::Yours } else { Mine::Theirs }
     }
 
+    /// Whether `thread` waits on your answer, by the same rule as the
+    /// status line's count.
+    pub fn waiting(self, thread: &Thread) -> bool {
+        is_unanswered(thread, self.me, self.own_pr)
+    }
+
     /// `thread` in full, labelled if it's yours; see [`thread_box_with`].
     pub fn thread_box(self, thread: &Thread) -> Markup {
         thread_box_with(
@@ -98,7 +117,11 @@ impl<'a> Existing<'a> {
             self.diff,
             thread,
             self.mine(thread),
-            false,
+            Marks {
+                chosen: false,
+                waiting: self.waiting(thread),
+            },
+            &html! {},
             &html! {},
         )
     }
@@ -144,6 +167,23 @@ pub enum Mine {
         run: i64,
         draft: i64,
     },
+}
+
+/// The commit `thread`'s lines are lines of, with its path, side and
+/// first and last lines there: the head it was fetched at, or, once
+/// outdated, the commit it was left on. `None` for a thread on no lines.
+pub fn placed(thread: &Thread) -> Option<(&str, &str, Side, (u32, u32))> {
+    let path = thread.path.as_deref()?;
+    [
+        thread.place.head.as_deref(),
+        thread.place.original_commit.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|commit| {
+        let (side, first, last) = thread.place.lines_at(thread.line, commit)?;
+        Some((commit, path, side, (first, last)))
+    })
 }
 
 /// `draft`'s path, side and first and last lines, if it's on lines.
@@ -215,12 +255,93 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
                 span.dim { "Each is shown beside the drafts it overlaps." }
             }
             @if !rest.is_empty() {
-                details.threads-rest {
+                a.threads-rest href="#threads" {
+                    (rest.len()) @if rest.len() == 1 { " thread doesn't" } @else { " threads don't" }
+                    " overlap a draft"
+                }
+            }
+        }
+    }
+}
+
+/// How a thread box is marked out from the others.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Marks {
+    /// A draft posts in it.
+    pub chosen: bool,
+    /// It waits on your answer.
+    pub waiting: bool,
+}
+
+/// Every review thread the PR has, whatever the drafts do: the ones
+/// waiting on your answer first, then the rest, with the resolved ones
+/// folded away. `ask` gives a thread its "Agent…" link, where there's a
+/// review to revise.
+pub fn section(
+    existing: Existing<'_>,
+    drafts: &[DraftRow],
+    code: &Code<'_>,
+    ask: impl Fn(&Thread) -> Markup,
+) -> Markup {
+    // Shown in full beside their drafts already, so here they're a line
+    // each: the same thread twice on one page reads as two.
+    let above: HashSet<&str> = drafts
+        .iter()
+        .flat_map(|d| existing.overlapping(d))
+        .map(|t| t.id.as_str())
+        .collect();
+    let (mut waiting, mut open, mut resolved) = (Vec::new(), Vec::new(), Vec::new());
+    for thread in existing.every_thread() {
+        if thread.resolved {
+            resolved.push(thread);
+        } else if existing.waiting(thread) {
+            waiting.push(thread);
+        } else {
+            open.push(thread);
+        }
+    }
+    if waiting.is_empty() && open.is_empty() && resolved.is_empty() {
+        return html! {};
+    }
+    let box_of = |thread: &Thread| {
+        let waiting = existing.waiting(thread);
+        if above.contains(thread.id.as_str()) {
+            return html! {
+                div.thread.waiting[waiting] {
+                    (thread_head_with(existing.at(), thread, existing.mine(thread), waiting))
+                    p.dim { "Shown with your drafts above." }
+                }
+            };
+        }
+        thread_box_with(
+            existing.at(),
+            existing.diff,
+            thread,
+            existing.mine(thread),
+            Marks {
+                chosen: false,
+                waiting,
+            },
+            &code.of(thread),
+            &ask(thread),
+        )
+    };
+    html! {
+        section #threads {
+            h2 {
+                "Review threads"
+                @if !waiting.is_empty() {
+                    " · " span.hot { (waiting.len()) " waiting on you" }
+                }
+            }
+            @for thread in waiting.iter().chain(&open) { (box_of(thread)) }
+            @if !resolved.is_empty() {
+                details.threads-resolved {
                     summary {
-                        (rest.len()) @if rest.len() == 1 { " thread doesn't" } @else { " threads don't" }
-                        " overlap a draft"
+                        (resolved.len())
+                        @if resolved.len() == 1 { " resolved thread" } @else { " resolved threads" }
                     }
-                    @for thread in rest { (existing.thread_box(thread)) }
+                    @for thread in &resolved { (box_of(thread)) }
                 }
             }
         }
@@ -230,23 +351,34 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
 /// A thread in full: where it is, its state, a link, and each comment,
 /// its suggestions against the lines `diff` has.
 pub fn thread_box(at: At<'_>, diff: Option<&DiffIndex>, thread: &Thread) -> Markup {
-    thread_box_with(at, diff, thread, Mine::Theirs, false, &html! {})
+    thread_box_with(
+        at,
+        diff,
+        thread,
+        Mine::Theirs,
+        Marks::default(),
+        &html! {},
+        &html! {},
+    )
 }
 
-/// [`thread_box`], labelled with whose it is, marked `chosen` if a draft
-/// posts in it, with `actions` under its comments.
+/// [`thread_box`], labelled with whose it is, marked as `marks` says,
+/// with `above` between its heading and its comments, where the code it
+/// sits on goes, and `actions` under them.
 pub fn thread_box_with(
     at: At<'_>,
     diff: Option<&DiffIndex>,
     thread: &Thread,
     mine: Mine,
-    chosen: bool,
+    marks: Marks,
+    above: &Markup,
     actions: &Markup,
 ) -> Markup {
     let cx = markdown::Context::thread(diff, thread, at.reviewed);
     html! {
-        div.thread.resolved[thread.resolved].chosen[chosen] {
-            (thread_head(at, thread, mine))
+        div.thread.resolved[thread.resolved].chosen[marks.chosen].waiting[marks.waiting] {
+            (thread_head_with(at, thread, mine, marks.waiting))
+            (above)
             ul.said {
                 @for comment in &thread.comments {
                     li { b { (comment.author) } (markdown::render(&comment.body, &cx)) }
@@ -261,7 +393,13 @@ pub fn thread_box_with(
 /// whether it's yours, and its link on GitHub. Its lines on the reviewed
 /// head link to them there; see [`At::lines`].
 pub fn thread_head(at: At<'_>, thread: &Thread, mine: Mine) -> Markup {
+    thread_head_with(at, thread, mine, false)
+}
+
+/// [`thread_head`], flagged when the thread waits on your answer.
+pub fn thread_head_with(at: At<'_>, thread: &Thread, mine: Mine, waiting: bool) -> Markup {
     let head = at.reviewed;
+    let conversation = thread.id == CONVERSATION_THREAD;
     let path = thread.path.as_deref().unwrap_or("?");
     let place = &thread.place;
     let range = |side: Option<Side>, first: Option<u32>, last: u32| {
@@ -293,7 +431,9 @@ pub fn thread_head(at: At<'_>, thread: &Thread, mine: Mine) -> Markup {
     let count = thread.comments.len();
     html! {
         div.th {
-            @if let Some(url) = on_head
+            @if conversation {
+                span.anc { "the conversation" }
+            } @else if let Some(url) = on_head
                 .filter(|_| thread.path.is_some())
                 .and_then(|(side, first, last)| at.lines(path, side, (first, last)))
             {
@@ -321,6 +461,11 @@ pub fn thread_head(at: At<'_>, thread: &Thread, mine: Mine) -> Markup {
                     }
                 }
             }
+            @if waiting {
+                span.chip.hot title="Someone's comment here is newer than your last answer." {
+                    "waiting on you"
+                }
+            }
             @if thread.resolved { span.chip.dim { "resolved" } }
             @if thread.place.outdated { span.chip.dim { "outdated" } }
             span.dim {
@@ -339,6 +484,31 @@ pub fn said(comment: &Comment) -> Markup {
         b { (comment.author) } ": "
         span.excerpt title=(comment.body) { (excerpt(&comment.body)) }
     }
+}
+
+/// An instruction asking the agent to answer `thread`, for the Agent
+/// card's box to start with. It's a starting point, not a form: you edit
+/// it before the agent sees it.
+pub fn answer_prompt(thread: &Thread) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("Draft an answer to this review thread");
+    if let Some(path) = &thread.path {
+        out.push_str(" on ");
+        out.push_str(path);
+        if let Some(line) = thread.line {
+            let _ = write!(out, ":{line}");
+        }
+    }
+    out.push_str(".\n\n");
+    for comment in &thread.comments {
+        let _ = writeln!(
+            out,
+            "{}: {}",
+            comment.author,
+            excerpt_of(&comment.body, 400)
+        );
+    }
+    out
 }
 
 /// A thread's page on GitHub: its first comment's, if GitHub gave one.
@@ -363,6 +533,34 @@ pub fn excerpt_of(body: &str, max: usize) -> String {
     }
     let cut: String = flat.chars().take(max).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// The code each thread is on, for [`section`]: the reviewed diff where
+/// it has those lines, else the hunk GitHub itself shows the thread
+/// against, which needs no local checkout.
+#[derive(Debug, Clone, Copy)]
+pub struct Code<'a> {
+    existing: Existing<'a>,
+}
+
+impl<'a> Code<'a> {
+    pub fn new(existing: Existing<'a>) -> Self {
+        Self { existing }
+    }
+
+    fn of(&self, thread: &Thread) -> Markup {
+        if let Some((commit, path, side, lines)) = placed(thread)
+            && commit == self.existing.head
+            && let Some(diff) = self.existing.diff
+            && let Some(shown) = crate::diff::at(diff, path, side, lines, self.existing)
+        {
+            return shown;
+        }
+        let Some(hunk) = &thread.diff_hunk else {
+            return html! {};
+        };
+        crate::diff::from_hunk(hunk, thread.line).unwrap_or_else(|| html! {})
+    }
 }
 
 #[cfg(test)]

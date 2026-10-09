@@ -783,6 +783,7 @@ mod tests {
             path: Some("src/lib.rs".into()),
             line: Some(4),
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments: vec![Comment {
                 id: "c1".into(),
@@ -854,6 +855,7 @@ mod tests {
             path: Some("src/lib.rs".into()),
             line: Some(4),
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments,
         };

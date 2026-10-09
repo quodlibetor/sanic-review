@@ -230,6 +230,7 @@ mod tests {
             path: None,
             line: None,
             resolved: false,
+            diff_hunk: None,
             place: Placement::default(),
             comments,
         }

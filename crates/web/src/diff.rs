@@ -16,7 +16,25 @@ const AROUND: usize = 3;
 pub fn context(diff: &DiffIndex, draft: &DraftRow, existing: Existing<'_>) -> Option<Markup> {
     let (path, line) = (draft.path.as_deref()?, draft.line?);
     let start = draft.start_line.unwrap_or(line);
-    let left = draft.side.as_deref() == Some("LEFT");
+    let side = if draft.side.as_deref() == Some("LEFT") {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    at(diff, path, side, (start, line), existing)
+}
+
+/// The lines around `start..=line` of `path` in `diff`, on `side`, marked,
+/// with each existing thread under the line it ends on. `None` when the
+/// diff doesn't have those lines.
+pub fn at(
+    diff: &DiffIndex,
+    path: &str,
+    side: Side,
+    (start, line): (u32, u32),
+    existing: Existing<'_>,
+) -> Option<Markup> {
+    let left = side == Side::Left;
     let number = |l: &DiffLine| if left { l.old } else { l.new };
     let lines = diff.hunks(path).iter().find_map(|hunk| {
         let first = hunk.lines.iter().position(|l| number(l) == Some(start))?;
@@ -57,6 +75,72 @@ pub fn context(diff: &DiffIndex, draft: &DraftRow, existing: Existing<'_>) -> Op
                             @if thread.resolved { " " span.chip.dim { "resolved" } }
                         }
                     }
+                }
+            }
+        }
+    })
+}
+
+/// The starting old and new line of a `@@ -a,b +c,d @@` header, or `None`
+/// if it isn't one. The counts are ignored: the body says how many.
+fn hunk_start(header: &str) -> Option<(u32, u32)> {
+    let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;
+    let (old, new) = inner.split_once(' ')?;
+    let first = |part: &str, sign: char| -> Option<u32> {
+        part.strip_prefix(sign)?
+            .split(',')
+            .next()?
+            .parse::<u32>()
+            .ok()
+    };
+    Some((first(old, '-')?, first(new, '+')?))
+}
+
+/// GitHub's own `diffHunk` for a review thread, rendered as the drafts'
+/// context is, with the thread's line marked. `None` if the hunk isn't
+/// one, so a thread shows no code rather than the wrong code.
+pub fn from_hunk(hunk: &str, line: Option<u32>) -> Option<Markup> {
+    let mut lines = hunk.lines();
+    let (mut old, mut new) = hunk_start(lines.next()?)?;
+    let mut rows = Vec::new();
+    for text in lines {
+        // GitHub sends "\ No newline at end of file" like git does.
+        if text.starts_with('\\') {
+            continue;
+        }
+        let (class, body) = match text.chars().next() {
+            Some('+') => ("add", &text[1..]),
+            Some('-') => ("del", &text[1..]),
+            Some(' ') => ("ctx", &text[1..]),
+            // An empty line is a context line GitHub trimmed.
+            None => ("ctx", text),
+            Some(_) => return None,
+        };
+        let (at_old, at_new) = match class {
+            "add" => (None, Some(new)),
+            "del" => (Some(old), None),
+            _ => (Some(old), Some(new)),
+        };
+        if at_old.is_some() {
+            old += 1;
+        }
+        if at_new.is_some() {
+            new += 1;
+        }
+        rows.push((class, body.to_owned(), at_old, at_new));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some(html! {
+        table.diff {
+            @for (class, text, at_old, at_new) in &rows {
+                @let sign = match *class { "add" => "+", "del" => "-", _ => " " };
+                @let marked = line.is_some() && *at_new == line;
+                tr.(*class).anchor[marked] {
+                    td.num { (at_old.map(|n| n.to_string()).unwrap_or_default()) }
+                    td.num { (at_new.map(|n| n.to_string()).unwrap_or_default()) }
+                    td.code { span.sign { (sign) } (text) }
                 }
             }
         }

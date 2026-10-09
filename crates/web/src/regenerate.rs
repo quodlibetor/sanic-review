@@ -4,7 +4,7 @@
 
 use axum::{
     Form,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
@@ -19,6 +19,7 @@ use crate::{
     pr::{crumb, short},
     pr_href,
     submit::RunPath,
+    threads,
 };
 
 /// The PR and its run at `path`, which must be one of its review runs,
@@ -57,11 +58,30 @@ fn card(pr: &PrPage, (run, number): (&ReviewRun, usize), extra: Markup, go: Mark
     })
 }
 
+/// Which thread the card is asked about, so its box starts with it
+/// quoted.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmQuery {
+    about: Option<String>,
+}
+
 pub async fn confirm(
     State(app): State<Shared>,
     Path(path): Path<RunPath>,
+    Query(query): Query<ConfirmQuery>,
 ) -> Result<Markup, Error> {
     let (pr, run, number) = load(&app, &path)?;
+    let about = match &query.about {
+        Some(id) => {
+            let threads = app.store().threads(&pr.key).map_err(Error::pr(&pr.key))?;
+            let thread = threads
+                .iter()
+                .find(|t| &t.id == id)
+                .ok_or_else(|| Error::NotFound(format!("{} has no thread {id}", pr.key.url())))?;
+            threads::answer_prompt(thread)
+        }
+        None => String::new(),
+    };
     let action = format!("{}/runs/{}/regenerate", pr_href(&pr.key), run.id);
     let explain = html! {
         ul.explain {
@@ -85,7 +105,7 @@ pub async fn confirm(
         }
         label.instruction for="instruction" { "Your instruction" }
         textarea #instruction form="confirm" name="instruction" rows="4" required autofocus
-            placeholder="e.g. Drop the nits, and say more about the error handling." {}
+            placeholder="e.g. Drop the nits, and say more about the error handling." { (about) }
     };
     let go = html! {
         form #confirm method="post" action=(action) {

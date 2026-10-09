@@ -176,6 +176,10 @@ pub struct Thread {
     /// Its last line on [`Placement::head`]; `None` once it's outdated.
     pub line: Option<u32>,
     pub resolved: bool,
+    /// The lines GitHub shows it against, as a unified diff fragment:
+    /// its first comment's `diffHunk`. `None` for the conversation, which
+    /// is on no lines.
+    pub diff_hunk: Option<String>,
     /// Where on the diff it sits beyond `line`. The conversation's is empty.
     pub place: Placement,
     /// Oldest first.
@@ -321,6 +325,7 @@ mod tests {
             path: Some(path.into()),
             line,
             resolved: false,
+            diff_hunk: None,
             place,
             comments: vec![Comment {
                 id: "c".into(),

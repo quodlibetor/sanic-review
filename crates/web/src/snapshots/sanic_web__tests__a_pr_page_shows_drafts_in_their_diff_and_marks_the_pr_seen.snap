@@ -87,31 +87,7 @@ expression: "readable(&f, &page.body)"
 <span class="lead">💬</span>
 <span>
 <b>1</b> existing review thread · <b>0</b> overlap your drafts</span>
-<details class="threads-rest">
-<summary>1 thread doesn't overlap a draft</summary>
-<div class="thread">
-<div class="th">
-<span class="anc">src/lib.rs:2</span>
-<span class="dim" title="Lines of another commit than the one reviewed, so they aren't compared with the drafts'.">on another commit</span>
-<span class="chip dim" title="You started it on GitHub.">yours</span>
-<span class="dim">2 comments</span>
-</div>
-<ul class="said">
-<li>
-<b>me</b>
-<div class="md">
-<p>hm</p>
-</div>
-</li>
-<li>
-<b>alice</b>
-<div class="md">
-<p>hm</p>
-</div>
-</li>
-</ul>
-</div>
-</details>
+<a class="threads-rest" href="#threads">1 thread doesn't overlap a draft</a>
 </div>
 <nav class="views" id="views">
 <a class="cur" href="/pr/org/repo/7?view=drafts" data-view="drafts">Drafts</a>
@@ -279,6 +255,37 @@ expression: "readable(&f, &page.body)"
 </details>
 </article>
 </section>
+<section id="threads">
+<h2>Review threads · <span class="hot">1 waiting on you</span>
+</h2>
+<div class="thread waiting">
+<div class="th">
+<span class="anc">src/lib.rs:2</span>
+<span class="dim" title="Lines of another commit than the one reviewed, so they aren't compared with the drafts'.">on another commit</span>
+<span class="chip dim" title="You started it on GitHub.">yours</span>
+<span class="chip hot" title="Someone's comment here is newer than your last answer.">waiting on you</span>
+<span class="dim">2 comments</span>
+</div>
+<ul class="said">
+<li>
+<b>me</b>
+<div class="md">
+<p>hm</p>
+</div>
+</li>
+<li>
+<b>alice</b>
+<div class="md">
+<p>hm</p>
+</div>
+</li>
+</ul>
+<p class="thread-act">
+<a class="linkbtn" data-dialog href="/pr/org/repo/7/runs/1/regenerate?about=t1">Agent…</a>
+<span class="dim">drafts an answer you review before it's posted</span>
+</p>
+</div>
+</section>
 <section class="chat" id="chat">
 <h2>Chat with the reviewer <span class="dim">run 1 · paste into a terminal</span>
 </h2>
@@ -316,7 +323,7 @@ expression: "readable(&f, &page.body)"
 </section>
 <p class="help-foot">
 <span class="k">j</span>
-<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">a</span> revise · <span class="k">f</span> files · <span class="k">p</span> preview · <span class="k">r</span>
+<span class="k">k</span> draft · <span class="k">e</span> edit (<span class="k">Esc</span> saves) · <span class="k">y</span> accept · <span class="k">n</span> reject · <span class="k">u</span> undo · <span class="k">a</span> revise · <span class="k">f</span> files · <span class="k">p</span> preview · <span class="k">t</span> threads · <span class="k">r</span>
 <span class="k">x</span>
 <span class="k">i</span>
 <span class="k">c</span> act on the PR · <span class="k">q</span> index</p>
@@ -426,6 +433,12 @@ expression: "readable(&f, &page.body)"
 <kbd>s</kbd>
 </th>
 <td>in the files changed: one column, or old beside new</td>
+</tr>
+<tr>
+<th>
+<kbd>t</kbd>
+</th>
+<td>on a PR page: jump to its review threads</td>
 </tr>
 <tr>
 <th>

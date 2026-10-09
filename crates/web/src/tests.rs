@@ -290,6 +290,7 @@ fn fixture_prs() -> Vec<PrSnapshot> {
                 path: Some("src/lib.rs".into()),
                 line: Some(2),
                 resolved: false,
+                diff_hunk: None,
                 place: Placement::default(),
                 comments: vec![
                     said("c1", "me", "2026-09-20T00:00:00Z"),
@@ -2430,6 +2431,7 @@ async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
         path: None,
         line: None,
         resolved: false,
+        diff_hunk: None,
         place: Placement::default(),
         comments,
     };
@@ -3160,6 +3162,7 @@ fn review_thread(id: &str, path: &str, line: Option<u32>, author: &str, body: &s
         path: Some(path.into()),
         line,
         resolved: false,
+        diff_hunk: None,
         place: Placement {
             side: Some(Side::Right),
             head: Some("head7".into()),
@@ -3233,21 +3236,34 @@ async fn existing_threads_are_summed_up_and_shown_beside_the_drafts_they_overlap
         summary.contains("<b>6</b> existing review threads · <b class=\"hot\">2</b> overlap your drafts · 1 resolved"),
         "{summary}"
     );
-    // The rest, folded: every thread but the two overlapping ones.
-    let rest = &summary[summary.find("<details").unwrap()..];
-    assert!(rest.contains("4 threads don't overlap a draft"), "{rest}");
-    for id in ["t1", "t-resolved", "t-moved", "t-other"] {
+    // The bar points at the section below rather than folding them away.
+    assert!(
+        summary.contains(
+            r##"<a class="threads-rest" href="#threads">4 threads don't overlap a draft"##
+        ),
+        "{summary}"
+    );
+    // The section has every thread; the two the drafts overlap are a line
+    // each there, since they're shown in full with their drafts.
+    let section = &body[body.find(r#"<section id="threads">"#).unwrap()..];
+    for id in [
+        "t1",
+        "t-resolved",
+        "t-moved",
+        "t-other",
+        "t-range",
+        "t-outdated",
+    ] {
         assert!(
-            rest.contains(&format!("#discussion_{id}\"")),
-            "{id}: {rest}"
+            section.contains(&format!("#discussion_{id}\"")),
+            "{id}: {section}"
         );
     }
-    for id in ["t-range", "t-outdated"] {
-        assert!(
-            !rest.contains(&format!("#discussion_{id}\"")),
-            "{id}: {rest}"
-        );
-    }
+    assert_eq!(
+        section.matches("Shown with your drafts above.").count(),
+        2,
+        "{section}"
+    );
     insta::assert_snapshot!(readable(&f, card_of_draft(body, f.drafts[1])));
 }
 
@@ -4585,6 +4601,11 @@ fn threads_summary(body: &str) -> &str {
     &body[body.find(r#"id="existing""#).unwrap()..body.find(r#"id="drafts""#).unwrap()]
 }
 
+/// The whole-PR threads section, below the drafts.
+fn threads_section(body: &str) -> &str {
+    &body[body.find(r#"<section id="threads">"#).unwrap()..]
+}
+
 /// PR 7 polled again with `threads`, beside the fixture's `t1`, which
 /// is on no draft's lines.
 fn record_pr7_threads(f: &Fixture, threads: Vec<Thread>) {
@@ -4677,7 +4698,8 @@ async fn a_thread_posted_before_its_comment_was_recorded_is_matched_by_its_text(
         ),
         "{summary}"
     );
-    assert!(summary.contains("#discussion_t-bob"), "{summary}");
+    let section = threads_section(&page.body);
+    assert!(section.contains("#discussion_t-bob"), "{section}");
     let card = card_of_draft(&page.body, f.drafts[1]);
     assert!(card.contains("Posted from here ↗"), "{card}");
     assert!(card.contains("#discussion_t-mine"), "{card}");
@@ -4803,7 +4825,8 @@ async fn a_draft_that_chose_a_thread_but_went_inline_is_not_in_it() {
         ),
         "{summary}"
     );
-    assert!(summary.contains("#discussion_t-bob"), "{summary}");
+    let section = threads_section(&page.body);
+    assert!(section.contains("#discussion_t-bob"), "{section}");
     let card = card_of_draft(&page.body, f.drafts[1]);
     assert!(card.contains("Posted from here ↗"), "{card}");
     assert!(!card.contains("Posted in this thread:"), "{card}");
@@ -5015,4 +5038,199 @@ async fn a_cancelled_run_reads_cancelled_and_can_be_started_again() {
         "{}",
         ask.body
     );
+}
+/// A PR nothing here has reviewed still has the conversation GitHub holds,
+/// which is what the status line's "unanswered" counts.
+#[tokio::test]
+async fn a_pr_with_no_reviews_still_shows_its_threads() {
+    let f = fixture(false).await;
+    let waiting = review_thread("t-9", "src/lib.rs", Some(2), "me", "is this right?");
+    let mut waiting = waiting;
+    waiting.comments.push(Comment {
+        id: "t-9-c2".into(),
+        author: "dave".into(),
+        body: "no, see the RFC".into(),
+        created_at: "2026-09-22T00:00:00Z".into(),
+        url: None,
+        by_bot: false,
+        reacted_at: None,
+        reactions: vec![],
+    });
+    let snap = PrSnapshot {
+        threads: vec![waiting],
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some("CLEAN".into()),
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let body = &page.body;
+    assert!(body.contains("No reviews yet."), "{body}");
+    let section = threads_section(body);
+    assert!(section.contains("1 waiting on you"), "{section}");
+    assert!(section.contains("waiting on you</span>"), "{section}");
+    assert!(section.contains("no, see the RFC"), "{section}");
+    // Nothing to revise, so the agent is asked for a review instead.
+    assert!(
+        section.contains(r#"href="/pr/org/repo/9/review-now""#),
+        "{section}"
+    );
+}
+
+/// The Agent card asked about a thread starts from it, so you edit an
+/// instruction rather than writing one.
+#[tokio::test]
+async fn the_agent_card_starts_from_the_thread_you_asked_about() {
+    let f = fixture(false).await;
+    let card = f.get("/pr/org/repo/7/runs/1/regenerate?about=t1").await;
+    assert_eq!(card.status, StatusCode::OK, "{}", card.body);
+    let box_ = &card.body[card.body.find("<textarea").unwrap()..];
+    assert!(
+        box_.contains("Draft an answer to this review thread"),
+        "{box_}"
+    );
+    assert!(box_.contains("src/lib.rs:2"), "{box_}");
+    assert!(box_.contains("alice: hm"), "{box_}");
+    // Without one it's empty, as before.
+    let plain = f.get("/pr/org/repo/7/runs/1/regenerate").await;
+    let box_ = &plain.body[plain.body.find("<textarea").unwrap()..];
+    assert!(box_.contains("></textarea>"), "{box_}");
+    // A thread the PR doesn't have is a 404, not an empty box.
+    let gone = f.get("/pr/org/repo/7/runs/1/regenerate?about=nope").await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND, "{}", gone.body);
+}
+
+/// The conversation is a thread the status line counts, so leaving it
+/// out of the section would be the page disagreeing with its own badge.
+#[tokio::test]
+async fn the_conversation_is_in_the_section_the_status_line_counts() {
+    let f = fixture(false).await;
+    let says = |id: &str, author: &str, body: &str, at: &str| Comment {
+        id: id.into(),
+        author: author.into(),
+        body: body.into(),
+        created_at: at.into(),
+        url: None,
+        by_bot: false,
+        reacted_at: None,
+        reactions: vec![],
+    };
+    let snap = PrSnapshot {
+        threads: vec![Thread {
+            id: sanic_core::pr::CONVERSATION_THREAD.into(),
+            path: None,
+            line: None,
+            resolved: false,
+            diff_hunk: None,
+            place: Placement::default(),
+            comments: vec![
+                says("cv1", "me", "ready?", "2026-09-20T00:00:00Z"),
+                says(
+                    "cv2",
+                    "erin",
+                    "not until the migration lands",
+                    "2026-09-21T00:00:00Z",
+                ),
+            ],
+        }],
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some("CLEAN".into()),
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    let section = threads_section(&page.body);
+    assert!(section.contains("the conversation"), "{section}");
+    assert!(
+        section.contains("not until the migration lands"),
+        "{section}"
+    );
+    // The heading agrees with the count the status line shows.
+    assert!(section.contains("1 waiting on you"), "{section}");
+    assert!(page.body.contains("1 unanswered"), "{}", page.body);
+}
+
+/// A PR nothing here has reviewed has no diff and no mirror, so the code
+/// comes from the hunk GitHub shows the thread against.
+#[tokio::test]
+async fn a_threads_code_comes_from_githubs_hunk_without_a_review() {
+    let f = fixture(false).await;
+    let mut thread = review_thread("t-9", "src/lib.rs", Some(8), "erin", "why this way?");
+    thread.diff_hunk =
+        Some("@@ -5,4 +5,5 @@ fn main() {\n ctx one\n-gone\n+taken\n+kept\n ctx two".into());
+    let snap = PrSnapshot {
+        threads: vec![thread],
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    let section = threads_section(&page.body);
+    assert!(section.contains("taken"), "{section}");
+    assert!(section.contains("gone"), "{section}");
+    assert!(section.contains(r#"<tr class="del""#), "{section}");
+    // The thread's line is new line 8, the row the hunk ends on.
+    assert!(section.contains(r#"<tr class="ctx anchor""#), "{section}");
+    assert!(section.contains(r#"<td class="num">8</td>"#), "{section}");
+    // Above the conversation, as GitHub shows it.
+    let code = section.find("<table class=\"diff\"").unwrap();
+    let said = section.find("<ul class=\"said\"").unwrap();
+    assert!(code < said, "the code goes above the comments: {section}");
+    // Nothing was asked of the mirror.
+    assert!(!std::path::Path::new(&f.data.path().join("mirrors")).exists());
+}
+
+/// A hunk GitHub didn't give, or one that isn't a hunk, leaves the thread
+/// without code rather than showing the wrong lines.
+#[tokio::test]
+async fn a_thread_without_a_usable_hunk_shows_no_code() {
+    let f = fixture(false).await;
+    let mut junk = review_thread("t-junk", "src/lib.rs", Some(8), "erin", "junk hunk");
+    junk.diff_hunk = Some("not a hunk at all".into());
+    let none = review_thread("t-none", "src/other.rs", Some(3), "erin", "no hunk");
+    let snap = PrSnapshot {
+        threads: vec![junk, none],
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    let section = threads_section(&page.body);
+    assert!(section.contains("junk hunk"), "{section}");
+    assert!(section.contains("no hunk"), "{section}");
+    assert!(!section.contains("<table class=\"diff\""), "{section}");
+}
+
+/// A thread on the reviewed commit's lines gets its code from the run's
+/// own diff, with the +/- the review saw, not from the mirror.
+#[tokio::test]
+async fn a_threads_code_comes_from_the_reviewed_diff_when_it_has_those_lines() {
+    let f = fixture(false).await;
+    let mut thread = review_thread("t-diff", "src/lib.rs", Some(2), "alice", "why 2?");
+    thread.place.head = Some("head7".into());
+    record_pr7_threads(&f, vec![thread]);
+    let page = f.get("/pr/org/repo/7").await;
+    let section = threads_section(&page.body);
+    // The diff's own lines, added and removed, which a whole-file read
+    // could not show.
+    assert!(section.contains("let n = 2"), "{section}");
+    assert!(section.contains("let n = 1"), "{section}");
+    assert!(section.contains(r#"<tr class="del""#), "{section}");
+    // Nothing was asked of the mirror: it has no file for this commit.
+    assert!(!section.contains("table class=\"diff whole\""), "{section}");
 }
