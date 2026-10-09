@@ -3,7 +3,7 @@
 //! and the rest folded away. A thread a draft was posted as is that
 //! draft's posted form, and an existing thread to every other draft.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use maud::{Markup, html};
 use sanic_core::{
@@ -168,6 +168,23 @@ pub enum Mine {
     },
 }
 
+/// The commit `thread`'s lines are lines of, with its path, side and
+/// first and last lines there: the head it was fetched at, or, once
+/// outdated, the commit it was left on. `None` for a thread on no lines.
+pub fn placed(thread: &Thread) -> Option<(&str, &str, Side, (u32, u32))> {
+    let path = thread.path.as_deref()?;
+    [
+        thread.place.head.as_deref(),
+        thread.place.original_commit.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|commit| {
+        let (side, first, last) = thread.place.lines_at(thread.line, commit)?;
+        Some((commit, path, side, (first, last)))
+    })
+}
+
 /// `draft`'s path, side and first and last lines, if it's on lines.
 pub fn lines(draft: &DraftRow) -> Option<(&str, Side, (u32, u32))> {
     let (path, line) = (draft.path.as_deref()?, draft.line?);
@@ -262,6 +279,7 @@ pub struct Marks {
 pub fn section(
     existing: Existing<'_>,
     drafts: &[DraftRow],
+    code: &Code<'_>,
     ask: impl Fn(&Thread) -> Markup,
 ) -> Markup {
     // Shown in full beside their drafts already, so here they're a line
@@ -294,6 +312,7 @@ pub fn section(
                 }
             };
         }
+        let under = html! { (code.of(thread)) (ask(thread)) };
         thread_box_with(
             existing.at(),
             existing.diff,
@@ -303,7 +322,7 @@ pub fn section(
                 chosen: false,
                 waiting,
             },
-            &ask(thread),
+            &under,
         )
     };
     html! {
@@ -502,6 +521,59 @@ pub fn excerpt_of(body: &str, max: usize) -> String {
     }
     let cut: String = flat.chars().take(max).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// The code each thread is on, for [`section`]: the reviewed diff where
+/// it has those lines, else the file read from the mirror at the commit
+/// the thread's lines belong to.
+pub struct Code<'a> {
+    existing: Existing<'a>,
+    /// `(commit, path)` to the file's text, for the threads the diff
+    /// can't show.
+    files: &'a HashMap<(String, String), String>,
+}
+
+impl<'a> Code<'a> {
+    pub fn new(existing: Existing<'a>, files: &'a HashMap<(String, String), String>) -> Self {
+        Self { existing, files }
+    }
+
+    /// Which threads need a file from the mirror, as `(commit, path)`:
+    /// the ones the run's diff doesn't place. Only `Right` lines, since a
+    /// `Left` thread's are lines of the base, not of the commit named.
+    pub fn wanted(existing: Existing<'_>) -> Vec<(String, String)> {
+        existing
+            .every_thread()
+            .filter_map(placed)
+            .filter(|&(commit, _, side, _)| {
+                // The diff places only its own head's lines, and there's
+                // no diff at all until a review has run.
+                let in_diff = existing.diff.is_some() && commit == existing.head;
+                side == Side::Right && !in_diff
+            })
+            .map(|(commit, path, _, _)| (commit.to_owned(), path.to_owned()))
+            .collect()
+    }
+
+    fn of(&self, thread: &Thread) -> Markup {
+        let Some((commit, path, side, lines)) = placed(thread) else {
+            return html! {};
+        };
+        if commit == self.existing.head
+            && let Some(diff) = self.existing.diff
+            && let Some(shown) = crate::diff::at(diff, path, side, lines, self.existing)
+        {
+            return shown;
+        }
+        if side != Side::Right {
+            return html! {};
+        }
+        let key = (commit.to_owned(), path.to_owned());
+        let Some(text) = self.files.get(&key) else {
+            return html! {};
+        };
+        crate::diff::from_file(text, lines).unwrap_or_else(|| html! {})
+    }
 }
 
 #[cfg(test)]

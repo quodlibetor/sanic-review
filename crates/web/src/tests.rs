@@ -5142,3 +5142,97 @@ async fn the_conversation_is_in_the_section_the_status_line_counts() {
     assert!(section.contains("1 waiting on you"), "{section}");
     assert!(page.body.contains("1 unanswered"), "{}", page.body);
 }
+
+/// With no review there's no diff, so a thread's code comes from the
+/// mirror at the commit its lines belong to.
+#[tokio::test]
+async fn a_threads_code_is_read_from_the_mirror_when_no_review_has_a_diff() {
+    let f = fixture(false).await;
+    f.mirror.add("head9", "src/lib.rs", &numbered(20));
+    let mut thread = review_thread("t-9", "src/lib.rs", Some(8), "erin", "why this way?");
+    thread.place.head = Some("head9".into());
+    let snap = PrSnapshot {
+        threads: vec![thread],
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    let section = threads_section(&page.body);
+    // Its own line, marked, with three either side.
+    assert!(section.contains("line 8"), "{section}");
+    assert!(section.contains("line 5"), "{section}");
+    assert!(section.contains("line 11"), "{section}");
+    assert!(!section.contains("line 4"), "{section}");
+    assert!(!section.contains("line 12"), "{section}");
+}
+
+/// A thread on the old side names lines of the base, not of the commit
+/// its placement names, so reading that file would show the wrong code.
+#[tokio::test]
+async fn a_left_side_thread_gets_no_code_from_the_mirror() {
+    let f = fixture(false).await;
+    f.mirror.add("head9", "src/lib.rs", &numbered(20));
+    let mut thread = review_thread("t-left", "src/lib.rs", Some(8), "erin", "was this right?");
+    thread.place.head = Some("head9".into());
+    thread.place.side = Some(Side::Left);
+    let snap = PrSnapshot {
+        threads: vec![thread],
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    let section = threads_section(&page.body);
+    assert!(section.contains("was this right?"), "{section}");
+    assert!(!section.contains("line 8"), "{section}");
+}
+
+/// The mirror may not have the commit any more; the thread still shows,
+/// just without code.
+#[tokio::test]
+async fn a_thread_whose_file_the_mirror_lacks_still_shows() {
+    let f = fixture(false).await;
+    let mut thread = review_thread("t-gone", "src/lib.rs", Some(8), "erin", "gone from here");
+    thread.place.head = Some("head-unknown".into());
+    let snap = PrSnapshot {
+        threads: vec![thread],
+        head_sha: "head-unknown".into(),
+        ..snapshot(9, "me", "My change")
+    };
+    f.dashboard
+        .app
+        .store()
+        .record(&snap, "me", "default", &[])
+        .unwrap();
+    let page = f.get("/pr/org/repo/9").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let section = threads_section(&page.body);
+    assert!(section.contains("gone from here"), "{section}");
+    assert!(!section.contains("table class=\"diff"), "{section}");
+}
+
+/// A thread on the reviewed commit's lines gets its code from the run's
+/// own diff, with the +/- the review saw, not from the mirror.
+#[tokio::test]
+async fn a_threads_code_comes_from_the_reviewed_diff_when_it_has_those_lines() {
+    let f = fixture(false).await;
+    let mut thread = review_thread("t-diff", "src/lib.rs", Some(2), "alice", "why 2?");
+    thread.place.head = Some("head7".into());
+    record_pr7_threads(&f, vec![thread]);
+    let page = f.get("/pr/org/repo/7").await;
+    let section = threads_section(&page.body);
+    // The diff's own lines, added and removed, which a whole-file read
+    // could not show.
+    assert!(section.contains("let n = 2"), "{section}");
+    assert!(section.contains("let n = 1"), "{section}");
+    assert!(section.contains(r#"<tr class="del""#), "{section}");
+    // Nothing was asked of the mirror: it has no file for this commit.
+    assert!(!section.contains("table class=\"diff whole\""), "{section}");
+}

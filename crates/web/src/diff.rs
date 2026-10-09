@@ -16,7 +16,25 @@ const AROUND: usize = 3;
 pub fn context(diff: &DiffIndex, draft: &DraftRow, existing: Existing<'_>) -> Option<Markup> {
     let (path, line) = (draft.path.as_deref()?, draft.line?);
     let start = draft.start_line.unwrap_or(line);
-    let left = draft.side.as_deref() == Some("LEFT");
+    let side = if draft.side.as_deref() == Some("LEFT") {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    at(diff, path, side, (start, line), existing)
+}
+
+/// The lines around `start..=line` of `path` in `diff`, on `side`, marked,
+/// with each existing thread under the line it ends on. `None` when the
+/// diff doesn't have those lines.
+pub fn at(
+    diff: &DiffIndex,
+    path: &str,
+    side: Side,
+    (start, line): (u32, u32),
+    existing: Existing<'_>,
+) -> Option<Markup> {
+    let left = side == Side::Left;
     let number = |l: &DiffLine| if left { l.old } else { l.new };
     let lines = diff.hunks(path).iter().find_map(|hunk| {
         let first = hunk.lines.iter().position(|l| number(l) == Some(start))?;
@@ -57,6 +75,33 @@ pub fn context(diff: &DiffIndex, draft: &DraftRow, existing: Existing<'_>) -> Op
                             @if thread.resolved { " " span.chip.dim { "resolved" } }
                         }
                     }
+                }
+            }
+        }
+    })
+}
+
+/// The lines around `start..=line` of a file read whole from the mirror,
+/// its own lines marked. For a thread on a PR no review here has fetched
+/// a diff for, where there's no hunk to show.
+pub fn from_file(text: &str, (start, line): (u32, u32)) -> Option<Markup> {
+    let all: Vec<&str> = text.lines().collect();
+    let (first, last) = (usize::try_from(start).ok()?, usize::try_from(line).ok()?);
+    // The lines are 1-based, and a thread can name a line the file no
+    // longer has.
+    let (first, last) = (first.checked_sub(1)?, last.checked_sub(1)?);
+    if first > last || last >= all.len() {
+        return None;
+    }
+    let from = first.saturating_sub(AROUND);
+    let to = (last + AROUND + 1).min(all.len());
+    Some(html! {
+        table.diff.whole {
+            @for (i, text) in all[from..to].iter().enumerate() {
+                @let n = from + i;
+                tr.ctx.anchor[(first..=last).contains(&n)] {
+                    td.num { (n + 1) }
+                    td.code { span.sign { " " } (text) }
                 }
             }
         }

@@ -1,7 +1,7 @@
 //! A PR's page: the agent's summary and drafts, and what you can do with
 //! them and the PR.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Form,
@@ -19,7 +19,7 @@ use sanic_core::{
 use sanic_runner::diff::DiffIndex;
 use sanic_store::{DraftRow, DraftStatus, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice};
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     App, Error, PrPath, Shared, chat, diff,
@@ -124,6 +124,8 @@ pub async fn page(
         (&threads, &posted),
         diff.as_ref(),
     );
+    let files = thread_files(&app, &pr.key, existing).await;
+    let code = threads::Code::new(existing, &files);
     let ask = |thread: &Thread| ask_the_agent(&pr.key, shown.as_ref(), thread);
     let content = html! {
         (pr_header(&app, &header))
@@ -134,7 +136,7 @@ pub async fn page(
         } @else {
             p.dim { "No review has finished yet, so there are no drafts." }
         }
-        (threads::section(existing, &drafts, ask))
+        (threads::section(existing, &drafts, &code, ask))
         // After the drafts: it's for once you've read them.
         @if let Some(chat) = &chat { (chat) }
         (keys_foot())
@@ -435,6 +437,41 @@ impl Revise {
     ) -> color_eyre::Result<Self> {
         let revisable = store.session_run(run.id)?.is_some();
         Ok(Self::new(run, &store.review_runs(key)?, revisable))
+    }
+}
+
+/// The files the threads' code snippets need, read from the mirror in one
+/// blocking turn: the ones the reviewed diff can't place. A file the
+/// mirror no longer has is left out, and its thread shows no code.
+async fn thread_files(
+    app: &Shared,
+    key: &PrKey,
+    existing: Existing<'_>,
+) -> HashMap<(String, String), String> {
+    let mut wanted = threads::Code::wanted(existing);
+    wanted.sort();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return HashMap::new();
+    }
+    let (sources, repo) = (Arc::clone(&app.sources), key.repo.clone());
+    let read = tokio::task::spawn_blocking(move || {
+        wanted
+            .into_iter()
+            .filter_map(|(commit, path)| {
+                let text = sources.file_at(&repo, &commit, &path).ok()??;
+                let text = String::from_utf8(text).ok()?;
+                Some(((commit, path), text))
+            })
+            .collect()
+    })
+    .await;
+    match read {
+        Ok(files) => files,
+        Err(err) => {
+            warn!(url = %key.url(), "reading the threads' files failed: {err:?}");
+            HashMap::new()
+        }
     }
 }
 
