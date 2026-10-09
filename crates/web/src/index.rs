@@ -512,11 +512,12 @@ fn lists(app: &App, overview: &Overview, listed: &Listed, query: &IndexQuery) ->
     html! {
         div #panes hx-get=(query.href()) hx-trigger="every 5s" hx-select="#panes"
             hx-select-oob=(filter::REFRESHED) hx-swap="outerHTML" data-archived-href=(toggled) {
+            (tabs(listed, query))
             (owed_list(app, overview, &listed.owed, query))
             (my_list(app, overview, &listed.mine, query))
             p.help-foot {
                 (keycap("j")) (keycap("k")) " move (a folded group is skipped) · "
-                (keycap("Tab")) " other list · " (keycap("Enter")) " open · "
+                (keycap("Tab")) " other tab · " (keycap("Enter")) " open · "
                 (keycap("r")) (keycap("x")) (keycap("i")) (keycap("c"))
                 " act on the selected row · " (keycap("v")) " reviewers · "
                 (keycap("d")) " details · " (keycap("X")) " archived · "
@@ -524,6 +525,49 @@ fn lists(app: &App, overview: &Overview, listed: &Listed, query: &IndexQuery) ->
             }
         }
     }
+}
+
+/// The lists' tabs, shown only with the script, which picks one. Each
+/// counts its list, and those in it that need you, as its headings do.
+fn tabs(listed: &Listed, query: &IndexQuery) -> Markup {
+    let owed = shown(&listed.owed, query);
+    let mine = shown(&listed.mine, query);
+    let owed_need = owed
+        .iter()
+        .filter(|l| l.group == OwedGroup::NeedsYou)
+        .count();
+    let mine_need = mine
+        .iter()
+        .filter(|l| l.group == Some(MyGroup::NeedsYou))
+        .count();
+    html! {
+        div.tabs {
+            (tab("owed", "Reviews you owe", owed.len(), listed.owed.len(), owed_need))
+            (tab("mine", "Your PRs", mine.len(), listed.mine.len(), mine_need))
+        }
+    }
+}
+
+fn tab(list: &str, title: &str, shown: usize, listed: usize, need: usize) -> Markup {
+    html! {
+        button.tab type="button" data-tab=(list) aria-controls=(list) aria-pressed="false" {
+            (title) " " span.dim { (count(shown, listed)) }
+            @if need > 0 {
+                " " span.chip.u-act { (need) (if need == 1 { " needs you" } else { " need you" }) }
+            }
+        }
+    }
+}
+
+/// The listings the filter leaves.
+fn shown<'l, 'a, P, G>(
+    listed: &'l [Listing<'a, P, G>],
+    query: &IndexQuery,
+) -> Vec<&'l Listing<'a, P, G>> {
+    listed
+        .iter()
+        .filter(|l| query.filter.matches(&l.values))
+        .collect()
 }
 
 /// The list heading's link that shows or hides archived PRs.
@@ -548,10 +592,7 @@ fn owed_list(
     listed: &[Listing<OwedReview, OwedGroup>],
     query: &IndexQuery,
 ) -> Markup {
-    let shown: Vec<&Listing<OwedReview, OwedGroup>> = listed
-        .iter()
-        .filter(|l| query.filter.matches(&l.values))
-        .collect();
+    let shown = shown(listed, query);
     // The group's rows the filter leaves, and how many it has without it.
     let group = |group| -> (Vec<&OwedReview>, usize) {
         let mut prs: Vec<_> = shown
@@ -573,7 +614,7 @@ fn owed_list(
     html! {
         section.list #owed {
             h2 {
-                "Reviews you owe " span.dim { (count(shown.len(), listed.len())) }
+                span.ttl { "Reviews you owe " span.dim { (count(shown.len(), listed.len())) } }
                 (archived_toggle(query, archived))
             }
             (hidden_line(query, listed.len() - shown.len(), None))
@@ -612,10 +653,7 @@ fn my_list(
     listed: &[Listing<MyPr, Option<MyGroup>>],
     query: &IndexQuery,
 ) -> Markup {
-    let shown: Vec<&Listing<MyPr, Option<MyGroup>>> = listed
-        .iter()
-        .filter(|l| query.filter.matches(&l.values))
-        .collect();
+    let shown = shown(listed, query);
     let group = |group: Option<MyGroup>| -> (Vec<&MyPr>, usize) {
         let prs = shown
             .iter()
@@ -636,7 +674,7 @@ fn my_list(
     html! {
         section.list #mine {
             h2 {
-                "Your PRs " span.dim { (count(shown.len(), listed.len())) }
+                span.ttl { "Your PRs " span.dim { (count(shown.len(), listed.len())) } }
                 (archived_toggle(query, archived))
             }
             (hidden_line(query, listed.len() - shown.len(), note))

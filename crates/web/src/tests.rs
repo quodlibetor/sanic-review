@@ -1514,13 +1514,24 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     assert!(index.contains("Add the thing"), "{index}");
     assert!(!index.contains("Fix &lt;script&gt; escaping") && !index.contains("WIP: try things"));
     assert!(
-        index.contains(r#"Reviews you owe <span class="dim">1 of 3</span>"#),
+        index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">1 of 3</span>"#),
         "{index}"
     );
     assert!(index.contains(r#"<b>2</b> hidden by filter · <a class="fclear" href="/">clear</a>"#));
     // Your PRs are all yours: author leaves them be, and says so.
     assert!(index.contains("My change"));
-    assert!(index.contains(r#"Your PRs <span class="dim">1</span>"#));
+    assert!(index.contains(r#"<span class="ttl">Your PRs <span class="dim">1</span>"#));
+    // The tabs count as the headings do, and say only of a list with any
+    // how many need you.
+    assert!(
+        index.contains(
+            r#"data-tab="owed" aria-controls="owed" aria-pressed="false">Reviews you owe <span class="dim">1 of 3</span> <span class="chip u-act">1 needs you</span></button>"#
+        ),
+        "{index}"
+    );
+    assert!(index.contains(
+        r#"data-tab="mine" aria-controls="mine" aria-pressed="false">Your PRs <span class="dim">1</span></button>"#
+    ));
     assert!(index.contains("author isn't applied here: these are all yours"));
     assert_eq!(headings(&index), ["NEEDS YOU · 1 of 2", "READY · 1"]);
     // The refresh asks for the same, and the tick is kept.
@@ -1546,7 +1557,8 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     assert!(index.contains(r#"<b class="cnt">3</b> of <b>3</b> pending drafts"#));
 
     let index = f.get("/?state=mergeable").await.body;
-    assert!(index.contains(r#"Reviews you owe <span class="dim">0 of 3</span>"#));
+    assert!(index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">0 of 3</span>"#));
+    assert!(index.contains(r#"Reviews you owe <span class="dim">0 of 3</span></button>"#));
     assert!(index.contains("<b>3</b> hidden by filter"));
     assert_eq!(headings(&index), ["READY · 1"]);
     assert!(index.contains(r#"<b class="cnt">0</b> of <b>3</b> pending drafts"#));
@@ -1613,7 +1625,7 @@ async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
     let index = f.get("/").await.body;
     assert!(!index.contains("Fix &lt;script&gt; escaping"));
     assert!(
-        index.contains(r#"Reviews you owe <span class="dim">2</span>"#)
+        index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">2</span>"#)
             && index.contains("show 1 archived"),
         "{index}"
     );

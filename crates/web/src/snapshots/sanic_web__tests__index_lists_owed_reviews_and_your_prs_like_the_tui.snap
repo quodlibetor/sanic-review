@@ -112,8 +112,16 @@ expression: "readable(&f, &page.body)"
 </details>
 </form>
 <div id="panes" hx-get="/" hx-trigger="every 5s" hx-select="#panes" hx-select-oob="#counts,#facets,#filter-n" hx-swap="outerHTML" data-archived-href="/?archived=true">
+<div class="tabs">
+<button class="tab" type="button" data-tab="owed" aria-controls="owed" aria-pressed="false">Reviews you owe <span class="dim">3</span> <span class="chip u-act">2 need you</span>
+</button>
+<button class="tab" type="button" data-tab="mine" aria-controls="mine" aria-pressed="false">Your PRs <span class="dim">1</span>
+</button>
+</div>
 <section class="list" id="owed">
-<h2>Reviews you owe <span class="dim">3</span>
+<h2>
+<span class="ttl">Reviews you owe <span class="dim">3</span>
+</span>
 <span class="sp">
 </span>
 </h2>
@@ -300,7 +308,9 @@ and more detail</pre>
 </details>
 </section>
 <section class="list" id="mine">
-<h2>Your PRs <span class="dim">1</span>
+<h2>
+<span class="ttl">Your PRs <span class="dim">1</span>
+</span>
 <span class="sp">
 </span>
 </h2>
@@ -362,7 +372,7 @@ and more detail</pre>
 </section>
 <p class="help-foot">
 <span class="k">j</span>
-<span class="k">k</span> move (a folded group is skipped) · <span class="k">Tab</span> other list · <span class="k">Enter</span> open · <span class="k">r</span>
+<span class="k">k</span> move (a folded group is skipped) · <span class="k">Tab</span> other tab · <span class="k">Enter</span> open · <span class="k">r</span>
 <span class="k">x</span>
 <span class="k">i</span>
 <span class="k">c</span> act on the selected row · <span class="k">v</span> reviewers · <span class="k">d</span> details · <span class="k">X</span> archived · <span class="k">?</span> all keys</p>
@@ -382,7 +392,7 @@ and more detail</pre>
 <th>
 <kbd>Tab, Shift-Tab</kbd>
 </th>
-<td>next, previous list</td>
+<td>next, previous tab</td>
 </tr>
 <tr>
 <th>
