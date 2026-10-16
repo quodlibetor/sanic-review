@@ -33,6 +33,8 @@ pub struct ChatCommand {
     /// The run's other directories: its run dir, procedure, skills and
     /// reference checkouts.
     pub add_dirs: Vec<PathBuf>,
+    /// The run's `sanic` plugin, if it had one.
+    pub plugin_dir: Option<PathBuf>,
     /// The profile's tools, unless edits are allowed.
     pub tools: Vec<String>,
     /// [`EDIT_TOOLS`] in place of `tools`. Only the worktree is given
@@ -65,6 +67,10 @@ impl ChatCommand {
         if !self.allow_edits {
             for dir in &self.add_dirs {
                 args.push("--add-dir".into());
+                args.push(dir.display().to_string());
+            }
+            if let Some(dir) = &self.plugin_dir {
+                args.push("--plugin-dir".into());
                 args.push(dir.display().to_string());
             }
         }
@@ -151,6 +157,7 @@ mod tests {
             session_id: "sess-9".into(),
             cwd: "/data/worktrees/3".into(),
             add_dirs: vec!["/data/runs/3".into(), "/src/lib's".into()],
+            plugin_dir: Some("/data/runs/3/plugin".into()),
             tools: ["Read", "Grep", "Glob", "Agent", "Skill"]
                 .map(String::from)
                 .into(),
@@ -182,6 +189,8 @@ mod tests {
                 "/data/runs/3",
                 "--add-dir",
                 "/src/lib's",
+                "--plugin-dir",
+                "/data/runs/3/plugin",
             ]
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/data/worktrees/3")));
@@ -216,6 +225,7 @@ mod tests {
             "the profile's Agent and Skill aren't kept: {args:?}"
         );
         assert!(!args.contains(&"--add-dir".to_owned()));
+        assert!(!args.contains(&"--plugin-dir".to_owned()));
     }
 
     #[test]
@@ -228,7 +238,8 @@ mod tests {
                  --strict-mcp-config --tools Read,Grep,Glob,Agent,Skill \
                  --allowedTools Read,Grep,Glob,Agent,Skill \
                  --append-system-prompt {} \
-                 --add-dir /data/runs/3 --add-dir '/src/lib'\\''s'",
+                 --add-dir /data/runs/3 --add-dir '/src/lib'\\''s' \
+                 --plugin-dir /data/runs/3/plugin",
                 quote(CHAT_ENVIRONMENT)
             )
         );

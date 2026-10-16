@@ -149,6 +149,7 @@ fn profile(instructions: Vec<PathBuf>) -> AgentProfile {
         instructions,
         procedure: vec![],
         skills: vec![],
+        finders: None,
         model: Some("claude-sonnet-5".into()),
         effort: Effort::Medium,
         tools: ["Read", "Grep", "Glob"].map(String::from).into(),
@@ -204,6 +205,34 @@ async fn a_runs_own_effort_overrides_its_profiles() {
         .expect("not cancelled");
     let args = read(s.fake.path(), "args");
     assert_eq!(arg_after(&args, "--effort").as_deref(), Some("xhigh"));
+}
+
+#[tokio::test]
+async fn the_profiles_skills_load_as_the_sanic_plugin() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "none", "comments": []
+    }));
+    let s = setup("", &output, Duration::from_secs(30));
+    let skills = s.fake.path().join("skills");
+    std::fs::create_dir_all(skills.join("lint")).unwrap();
+    std::fs::write(skills.join("lint/SKILL.md"), "Lint it.").unwrap();
+    let mut profile = profile(vec![]);
+    profile.skills.push(skills.clone());
+    s.runner
+        .review(&s.run, &context(), &s.settings(profile), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let plugin = s.data.path().join("runs/3/plugin");
+    let args = read(s.fake.path(), "args");
+    assert_eq!(
+        arg_after(&args, "--plugin-dir").as_deref(),
+        Some(plugin.to_str().unwrap())
+    );
+    assert_eq!(
+        std::fs::read_link(plugin.join("skills/lint")).unwrap(),
+        skills.join("lint").canonicalize().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -761,4 +790,153 @@ async fn a_procedure_without_its_skill_file_is_an_error() {
         .await
         .unwrap_err();
     assert!(format!("{err:?}").contains("reading procedure"), "{err:?}");
+}
+
+/// A fake `claude` body that numbers its calls, keeps each's args and
+/// stdin, and prints `output.<n>.jsonl` in place of `output.jsonl` when
+/// there is one; `fail` makes call 2 exit 1.
+fn counting(fail: bool) -> String {
+    let fail = if fail {
+        "[ \"$n\" = 2 ] && exit 1"
+    } else {
+        ":"
+    };
+    format!(
+        "n=$(( $(cat \"$d/count\" 2>/dev/null || echo 0) + 1 ))\n\
+         echo \"$n\" > \"$d/count\"\n\
+         cp \"$d/args\" \"$d/args.$n\"\n\
+         cp \"$d/stdin\" \"$d/stdin.$n\"\n\
+         {fail}\n\
+         [ -f \"$d/output.$n.jsonl\" ] && cat \"$d/output.$n.jsonl\" && exit 0"
+    )
+}
+
+/// A transcript in which the agent ran `/code-review` with `args`, and the
+/// answer `structured`.
+fn ran_code_review(args: &str, structured: &serde_json::Value) -> String {
+    let call = json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Skill",
+         "input": {"skill": "code-review", "args": args}}
+    ]}});
+    let answer = json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text",
+         "text": "Skill \"code-review\" completed (forked execution).\n\nResult:\nOne issue."}]}
+    ]}});
+    format!("{call}\n{answer}\n{}", success(structured))
+}
+
+/// A profile whose procedure requires `/code-review`, in `dir`.
+fn requiring_code_review(dir: &Path) -> AgentProfile {
+    std::fs::write(dir.join("SKILL.md"), "Run `/code-review` first.").unwrap();
+    let mut profile = profile(vec![]);
+    profile.tools.push("Skill".into());
+    profile.procedure.push(dir.to_owned());
+    profile
+}
+
+fn checked(reviewed: Reviewed) -> sanic_core::run::ProcedureCheck {
+    match reviewed {
+        Reviewed::Review { check, .. } => check.expect("a procedure check"),
+        other => panic!("not a review: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_review_that_skips_its_procedure_is_asked_once_more() {
+    let skipped = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "comment", "comments": [], "run_report": []
+    }));
+    let s = setup(&counting(false), &skipped, Duration::from_secs(30));
+    let diff = s.data.path().join("runs/3/pr.diff");
+    let args = format!("medium The PR's diff is in {} and", diff.display());
+    let fixed = ran_code_review(
+        &args,
+        &json!({
+            "summary": "One issue.", "suggested_verdict": "comment", "comments": [],
+            "run_report": [{"skill": "code-review", "status": "ran", "findings_count": 1}]
+        }),
+    );
+    std::fs::write(s.fake.path().join("output.2.jsonl"), fixed).unwrap();
+    let profile = requiring_code_review(s.fake.path());
+
+    let reviewed = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let check = checked(reviewed);
+    assert_eq!(check.attempts, 2);
+    assert_eq!(check.misses, Vec::<String>::new());
+
+    let fake = s.fake.path();
+    assert_eq!(read(fake, "count").trim(), "2");
+    let retry = read(fake, "args.2");
+    assert!(
+        retry.contains("--resume\nsess-1\n--fork-session"),
+        "{retry}"
+    );
+    let stdin = read(fake, "stdin.2");
+    assert!(
+        stdin.contains("`code-review` is missing from `run_report`"),
+        "{stdin}"
+    );
+    assert!(stdin.contains(&diff.display().to_string()), "{stdin}");
+    let first = read(fake, "args.1");
+    assert!(
+        first.contains("run_report"),
+        "the schema requires it: {first}"
+    );
+}
+
+#[tokio::test]
+async fn a_review_that_misses_twice_or_whose_retry_fails_keeps_the_first_flagged() {
+    let skipped = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "comment", "comments": [],
+        "run_report": [{"skill": "code-review", "status": "ran"}]
+    }));
+    for (fail, retry) in [
+        (false, None),
+        (true, None),
+        (false, Some(json!({ "summary": 5 }))),
+    ] {
+        let s = setup(&counting(fail), &skipped, Duration::from_secs(30));
+        if let Some(retry) = retry {
+            std::fs::write(s.fake.path().join("output.2.jsonl"), success(&retry)).unwrap();
+        }
+        let profile = requiring_code_review(s.fake.path());
+        let reviewed = s
+            .runner
+            .review(&s.run, &context(), &s.settings(profile), pending())
+            .await
+            .unwrap()
+            .expect("not cancelled");
+        let check = checked(reviewed);
+        assert_eq!(check.attempts, 2, "fail: {fail}");
+        assert_eq!(
+            check.misses,
+            ["`code-review` is reported as run, but was never called."],
+            "fail: {fail}"
+        );
+        assert_eq!(read(s.fake.path(), "count").trim(), "2");
+    }
+}
+
+#[tokio::test]
+async fn a_review_without_required_skills_is_only_checked_for_its_verdict() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "comment", "comments": []
+    }));
+    let s = setup(&counting(false), &output, Duration::from_secs(30));
+    let reviewed = s
+        .runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    assert!(
+        matches!(reviewed, Reviewed::Review { check: None, .. }),
+        "{reviewed:?}"
+    );
+    assert_eq!(read(s.fake.path(), "count").trim(), "1");
 }

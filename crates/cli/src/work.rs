@@ -21,7 +21,9 @@ use sanic_core::{
     hold::findings,
     manual::{ManualReviews, TeamMembers},
     pr::PrKey,
-    run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
+    run::{
+        DraftRevision, ProcedureCheck, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision,
+    },
     skip::SkipRules,
 };
 use sanic_runner::review::{AgentProfile, ReviewRunner, Reviewed, RunSettings};
@@ -567,7 +569,11 @@ impl Worker {
                     self.store().supersede_run(run.id)
                 }
             },
-            Ok(Some(Reviewed::Review { result, basis })) => {
+            Ok(Some(Reviewed::Review {
+                result,
+                basis,
+                check,
+            })) => {
                 let stored = match (&run.revision, &basis) {
                     (Some(revision), Some(basis)) => self
                         .store()
@@ -577,17 +583,19 @@ impl Worker {
                 if stored.is_ok() {
                     log_result(&result);
                 }
-                stored
+                stored.and_then(|()| self.record_check(run, check.as_ref()))
             }
             Ok(Some(Reviewed::Resumed {
                 result,
                 basis,
                 resume,
                 moved,
+                check,
             })) => self
                 .store()
                 .finish_resumed(run.id, &result, &resume, &basis, &moved)
-                .inspect(|()| log_result(&result)),
+                .inspect(|()| log_result(&result))
+                .and_then(|()| self.record_check(run, check.as_ref())),
             Ok(Some(Reviewed::NoUpdate {
                 result,
                 carried,
@@ -628,6 +636,22 @@ impl Worker {
                 self.store().fail_run(run.id, &format!("{err:#}"))
             }
         }
+    }
+
+    /// Records `run`'s procedure check, warning when it missed.
+    fn record_check(&self, run: &QueuedRun, check: Option<&ProcedureCheck>) -> Result<()> {
+        let Some(check) = check else {
+            return Ok(());
+        };
+        if !check.misses.is_empty() {
+            warn!(
+                url = %run.request.key.url(),
+                misses = ?check.misses,
+                attempts = check.attempts,
+                "review failed its procedure check"
+            );
+        }
+        self.store().record_procedure_check(run.id, check)
     }
 
     /// Cleans up after a run whose task panicked, as a failed run would

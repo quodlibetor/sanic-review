@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # auto_review_authors = []                                         (default) │"
-"│ # added to `review_requests.skip_titles` for this profile's PRs              │"
 "│ # skip_titles = []                                                 (default) │"
 "│ # checked after `review_requests.authors` for this profile's PRs             │"
 "│ # authors = []                                                     (default) │"
@@ -14,6 +12,8 @@ expression: draw(&editor).backend()
 "│ # auto_fix = false                                                 (default) │"
 "│ # how hard the agent thinks on this profile's PRs                            │"
 "│ # effort = "medium"                                     (from runner.effort) │"
+"│ # skills the procedure requires; unset, the `/name`s it writes               │"
+"│ # finders = []                                                     (default) │"
 "│ # what this profile reviews; the most specific entry wins                    │"
 "│ repos = [                                                                    │"
 "│   { github = "org" },                                  counting… · counting… │"

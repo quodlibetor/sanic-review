@@ -10,7 +10,8 @@ use sanic_core::{
     repo::RepoName,
     run::{
         BaselineDraft, Basis, Carried, Dismissal, DraftRevision, InlineComment, PrContext,
-        QueuedRun, Resume, ReviewRequest, ReviewResult, ReviewTrigger, Revision, RunKind, Side,
+        ProcedureCheck, QueuedRun, Resume, ReviewRequest, ReviewResult, ReviewTrigger, Revision,
+        RunKind, Side,
     },
 };
 
@@ -1708,6 +1709,15 @@ impl Store {
             })
         })
         .transpose()
+    }
+
+    /// Records how run `id`'s procedure check came out.
+    pub fn record_procedure_check(&self, id: i64, check: &ProcedureCheck) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET procedure_check = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(check)?],
+        )?;
+        Ok(())
     }
 
     /// Records that run `id`'s agent was shown `comments` of your pending
@@ -4322,6 +4332,31 @@ mod tests {
         assert_eq!(
             states,
             [("A new summary.", "pending"), ("off by one?", "accepted")]
+        );
+    }
+
+    #[test]
+    fn a_runs_procedure_check_is_kept_with_it() {
+        let mut store = store();
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(run.id).unwrap();
+        store.finish_review(run.id, &result()).unwrap();
+        let key = snapshot().key;
+        assert_eq!(store.review_runs(&key).unwrap()[0].procedure_check, None);
+        let check = ProcedureCheck {
+            report: vec![sanic_core::run::SkillReport {
+                skill: "code-review".into(),
+                status: sanic_core::run::SkillStatus::Ran,
+                reason: None,
+                findings_count: Some(2),
+            }],
+            misses: vec!["`sanic:lint` is missing from `run_report`.".into()],
+            attempts: 2,
+        };
+        store.record_procedure_check(run.id, &check).unwrap();
+        assert_eq!(
+            store.review_runs(&key).unwrap()[0].procedure_check,
+            Some(check)
         );
     }
 

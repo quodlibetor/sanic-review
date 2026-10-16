@@ -55,6 +55,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0028_run_by_hand.sql"),
     include_str!("migrations/0029_run_effort.sql"),
     include_str!("migrations/0030_pr_effort.sql"),
+    include_str!("migrations/0031_procedure_check.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
