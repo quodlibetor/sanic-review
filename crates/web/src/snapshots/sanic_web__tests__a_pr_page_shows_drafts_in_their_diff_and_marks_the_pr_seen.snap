@@ -38,6 +38,20 @@ expression: "readable(&f, &page.body)"
 </a>
 <a class="btn" href="#chat">Chat<span class="k">c</span>
 </a>
+<form class="effort" method="post" action="/pr/org/repo/7/effort" hx-post="/pr/org/repo/7/effort" hx-trigger="change" hx-swap="none" title="How hard the agent thinks on this PR's reviews">
+<input type="hidden" name="csrf" value="<token>">
+<select name="effort" aria-label="Review effort">
+<option value="" selected>Effort: profile's (medium)</option>
+<option value="low">Effort: low</option>
+<option value="medium">Effort: medium</option>
+<option value="high">Effort: high</option>
+<option value="xhigh">Effort: xhigh</option>
+<option value="max">Effort: max</option>
+</select>
+<noscript>
+<button class="btn" type="submit">Save</button>
+</noscript>
+</form>
 <form class="archive" method="post" action="/pr/org/repo/7/archive">
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
