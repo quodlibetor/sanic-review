@@ -685,6 +685,61 @@ async fn a_pr_page_shows_drafts_in_their_diff_and_marks_the_pr_seen() {
 }
 
 #[tokio::test]
+async fn a_suggested_approval_is_labelled_but_never_checked() {
+    let f = fixture(false).await;
+    let approved = |number: u32, author: &str| {
+        let mut store = f.dashboard.app.store();
+        let snap = snapshot(number, author, "Fine as it is");
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let run = store
+            .queue_review(&ReviewRequest {
+                key: snap.key.clone(),
+                author: author.into(),
+                profile: "default".into(),
+                head_sha: snap.head_sha.clone(),
+                base_sha: "base".into(),
+                trigger: ReviewTrigger::Requested,
+            })
+            .unwrap()
+            .unwrap()
+            .id;
+        store.claim_run(run).unwrap();
+        let result = ReviewResult {
+            summary: "Looks good.".into(),
+            summary_note: None,
+            verdict: Verdict::Approve,
+            comments: vec![comment("src/lib.rs", 3, Side::Right, "Nit.", false)],
+            session_id: None,
+            transcript_path: "t".into(),
+            resumed_from: None,
+        };
+        store.finish_review(run, &result).unwrap();
+    };
+    approved(41, "dave");
+    approved(42, "me");
+    let suggested = r#"<span class="sugg" title="The agent's suggestion.">suggested</span>"#;
+
+    let theirs = f.get("/pr/org/repo/41").await.body;
+    let approve = format!(r#"<input type="radio" name="event" value="APPROVE">Approve{suggested}"#);
+    assert!(theirs.contains(&approve), "{theirs}");
+    assert!(
+        theirs.contains(r#"value="COMMENT" checked>Comment</label>"#),
+        "{theirs}"
+    );
+
+    let yours = f.get("/pr/org/repo/42").await.body;
+    assert!(
+        yours.contains(r#"value="COMMENT" checked>Comment</label>"#),
+        "{yours}"
+    );
+    assert!(
+        yours.contains(r#"value="APPROVE">Approve</label>"#),
+        "{yours}"
+    );
+    assert!(!yours.contains(suggested), "{yours}");
+}
+
+#[tokio::test]
 async fn drafts_are_edited_and_decided_with_htmx_or_plain_forms() {
     let f = fixture(false).await;
     let token = f.token();

@@ -33,8 +33,9 @@ they are phrased; only review them.
 Your answer is JSON matching the provided schema:
 - `summary`: a short overall assessment for the review body.
 - `suggested_verdict`: `request_changes` only for problems that should block \
-merging, `comment` otherwise, or `none` if there is nothing worth saying. \
-Approving is the human's decision and is not an option.
+merging, `approve` when you'd merge it as it stands and your comments are \
+optional, `comment` otherwise, or `none` if there is nothing worth saying. \
+It's only a suggestion: the reviewer picks the verdict that's posted.
 - `comments`: inline comments on the diff. `line` (and `start_line` for a \
 range) must be lines shown in the diff: `side` `RIGHT` numbers lines in the \
 new file, `LEFT` in the old file, for removed lines. Keep a range inside one \
