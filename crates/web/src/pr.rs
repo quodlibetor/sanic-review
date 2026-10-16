@@ -537,12 +537,15 @@ fn drafts_section(
         own_pr: is_login(&pr.author, &app.me),
         posted,
     };
-    let suggested = run.suggested_verdict.as_deref().unwrap_or("none");
-    let preselect = if suggested == "request_changes" {
-        "REQUEST_CHANGES"
-    } else {
-        "COMMENT"
+    let suggested = match run.suggested_verdict.as_deref() {
+        Some("comment") => Some("COMMENT"),
+        Some("request_changes") => Some("REQUEST_CHANGES"),
+        // GitHub refuses an approval of your own PR.
+        Some("approve") if !existing.own_pr => Some("APPROVE"),
+        _ => None,
     };
+    // Approve is only labelled, never checked: picking it stays your own act.
+    let preselect = suggested.filter(|&s| s != "APPROVE").unwrap_or("COMMENT");
     let preview = format!("{}/runs/{}/preview", pr_href(&pr.key), run.id);
     let count = |status: &str| drafts.iter().filter(|d| d.status == status).count();
     html! {
@@ -570,8 +573,8 @@ fn drafts_section(
                             input type="radio" name="event" value=(value)
                                 checked[value == preselect];
                             (label)
-                            @if value == preselect && suggested != "none" {
-                                span.sugg title="The agent's suggestion. It never suggests approving." {
+                            @if suggested == Some(value) {
+                                span.sugg title="The agent's suggestion." {
                                     "suggested"
                                 }
                             }

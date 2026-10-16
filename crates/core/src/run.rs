@@ -361,13 +361,14 @@ pub struct Basis {
     pub dismissed: Vec<Dismissal>,
 }
 
-/// What the agent suggests you do with the review. There is deliberately no
-/// `approve`: approving is only ever your own choice.
+/// What the agent suggests you do with the review. You still pick the
+/// verdict that's posted, and confirm it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Comment,
     RequestChanges,
+    Approve,
     None,
 }
 
@@ -377,6 +378,7 @@ impl Verdict {
         match self {
             Self::Comment => "comment",
             Self::RequestChanges => "request_changes",
+            Self::Approve => "approve",
             Self::None => "none",
         }
     }
@@ -560,8 +562,9 @@ mod tests {
     }
 
     #[test]
-    fn approve_is_not_a_verdict() {
-        let parsed: Result<Verdict, _> = serde_json::from_str(r#""approve""#);
-        assert!(parsed.is_err());
+    fn approve_is_a_verdict() {
+        let parsed: Verdict = serde_json::from_str(r#""approve""#).unwrap();
+        assert_eq!(parsed, Verdict::Approve);
+        assert!(serde_json::from_str::<Verdict>(r#""lgtm""#).is_err());
     }
 }

@@ -74,7 +74,7 @@ expression: "readable(&f, &page.body)"
 <label>
 <input type="radio" name="event" value="COMMENT">Comment</label>
 <label>
-<input type="radio" name="event" value="REQUEST_CHANGES" checked>Request changes<span class="sugg" title="The agent's suggestion. It never suggests approving.">suggested</span>
+<input type="radio" name="event" value="REQUEST_CHANGES" checked>Request changes<span class="sugg" title="The agent's suggestion.">suggested</span>
 </label>
 <label>
 <input type="radio" name="event" value="APPROVE">Approve</label>

@@ -911,7 +911,7 @@ empty `model` is an error.
 {
   "summary": "string",
   "summary_note": null,
-  "suggested_verdict": "comment | request_changes | none",
+  "suggested_verdict": "comment | request_changes | approve | none",
   "comments": [{ "path": "", "line": 0, "start_line": null, "side": "RIGHT",
                  "body": "", "severity": "blocker|major|minor|nit",
                  "confidence": "high|medium|low", "note": null }],
@@ -920,8 +920,10 @@ empty `model` is an error.
 }
 ```
 
-The dashboard never offers `approve` as an agent suggestion. You can still
-pick it yourself.
+The agent may suggest `approve`. The dashboard labels Approve as its
+suggestion, except on your own PR, which GitHub won't let you approve,
+but never preselects it: picking Approve stays your own act (see
+Security).
 
 `summary_note`, and each comment's `note`, are the agent's private notes to
 you, which are never posted: why it matters, how confident it is, what it
@@ -1451,11 +1453,11 @@ fonttools (run through `uv`, which only this task needs) to
   glob's error. Saving has `serve` add it to that `skip_titles` the way
   the TUI does, unless it's already there; the config reload picks it up.
 - **Submit.** You pick the verdict: comment, request changes or approve.
-  The agent's suggestion is preselected, and approve never is. An
-  approval has to be picked on the PR page's verdict form (see Security),
-  so Approve in a URL alone is refused; the preview's button then reads
-  "Approve this PR", or "Approve this PR with the above comments" when
-  there are any. The preview shows the review as it'll read, rendered as
+  The agent's suggestion is preselected, except approve, which is only
+  labelled. An approval has to be picked on the PR page's verdict form
+  (see Security), so Approve in a URL alone is refused; the preview's
+  button then reads "Approve this PR", or "Approve this PR with the above
+  comments" when there are any. The preview shows the review as it'll read, rendered as
   Markdown (body, then each inline comment, then the replies in existing
   threads and the 👍s), beside every request that will be sent, in order, each with its
   exact JSON body or mutation variables, with the confirm in a footer
@@ -2080,10 +2082,11 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   keys typed there neither settle nor are ignored while held. The
   page behind is inert while it's open, and only the latest ask opens.
   Without the script, the link goes to the confirm page itself.
-- An approval is picked, never taken from a URL. The PR page's verdict
-  form is a post, behind the token and origin checks, and sent with
-  Approve it gets a random pick id, kept in memory with the run and a
-  short expiry, which the preview URL and its confirm form carry. The
+- An approval is picked, never taken from a URL or preselected, even
+  when the agent suggests it. The PR page's verdict form is a post,
+  behind the token and origin checks, and sent with Approve it gets a
+  random pick id, kept in memory with the run and a short expiry, which
+  the preview URL and its confirm form carry. The
   preview records the payload it shows under the pick, and the confirm
   uses the pick up, posting only that payload from that run. So a preview
   URL from history, or a second `y`, can't post an approval again: an

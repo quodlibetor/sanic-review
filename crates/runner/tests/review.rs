@@ -548,7 +548,7 @@ async fn agent_failures_fail_the_run_and_clean_up() {
 
 #[tokio::test]
 async fn answers_that_break_the_schema_are_rejected() {
-    let output = success(&json!({ "summary": "s", "suggested_verdict": "approve" }));
+    let output = success(&json!({ "summary": "s", "suggested_verdict": "lgtm" }));
     let s = setup("", &output, Duration::from_secs(30));
     let err = s
         .runner
