@@ -15,7 +15,7 @@ and more detail</div>
 </div>
 <p class="cost">Spends tokens: a full review of the head as last polled.</p>
 <div class="btns">
-<form id="confirm" method="post" action="/pr/org/repo/8/review-now">
+<form id="confirm" method="post" action="/pr/org/repo/8/review-now" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="next" value="pr">
 <button class="btn go" type="submit">Rerun the review<span class="k">y</span>

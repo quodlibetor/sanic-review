@@ -207,47 +207,121 @@
     (field || popup).focus();
   }
 
-  // The dialog sends its form itself so the page it leads to replaces this
-  // one in history: a plain post would add it, and Back would land here.
+  // Sends `form` itself so the page it leads to replaces this one in
+  // history: a plain post would add it, and Back would land here.
+  function send(form, data, answered, failed) {
+    fetch(form.action, {
+      method: "POST",
+      credentials: "same-origin",
+      body: new URLSearchParams(data),
+    })
+      .then(function (resp) {
+        if (resp.redirected) {
+          follow(resp.url, form);
+          return;
+        }
+        return resp.text().then(function (text) {
+          answered(resp, new DOMParser().parseFromString(text, "text/html"));
+        });
+      })
+      .catch(failed);
+  }
+
+  // Back to this page reloads it, keeping your place; a replace would only
+  // scroll. `Response.url` drops the redirect's #draft-N, so it's the form's.
+  function follow(url, form) {
+    const to = new URL(url);
+    const here = window.location;
+    if (to.pathname === here.pathname && to.search === here.search) {
+      // A reload restores controls' state, disabled and typed-in included.
+      unspend(form);
+      form.reset();
+      here.reload();
+      return;
+    }
+    const article = to.pathname === here.pathname && form.closest("article[id]");
+    if (article) to.hash = article.id;
+    here.replace(to.href);
+  }
+
+  // An error page's title and why, for a notice.
+  function trouble(resp, answer) {
+    const title = answer.querySelector("h1");
+    const why = title ? answer.querySelector("pre.error, p.error") : answer.body;
+    return (
+      (title ? title.textContent : String(resp.status)) +
+      (why && why.textContent.trim() ? ": " + why.textContent.trim().slice(0, 300) : "")
+    );
+  }
+
+  function failed(err) {
+    say("That failed (" + err.message + "); reload the page to see why.");
+  }
+
   function sendFromDialog(e) {
     const form = e.target;
     if (e.defaultPrevented || form.method !== "post") return;
     e.preventDefault();
-    fetch(form.action, {
-      method: "POST",
-      credentials: "same-origin",
-      body: new URLSearchParams(new FormData(form, e.submitter)),
-    })
-      .then(function (resp) {
-        if (resp.redirected) {
-          window.location.replace(resp.url);
+    send(
+      form,
+      new FormData(form, e.submitter),
+      function (resp, answer) {
+        const card = answer.querySelector(".cf");
+        // Closed, or another opened, while it was sent: don't bring it back.
+        const current = form.isConnected;
+        if (card) {
+          if (current) {
+            showCard(card);
+            dialog.dataset.result = "true";
+          } else say(card.querySelector("h1").textContent);
           return;
         }
-        return resp.text().then(function (text) {
-          const answer = new DOMParser().parseFromString(text, "text/html");
-          const card = answer.querySelector(".cf");
-          // Closed, or another opened, while it was sent: don't bring it back.
-          const current = form.isConnected;
-          if (card) {
-            if (current) {
-              showCard(card);
-              dialog.dataset.result = "true";
-            } else say(card.querySelector("h1").textContent);
-            return;
-          }
-          if (current) closeDialog();
-          const title = answer.querySelector("h1");
-          const why = title ? answer.querySelector("pre.error") : answer.body;
-          say(
-            (title ? title.textContent : String(resp.status)) +
-              (why && why.textContent.trim() ? ": " + why.textContent.trim().slice(0, 300) : "")
-          );
-        });
-      })
-      .catch(function (err) {
+        if (current) closeDialog();
+        say(trouble(resp, answer));
+      },
+      function (err) {
         if (form.isConnected) closeDialog();
-        say("That failed (" + err.message + "); reload the page to see why.");
-      });
+        failed(err);
+      }
+    );
+  }
+
+  // A data-in-place form outside the dialog: on a confirm page its answer
+  // takes the page's place, and an error leaves the form to send again.
+  function sendInPlace(e) {
+    const form = e.target;
+    if (e.defaultPrevented || !form.matches("form[data-in-place]") || form.closest("#dialog")) {
+      return;
+    }
+    e.preventDefault();
+    const data = new FormData(form, e.submitter);
+    if (spend(form)) return;
+    send(
+      form,
+      data,
+      function (resp, answer) {
+        const main = document.querySelector("main");
+        const theirs = answer.querySelector("main");
+        if (resp.ok && page === "confirm" && main && theirs) {
+          main.replaceChildren.apply(
+            main,
+            Array.from(theirs.childNodes).map(function (node) {
+              return document.importNode(node, true);
+            })
+          );
+          document.title = answer.title;
+          homeLinks(main);
+          shown = Date.now();
+          const field = main.querySelector("[autofocus]");
+          if (field) field.focus();
+          return;
+        }
+        unspend(form);
+        say(trouble(resp, answer));
+      },
+      // It may have been sent all the same, so it isn't offered again.
+      failed
+    );
   }
 
   function closeDialog() {
@@ -805,31 +879,40 @@
   window.addEventListener("pageshow", function (e) {
     if (e.persisted && dialogOpen()) closeDialog();
   });
+  // Whether `form` was sent already; if not, it is now, and its buttons
+  // stop taking presses.
+  function spend(form) {
+    if (form.dataset.sent) return true;
+    form.dataset.sent = "true";
+    form.querySelectorAll("button").forEach(function (b) {
+      b.disabled = true;
+    });
+    return false;
+  }
+  function unspend(form) {
+    delete form.dataset.sent;
+    form.querySelectorAll("button").forEach(function (b) {
+      b.disabled = false;
+    });
+  }
   // A confirm is sent once: a second click or `y` would replace the result
   // page with "Not posted", or post a second empty approval.
   function sendOnce(form) {
     if (!form) return;
     form.addEventListener("submit", function (e) {
-      if (form.dataset.sent) {
-        e.preventDefault();
-        return;
-      }
-      form.dataset.sent = "true";
-      form.querySelectorAll("button").forEach(function (b) {
-        b.disabled = true;
-      });
+      if (spend(form)) e.preventDefault();
     });
   }
+  // In-place forms are sent once by `sendInPlace`, which htmx swaps can't
+  // unhook as they would a listener on the form.
+  document.addEventListener("submit", sendInPlace);
   const confirmForm = page === "confirm" && document.getElementById("confirm");
-  sendOnce(confirmForm);
+  if (confirmForm && !("inPlace" in confirmForm.dataset)) sendOnce(confirmForm);
   // A form marked data-resend is safe to send again, so coming back to it
   // (say, to fix what was refused) takes it afresh.
   if (confirmForm && "resend" in confirmForm.dataset) {
     window.addEventListener("pageshow", function () {
-      delete confirmForm.dataset.sent;
-      confirmForm.querySelectorAll("button").forEach(function (b) {
-        b.disabled = false;
-      });
+      unspend(confirmForm);
     });
   }
   // htmx doesn't swap in error pages, so say something went wrong.

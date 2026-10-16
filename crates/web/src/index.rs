@@ -808,7 +808,7 @@ fn hidden_foot(app: &App, hidden: Option<u32>, query: &IndexQuery) -> Markup {
     let hidden = hidden.filter(|n| *n > 0);
     let pick = |choice: &str, words: &str| {
         html! {
-            form.window method="post" action="/window" {
+            form.window method="post" action="/window" data-in-place {
                 (csrf_field(app))
                 // Back to the index as it was.
                 input type="hidden" name="back" value=(query.href());
@@ -1161,7 +1161,7 @@ pub async fn set_window(
 /// index at `back`, or else to the PR's page.
 pub fn archive_form(app: &App, key: &PrKey, archived: bool, back: Option<&str>) -> Markup {
     html! {
-        form.archive method="post" action={ (pr_href(key)) "/archive" } {
+        form.archive method="post" action={ (pr_href(key)) "/archive" } data-in-place {
             (csrf_field(app))
             input type="hidden" name="archived" value=(!archived);
             input type="hidden" name="next" value=(if back.is_some() { "index" } else { "pr" });

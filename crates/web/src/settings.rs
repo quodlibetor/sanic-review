@@ -35,7 +35,7 @@ fn held_reviews(n: u32) -> String {
 /// how many reviews that starts.
 fn switch(app: &App, on: bool, held: u32, id: Option<&str>, label: &Markup) -> Markup {
     html! {
-        form id=[id] method="post" action="/settings/manual-reviews" {
+        form id=[id] method="post" action="/settings/manual-reviews" data-in-place[id.is_some()] {
             (csrf_field(app))
             input type="hidden" name="on" value=(on);
             input type="hidden" name="held" value=(held);

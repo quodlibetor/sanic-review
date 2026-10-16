@@ -2075,14 +2075,36 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   way to open it. The script sends its form as the page's would, with the
   token and the same-origin checks. When the answer redirects, the page
   it leads to replaces the one you were on in history, so one Back
-  leaves it; an answer that's a card, a refusal or a result, shows in
-  the dialog, and any other error as a notice. Keys and clicks settle again when it
+  leaves it (see the next point); an answer that's a card, a refusal or
+  a result, shows in the dialog, and any other error as a notice. Keys
+  and clicks settle again when it
   opens, keys are ignored while held, and it opens with focus on the card,
   not its Confirm, so a stray `Enter` or `Space` presses nothing; the
   Agent card's focus is in its text box, where `y` is only a letter, so
   keys typed there neither settle nor are ignored while held. The
   page behind is inert while it's open, and only the latest ask opens.
   Without the script, the link goes to the confirm page itself.
+- A post that comes back to the page you posted from adds no history
+  entry of its own while the script runs, so one Back leaves that page.
+  htmx sends draft edits and decisions, clearing an obsolete flag, thread
+  choices and the queue's moves. The script sends the dialog's forms and
+  those marked `data-in-place`:
+  archive, the recency window, a draft's Revise…, and the confirm pages
+  for review now, Agent…, cancel, clear stale, manual reviews and the
+  title-ignore editor. Each is sent once, and the same checks apply.
+  - A redirect back to the page you're on reloads it, keeping your place.
+    A redirect elsewhere replaces it, keeping the draft you revised in
+    view, since a fetch's answer loses the redirect's `#draft-N`.
+  - On a confirm page, a result or a fresh confirm (a count that grew)
+    takes the page's place, so a reload shows the confirm again.
+  - A refusal leaves the form, re-enabled, with its text, and says why
+    in a notice. A failure to reach the server leaves it spent, since the
+    post may have landed.
+
+  Posts that go forward to another page stay plain: the review bar's to
+  the preview, the settings page's own switch, and submitting a review,
+  whose pick and payload checks keep it from posting twice. Without the
+  script, every form is a plain post.
 - An approval is picked, never taken from a URL. The PR page's verdict
   form is a post, behind the token and origin checks, and sent with
   Approve it gets a random pick id, kept in memory with the run and a

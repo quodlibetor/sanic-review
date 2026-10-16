@@ -219,7 +219,7 @@ expression: "readable(&f, &page.body)"
 </a>
 <a class="linkbtn" href="/pr/org/repo/7#chat">chat <span class="k">c</span>
 </a>
-<form class="archive" method="post" action="/pr/org/repo/7/archive">
+<form class="archive" method="post" action="/pr/org/repo/7/archive" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
@@ -272,7 +272,7 @@ and more detail</pre>
 </a>
 <a class="linkbtn" href="/pr/org/repo/8/ignore">ignore by title <span class="k">i</span>
 </a>
-<form class="archive" method="post" action="/pr/org/repo/8/archive">
+<form class="archive" method="post" action="/pr/org/repo/8/archive" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
@@ -331,7 +331,7 @@ and more detail</pre>
 </a>
 <a class="linkbtn" href="/pr/org/repo/10/ignore">ignore by title <span class="k">i</span>
 </a>
-<form class="archive" method="post" action="/pr/org/repo/10/archive">
+<form class="archive" method="post" action="/pr/org/repo/10/archive" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">
@@ -395,7 +395,7 @@ and more detail</pre>
 <a class="ref" href="https://github.com/org/repo/pull/9" title="https://github.com/org/repo/pull/9">org/repo#9 ↗</a>
 </span>
 <span class="a">
-<form class="archive" method="post" action="/pr/org/repo/9/archive">
+<form class="archive" method="post" action="/pr/org/repo/9/archive" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <input type="hidden" name="archived" value="true">
 <input type="hidden" name="next" value="index">

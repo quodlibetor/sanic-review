@@ -255,7 +255,7 @@ pub async fn confirm_cancel(
             (keycap("r")) " reviews it again later."
         }),
         go: html! {
-            form #confirm method="post" action={ "/queue/" (run) "/cancel" } {
+            form #confirm method="post" action={ "/queue/" (run) "/cancel" } data-in-place {
                 (csrf_field(&app))
                 button.btn.go type="submit" {
                     @if running { "Stop the review " } @else { "Take it out of the queue " }
@@ -302,7 +302,7 @@ fn confirm_stale(app: &App, stale: u32) -> Markup {
             "Nothing is posted to GitHub. A new push or request reviews them again."
         }),
         go: html! {
-            form #confirm method="post" action="/queue/clear-stale" {
+            form #confirm method="post" action="/queue/clear-stale" data-in-place {
                 (csrf_field(app))
                 input type="hidden" name="stale" value=(stale);
                 button.btn.go type="submit" { "Drop them " (keycap("y")) }
