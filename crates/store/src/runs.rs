@@ -489,6 +489,7 @@ impl Store {
             )?;
             tx.last_insert_rowid()
         };
+        let effort = effort_in(&tx, id)?;
         tx.commit()
             .wrap_err_with(|| format!("queueing a review of {}", req.key.url()))?;
         Ok(Some(QueuedRun {
@@ -601,10 +602,7 @@ impl Store {
             ],
         )?;
         let id = tx.last_insert_rowid();
-        let effort: Option<String> =
-            tx.query_row("SELECT effort FROM runs WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })?;
+        let effort = effort_in(&tx, id)?;
         let baseline = baseline(&tx, source)?;
         let lineage = lineage(&tx, id)?;
         let author: String = tx
@@ -641,7 +639,7 @@ impl Store {
             resume: None,
             worktree: Some(home),
             lineage,
-            effort: known_effort(effort.as_deref()),
+            effort,
         })))
     }
 
@@ -764,7 +762,7 @@ impl Store {
                         "UPDATE runs SET status = 'running', started_at = {NOW}
                          WHERE id = ?1 AND status = 'queued'
                          RETURNING id, repo, number, profile, head_sha, base_sha, from_sha,
-                                   {RUN_AUTHOR}, effort"
+                                   {RUN_AUTHOR}, {RUN_EFFORT}"
                     ),
                     [id],
                     queued_row,
@@ -882,6 +880,12 @@ impl Store {
             [id],
         )?;
         Ok(changed == 1)
+    }
+
+    /// The effort run `id` runs at as things stand: its own, else its PR's;
+    /// `None` for its profile's.
+    pub fn run_effort(&self, id: i64) -> Result<Option<Effort>> {
+        effort_in(&self.conn, id)
     }
 
     /// Stores a finished review's drafts and marks the run succeeded.
@@ -1149,7 +1153,7 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
-                            status, source_run, instruction, {worktree}, {RUN_AUTHOR}, effort
+                            status, source_run, instruction, {worktree}, {RUN_AUTHOR}, {RUN_EFFORT}
                      FROM runs WHERE {filter} AND session_id IS NOT NULL
                      ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1",
                     worktree = worktree_run("runs")
@@ -1312,7 +1316,7 @@ impl Store {
     /// `runner.manual_reviews`, the held ones.
     pub fn queued_reviews(&self) -> Result<Vec<QueuedRun>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}, effort
+            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}, {RUN_EFFORT}
              FROM runs WHERE status = 'queued' AND kind = ?1
              ORDER BY queue_pos, id"
         ))?;
@@ -1482,7 +1486,7 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR},
-                            effort
+                            {RUN_EFFORT}
                      FROM runs WHERE status = 'queued' AND kind = ?1 AND repo = ?2 AND number = ?3
                      ORDER BY id DESC LIMIT 1"
                 ),
@@ -2270,6 +2274,7 @@ type QueuedRow = (
     Option<String>,
     String,
     Option<String>,
+    Option<String>,
 );
 
 /// The author of the PR of the `runs` row being read, as last polled, as
@@ -2279,7 +2284,7 @@ const RUN_AUTHOR: &str = "coalesce((SELECT p.author FROM prs p
                                    '') AS author";
 
 fn queued_run(
-    (id, repo, number, profile, head_sha, base_sha, from_sha, author, effort): QueuedRow,
+    (id, repo, number, profile, head_sha, base_sha, from_sha, author, own, pr): QueuedRow,
 ) -> Result<QueuedRun> {
     Ok(QueuedRun {
         id,
@@ -2287,7 +2292,7 @@ fn queued_run(
         resume: None,
         worktree: None,
         lineage: Vec::new(),
-        effort: known_effort(effort.as_deref()),
+        effort: known_effort(own.as_deref()).or_else(|| known_effort(pr.as_deref())),
         request: ReviewRequest {
             key: PrKey {
                 repo: RepoName::parse(&repo)?,
@@ -2304,14 +2309,34 @@ fn queued_run(
     })
 }
 
+/// The efforts of the `runs` row being read, as SQL that [`queued_row`]
+/// reads: its own, and its PR's, which it runs at when it has none.
+const RUN_EFFORT: &str = "runs.effort AS effort,
+                          (SELECT p.effort FROM prs p
+                           WHERE p.repo = runs.repo AND p.number = runs.number) AS pr_effort";
+
+/// The effort run `id` runs at, from [`RUN_EFFORT`]; `None` for its
+/// profile's.
+fn effort_in(conn: &rusqlite::Connection, id: i64) -> Result<Option<Effort>> {
+    let efforts: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            &format!("SELECT {RUN_EFFORT} FROM runs WHERE id = ?1"),
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(efforts
+        .and_then(|(own, pr)| known_effort(own.as_deref()).or_else(|| known_effort(pr.as_deref()))))
+}
+
 /// A stored effort; one this build doesn't know, as after a downgrade,
 /// follows the profile's rather than failing every read of the queue.
 fn known_effort(effort: Option<&str>) -> Option<Effort> {
     effort.and_then(|e| e.parse().ok())
 }
 
-/// Reads [`RUN_AUTHOR`] and `effort` by name, so callers can add columns
-/// after them.
+/// Reads [`RUN_AUTHOR`] and [`RUN_EFFORT`] by name, so callers can add
+/// columns after them.
 fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
     Ok((
         row.get(0)?,
@@ -2323,6 +2348,7 @@ fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
         row.get(6)?,
         row.get("author")?,
         row.get("effort")?,
+        row.get("pr_effort")?,
     ))
 }
 
@@ -2653,6 +2679,18 @@ mod tests {
 
         let automatic = store.queue_review(&request("h2")).unwrap().unwrap();
         assert_eq!(automatic.effort, None);
+        // The PR's effort, set after it was queued, is what it's claimed at.
+        let base = &automatic.request.base_sha;
+        store
+            .record_check(&snapshot().key, base, "h2", Ok(&[]))
+            .unwrap();
+        assert!(
+            store
+                .set_pr_effort(&snapshot().key, Some(Effort::High))
+                .unwrap()
+        );
+        let claimed = store.claim_next(|_, _| false).unwrap();
+        assert_eq!(claimed.map(|run| run.effort), Some(Some(Effort::High)));
     }
 
     #[test]
@@ -2729,6 +2767,56 @@ mod tests {
             panic!("refused");
         };
         assert_eq!(run.effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn a_runs_effort_is_read_as_things_stand_when_it_starts() {
+        let mut store = store();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        let run = store
+            .queue_review_by_hand(&request("h1"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.effort, None);
+        store.claim_run(run.id).unwrap();
+        assert!(
+            store
+                .set_pr_effort(&snapshot().key, Some(Effort::Max))
+                .unwrap()
+        );
+        assert_eq!(store.run_effort(run.id).unwrap(), Some(Effort::Max));
+
+        // A run's own effort this build doesn't know falls through to the PR's.
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET effort = 'ludicrous' WHERE id = ?1",
+                [run.id],
+            )
+            .unwrap();
+        assert_eq!(store.run_effort(run.id).unwrap(), Some(Effort::Max));
+        assert_eq!(store.run_effort(999).unwrap(), None);
+    }
+
+    #[test]
+    fn a_regeneration_without_an_effort_of_its_own_runs_at_its_prs() {
+        let mut store = store();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        let source = store.queue_review(&request("h1")).unwrap().unwrap();
+        store.claim_run(source.id).unwrap();
+        store.finish_review(source.id, &result()).unwrap();
+        assert!(
+            store
+                .set_pr_effort(&snapshot().key, Some(Effort::Xhigh))
+                .unwrap()
+        );
+        let Regeneration::Queued(run) = store
+            .queue_regeneration(source.id, "be terser", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_eq!(run.effort, Some(Effort::Xhigh));
     }
 
     #[test]

@@ -269,6 +269,7 @@ impl Dashboard {
                 get(review_now::confirm).post(review_now::start_now),
             )
             .route("/pr/{owner}/{name}/{number}/archive", post(pr::archive))
+            .route("/pr/{owner}/{name}/{number}/effort", post(pr::set_effort))
             .route(
                 "/pr/{owner}/{name}/{number}/ignore",
                 get(ignore::editor).post(ignore::save),
