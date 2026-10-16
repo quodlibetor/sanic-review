@@ -516,7 +516,21 @@ impl Worker {
         if self.stopping.load(Ordering::SeqCst) {
             stop.stop(Stop::Shutdown);
         }
-        let outcome = self.review(&run, &stop).await;
+        // A hand start waits for a slot in memory, so its PR's effort may
+        // have changed since it was queued.
+        let effort = self.store().run_effort(run.id).unwrap_or_else(|err| {
+            warn!(url = %run.request.key.url(), "reading the run's effort failed: {err:?}");
+            run.effort
+        });
+        let outcome = self
+            .review(
+                &QueuedRun {
+                    effort,
+                    ..run.clone()
+                },
+                &stop,
+            )
+            .await;
         self.finish(&run);
         let stored = self.record(&run, &stop, outcome);
         if let Err(err) = stored {

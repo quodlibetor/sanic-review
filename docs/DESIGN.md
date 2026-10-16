@@ -921,10 +921,19 @@ means its profile's, read when it runs, so a reload applies to queued
 runs. A queued run started that way, held or waiting for a slot, takes
 the new effort; a head already running or reviewed isn't reviewed again
 for it, and `serve` warns that the effort wasn't applied. A regeneration
-takes its source run's. A stored effort this build doesn't know follows
-the profile's. The TUI and dashboard don't set one yet. A procedure's
-`/code-review` step runs at the review's effort too (see Prompt
-assembly).
+takes its source run's own effort, if it had one. A stored effort this
+build doesn't know is skipped, as if unset.
+
+A PR can have an effort too, chosen on its dashboard page and kept in
+`prs.effort` through polls, as `archived` is. A run without an effort of
+its own runs at its PR's, and only then at its profile's. The PR's isn't
+copied into the run: it's read when the run is listed or claimed and
+again as it starts, so changing it reaches a review that's queued or
+waiting for a slot, while one already running keeps the effort it
+started at. A run started with `--effort` keeps its own. Nothing records
+the effort a finished run used. The TUI doesn't set either. A
+procedure's `/code-review` step runs at the review's effort too (see
+Prompt assembly).
 
 ### Output schema (sketch)
 
@@ -965,7 +974,7 @@ invited to draft replies or fixes on someone else's PR.
 | Table | Contents |
 |-------|----------|
 | `repos` | owner, name, mirror path |
-| `prs` | repo, number, title, description, author, is_mine, open, archived, GitHub updated time, matched profile |
+| `prs` | repo, number, title, description, author, is_mine, open, archived, the effort you chose for its reviews, GitHub updated time, matched profile |
 | `revisions` | pr, head_sha, base_sha, seen_at |
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
@@ -1376,7 +1385,10 @@ fonttools (run through `uv`, which only this task needs) to
   reject (`n`), and undo back to pending (`u`). The PR's own actions are
   the TUI's: a review now, with a confirm, ignore by title, chat, and
   archive or unarchive, which writes the store as `sanic-review archive`
-  does.
+  does. Beside them, an effort select sets the PR's effort (see Effort
+  under Runner), saving on change, or with a Save button without the
+  script; its first option, "profile's", names the profile's level and
+  clears the PR's.
 - **Agent.** For a run that succeeded with an agent session, "Agent…"
   opens a confirm card with a box for your instruction. It says what
   happens: the run's session is resumed, not interactively; the result is
