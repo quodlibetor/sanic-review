@@ -620,11 +620,22 @@ it `superseded`.
    listed for it to read as it sees fit. It follows the instruction files,
    so it's read with them in mind, and a short preamble adapts it: the
    worktree is already at the PR head and the brief has the PR, so steps
-   that fetch or view the PR are done; a step that hands finding problems
-   to a skill, command or agent the agent can't run, it does itself; and
-   the mapping above applies to the rest. A dir without a `SKILL.md`
-   fails the run, as a missing instruction file does. A regeneration gets
-   the same system prompt.
+   that fetch or view the PR are done; with Skill in its tools, a step
+   that runs `/code-review`, or hands finding problems to another skill it
+   can load, it runs through the Skill tool, and treats what it finds as
+   allegations for the procedure to verify (left to choose, agents
+   skipped such a step and found problems in one pass of their own); a
+   step whose skill doesn't load, one that hands finding problems to a
+   command or agent it can't run, or any finding step when it lacks
+   Skill, it does itself; and the mapping above applies to the rest. The
+   skill gets no PR number, branch, `--comment` or `--fix`, and its
+   `args` are spelled out: that it can't run commands, that the diff is
+   the run dir's `pr.diff` (a forked skill can't see the brief), and to
+   answer in text. A skill that runs forked inherits the
+   `StructuredOutput` tool from `--json-schema`, and an answer given
+   through that never reaches the agent, which sees only that the skill
+   finished. A dir without a `SKILL.md` fails the run, as a missing
+   instruction file does. A regeneration gets the same system prompt.
    The metadata includes the PR's title and description. Each piece of
    PR-authored text is fenced with more backticks than it contains, so it
    can't close its own block.
@@ -858,7 +869,10 @@ sanic-review trusts your skills, and with them the PR author's:
   `~/.claude/skills`, plugin skills, and the `.claude/skills` of the
   worktree and of each `--add-dir`. The worktree's are the PR's, written
   by its author, and an `--add-dir` checkout's are whatever its checked
-  out branch holds. A skill can run shell commands while it loads (its
+  out branch holds. With a `procedure`, the system prompt tells the
+  agent to load `code-review`, and any finder skill the procedure names,
+  so whatever answers to that name is run, not just made available. A
+  skill can run shell commands while it loads (its
   ``!`cmd` `` lines). Claude Code runs those as you, outside `--tools`,
   and `--restricted` isn't documented to stop them, so such a command can
   read anything you can, `gh`'s stored token included. A skill's

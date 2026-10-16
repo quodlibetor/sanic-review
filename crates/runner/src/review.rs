@@ -254,7 +254,7 @@ impl ReviewRunner {
         write(&diff_path, &diff).await?;
 
         let references = existing_dirs(&settings.reference_dirs);
-        let system_prompt = system_prompt(profile, &references).await?;
+        let system_prompt = system_prompt(profile, &diff_path, &references).await?;
         let target = target(run)?;
         let brief = match (&run.revision, target, &run.resume) {
             (Some(revision), Some(target), _) => {
@@ -342,9 +342,13 @@ impl ReviewRunner {
     }
 }
 
-/// The system prompt for a run of `profile`, reading its instruction files
-/// and procedure.
-async fn system_prompt(profile: &AgentProfile, references: &[&Path]) -> Result<String> {
+/// The system prompt for a run of `profile` on the diff at `diff_path`,
+/// reading its instruction files and procedure.
+async fn system_prompt(
+    profile: &AgentProfile,
+    diff_path: &Path,
+    references: &[&Path],
+) -> Result<String> {
     let mut instructions = Vec::new();
     for path in &profile.instructions {
         let text = tokio::fs::read_to_string(path)
@@ -363,6 +367,7 @@ async fn system_prompt(profile: &AgentProfile, references: &[&Path]) -> Result<S
     let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
     Ok(prompt::system_prompt(
         &profile.tools,
+        diff_path,
         &instructions,
         &procedure,
         &skills,

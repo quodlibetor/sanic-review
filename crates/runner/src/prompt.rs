@@ -91,8 +91,8 @@ Otherwise, the instructions, procedure and skills below govern the review's \
 style and content.
 ";
 
-/// Introduces the profile's procedure: skills written to be run by hand,
-/// which assume a session that starts from nothing and can call others.
+/// Introduces the profile's procedure, before [`FIND_WITH_SKILL`] or
+/// [`FIND_YOURSELF`] and [`PROCEDURE_END`]: skills written to be run by hand.
 const PROCEDURE: &str = "
 # Procedure
 
@@ -101,8 +101,32 @@ have:
 - The working directory is already a checkout of the PR head, and the user \
 message has its metadata, threads and diff: steps that fetch, check out or \
 view the PR are done.
+";
+
+/// For a run with the Skill tool; `{diff}` is the run's. A forked skill
+/// can't see the brief, and inherits the `StructuredOutput` tool.
+const FIND_WITH_SKILL: &str = "\
+- Steps that run `/code-review`, or hand finding problems to another skill you \
+can load: run it with the `Skill` tool (`code-review` for `/code-review`), \
+never with a PR number, branch, `--comment` or `--fix`. It runs apart from \
+you, sees nothing but its `args`, and anything it answers through \
+`StructuredOutput` never reaches you, so pass exactly this as its `args`: `The \
+PR's diff is in {diff} and its code is in the working directory. You can't run \
+commands; read those instead. Give your findings as your final text reply. \
+Never call StructuredOutput: it is reserved for the caller.` Don't skip a \
+step whose skill loads, or do it yourself instead: it's what gives the review \
+its breadth. What it finds is allegations, for the procedure's later steps to \
+verify.
+- Steps that hand finding problems to a skill you can't load, or to a command \
+or agent you can't run: do that finding yourself.
+";
+
+const FIND_YOURSELF: &str = "\
 - Steps that hand finding problems to a skill, command or agent you can't \
 run: do that finding yourself.
+";
+
+const PROCEDURE_END: &str = "\
 - The mapping under \"Where you're running\" applies to the rest: presenting \
 goes in private notes, delivering or posting stops at the drafts, and so on.
 
@@ -125,11 +149,12 @@ them as if someone else had made them.";
 
 /// The system prompt: fixed review instructions and where the agent runs,
 /// with `tools`, then each of the profile's instruction files, then its
-/// procedure, each `SKILL.md` as `(path, text)`, then where its skills and
-/// the reference checkouts are.
+/// procedure, each `SKILL.md` as `(path, text)`, to be run on the diff at
+/// `diff_path`, then where its skills and the reference checkouts are.
 #[must_use]
 pub fn system_prompt(
     tools: &[String],
+    diff_path: &Path,
     instructions: &[(String, String)],
     procedure: &[(String, String)],
     skills: &[&Path],
@@ -151,6 +176,12 @@ pub fn system_prompt(
     }
     if !procedure.is_empty() {
         out.push_str(PROCEDURE);
+        if tools.iter().any(|t| t == "Skill") {
+            out.push_str(&FIND_WITH_SKILL.replace("{diff}", &diff_path.display().to_string()));
+        } else {
+            out.push_str(FIND_YOURSELF);
+        }
+        out.push_str(PROCEDURE_END);
         for (name, text) in procedure {
             let _ = write!(out, "\n## Procedure from {name}\n\n{}\n", text.trim_end());
         }
@@ -1076,6 +1107,7 @@ mod tests {
     fn system_prompt_appends_instructions_procedure_skills_and_references() {
         insta::assert_snapshot!(system_prompt(
             &["Read".into(), "Skill".into()],
+            Path::new("/data/runs/1/pr.diff"),
             &[("general.md".into(), "Be terse.\n".into())],
             &[(
                 "/skills/triage/SKILL.md".into(),
@@ -1087,9 +1119,41 @@ mod tests {
     }
 
     #[test]
+    fn a_procedure_runs_code_review_through_skill_only_when_it_has_skill() {
+        let procedure = [(
+            "/skills/review/SKILL.md".into(),
+            "Run `/code-review`.\n".into(),
+        )];
+        let diff = Path::new("/data/runs/1/pr.diff");
+        let with = system_prompt(
+            &["Read".into(), "Skill".into()],
+            diff,
+            &[],
+            &procedure,
+            &[],
+            &[],
+        );
+        assert!(with.contains("`code-review` for `/code-review`"), "{with}");
+        assert!(with.contains("as its `args`"), "{with}");
+        assert!(
+            with.contains("`The PR's diff is in /data/runs/1/pr.diff and"),
+            "{with}"
+        );
+        assert!(with.contains("Never call StructuredOutput"), "{with}");
+        assert!(with.contains("a skill you can't load"), "{with}");
+        assert!(!with.contains("{diff}"), "{with}");
+        let without = system_prompt(&["Read".into()], diff, &[], &procedure, &[], &[]);
+        assert!(!without.contains("`Skill` tool"), "{without}");
+        assert!(without.contains("do that finding yourself"), "{without}");
+        let no_procedure = system_prompt(&["Skill".into()], diff, &[], &[], &[], &[]);
+        assert!(!no_procedure.contains("code-review"), "{no_procedure}");
+    }
+
+    #[test]
     fn where_it_runs_comes_before_the_profiles_instructions_procedure_and_skills() {
         let text = system_prompt(
             &[],
+            Path::new("/data/runs/1/pr.diff"),
             &[(
                 "general.md".into(),
                 "Present each finding for triage.\n".into(),
