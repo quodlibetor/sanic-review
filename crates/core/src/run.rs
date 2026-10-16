@@ -7,7 +7,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::pr::{InProgressReview, PrKey, Thread};
+use crate::{
+    config::Effort,
+    pr::{InProgressReview, PrKey, Thread},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RunKind {
@@ -116,6 +119,8 @@ pub struct QueuedRun {
     /// The runs whose sessions this one's continues, latest first: its
     /// agent knows their run dirs by path, so it may read them.
     pub lineage: Vec<i64>,
+    /// The effort it was started at; `None` runs at its profile's.
+    pub effort: Option<Effort>,
 }
 
 impl QueuedRun {

@@ -17,6 +17,7 @@ use color_eyre::{
     Section,
     eyre::{Result, WrapErr, bail, eyre},
 };
+use sanic_core::config::Effort;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -73,6 +74,8 @@ pub struct Invocation<'a> {
     /// JSON Schema the final answer must match.
     pub schema: &'a Value,
     pub model: Option<&'a str>,
+    /// Always passed: `--restricted` ignores settings files' `effortLevel`.
+    pub effort: Effort,
     /// Receives the `stream-json` transcript.
     pub transcript: &'a Path,
     pub stderr: &'a Path,
@@ -143,6 +146,7 @@ impl Claude {
         if let Some(model) = inv.model {
             cmd.args(["--model", model]);
         }
+        cmd.args(["--effort", inv.effort.name()]);
         // A fork, so the resumed session stays as it was: a later chat with
         // that run sees only its own turns.
         if let Some(session) = inv.resume {
@@ -297,6 +301,7 @@ mod tests {
             system_prompt: "s",
             schema,
             model: Some("claude-sonnet-5"),
+            effort: Effort::High,
             transcript: Path::new("/t"),
             stderr: Path::new("/e"),
             resume: None,
@@ -347,6 +352,7 @@ mod tests {
         assert_eq!(after("--tools"), "Read,Grep,Skill");
         assert_eq!(after("--allowedTools"), "Read,Grep,Skill");
         assert_eq!(after("--model"), "claude-sonnet-5");
+        assert_eq!(after("--effort"), "high");
         assert_eq!(after("--add-dir"), "/skills");
         assert!(args.contains(&"--restricted"));
         assert!(args.contains(&"--strict-mcp-config"));

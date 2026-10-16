@@ -42,7 +42,7 @@ enum Command {
     Unarchive(archive::PrArgs),
     /// Ask the running `serve` to review a PR now, e.g. one manual reviews
     /// hold.
-    Review(archive::PrArgs),
+    Review(archive::ReviewArgs),
     /// Chat with the agent that reviewed a PR, in a copy of its worktree
     /// that's thrown away when the chat ends.
     Chat(chat::ChatArgs),
