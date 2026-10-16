@@ -158,6 +158,30 @@ fn read(dir: &Path, name: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_procedures_finder_skill_is_pointed_at_the_runs_diff() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "none", "comments": []
+    }));
+    let s = setup("", &output, Duration::from_secs(30));
+    let mut profile = profile(vec![]);
+    profile.tools.push("Skill".into());
+    profile.procedure.push(s.fake.path().to_owned());
+    std::fs::write(s.fake.path().join("SKILL.md"), "Run `/code-review`.").unwrap();
+    s.runner
+        .review(&s.run, &context(), &s.settings(profile), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let run_dir = s.data.path().join("runs/3");
+    let system = read(&run_dir, "system.md");
+    let args = format!(
+        "`The PR's diff is in {} and",
+        run_dir.join("pr.diff").display()
+    );
+    assert!(system.contains(&args), "{system}");
+}
+
+#[tokio::test]
 async fn review_flags_comments_outside_the_diff() {
     let output = success(&json!({
         "summary": "One nit.",
