@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use axum::{
     Form,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
 use sanic_core::{
+    config::Effort,
     pr::{PrKey, Thread, is_login},
     state::PrState,
 };
@@ -239,6 +240,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                         a.btn href={ (href) "/ignore" } { "Ignore by title" (keycap("i")) }
                     }
                     @if h.chat { a.btn href="#chat" { "Chat" (keycap("c")) } }
+                    (effort_form(app, pr))
                     (archive_form(app, &pr.key, pr.archived, None))
                 }
             }
@@ -1266,4 +1268,74 @@ pub async fn archive(
     } else {
         Redirect::to(&pr_href(&key))
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EffortForm {
+    /// A level, or empty for the profile's.
+    effort: String,
+}
+
+/// Sets the effort the PR's reviews run at, its queued one included,
+/// straight in the store. htmx gets nothing back: the select already
+/// shows the choice.
+pub async fn set_effort(
+    State(app): State<Shared>,
+    Path(path): Path<PrPath>,
+    headers: HeaderMap,
+    Form(form): Form<EffortForm>,
+) -> Result<Response, Error> {
+    let key = path.key()?;
+    let effort = match form.effort.as_str() {
+        "" => None,
+        name => Some(
+            name.parse::<Effort>()
+                .map_err(|err| Error::BadRequest(err.to_string()))?,
+        ),
+    };
+    let changed = app
+        .store()
+        .set_pr_effort(&key, effort)
+        .map_err(Error::pr(&key))?;
+    if !changed {
+        return Err(Error::NotFound(format!("{} isn't tracked", key.url())));
+    }
+    info!(
+        url = %key.url(),
+        effort = effort.map_or("the profile's", Effort::name),
+        "effort set from the dashboard"
+    );
+    if headers.contains_key("hx-request") {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    Ok(Redirect::to(&pr_href(&key)).into_response())
+}
+
+/// The PR's effort, as a select that saves when it changes; the first
+/// option names the profile's.
+fn effort_form(app: &App, pr: &PrPage) -> Markup {
+    let profile = app
+        .control
+        .run_settings(&pr.profile)
+        .ok()
+        .map(|settings| settings.profile.effort);
+    let action = format!("{}/effort", pr_href(&pr.key));
+    html! {
+        form.effort method="post" action=(action) hx-post=(action) hx-trigger="change"
+            hx-swap="none" title="How hard the agent thinks on this PR's reviews" {
+            (csrf_field(app))
+            select name="effort" aria-label="Review effort" {
+                option value="" selected[pr.effort.is_none()] {
+                    "Effort: profile's"
+                    @if let Some(effort) = profile { " (" (effort.name()) ")" }
+                }
+                @for effort in Effort::ALL {
+                    option value=(effort.name()) selected[pr.effort == Some(effort)] {
+                        "Effort: " (effort.name())
+                    }
+                }
+            }
+            noscript { button.btn type="submit" { "Save" } }
+        }
+    }
 }

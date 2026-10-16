@@ -786,6 +786,13 @@
   document.body.addEventListener("htmx:responseError", function (e) {
     say("That failed (" + e.detail.xhr.status + "); reload the page to see why.");
   });
+  // A saved effort swaps nothing in, so say it took.
+  document.body.addEventListener("htmx:afterRequest", function (e) {
+    const form = e.detail.elt;
+    if (!e.detail.successful || !(form instanceof HTMLFormElement) || !form.matches("form.effort")) return;
+    const option = form.querySelector("select").selectedOptions[0];
+    say((option ? option.textContent : "Effort") + " saved; it applies from the next review that starts.");
+  });
   // The groups you've unfolded, by id: the index's refresh swaps in its
   // lists folded, so they're unfolded again as you left them.
   const unfolded = new Set();

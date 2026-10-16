@@ -2340,6 +2340,21 @@ form.choose select {
   font-size: 12px;
 }
 
+/* Sized like the `.btn`s it sits among in the PR's actions. */
+form.effort {
+  display: flex;
+}
+
+form.effort select {
+  font: inherit;
+  font-size: 13px;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+}
+
 /* The PR page's two views of a run's drafts, as tabs. */
 nav.views {
   display: flex;

@@ -15,6 +15,7 @@ use color_eyre::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sanic_core::{
     clock::WindowChoice,
+    config::Effort,
     pr::{PrKey, PrSnapshot},
     run::Side,
     state::{PrState, ReviewFact, StateFacts},
@@ -53,6 +54,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0027_claude_hold.sql"),
     include_str!("migrations/0028_run_by_hand.sql"),
     include_str!("migrations/0029_run_effort.sql"),
+    include_str!("migrations/0030_pr_effort.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -379,6 +381,21 @@ impl Store {
         }
         tx.commit()
             .wrap_err_with(|| format!("archiving {}", key.url()))?;
+        Ok(changed == 1)
+    }
+
+    /// Has `key`'s reviews run at `effort`, or at their profile's for
+    /// `None`, unless a run has an effort of its own. Queued runs follow
+    /// it too, since it's read when a run is. `false` if the PR isn't
+    /// tracked.
+    pub fn set_pr_effort(&self, key: &PrKey, effort: Option<Effort>) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE prs SET effort = ?3 WHERE repo = ?1 AND number = ?2",
+                params![key.repo.to_string(), key.number, effort.map(Effort::name)],
+            )
+            .wrap_err_with(|| format!("setting the effort of {}", key.url()))?;
         Ok(changed == 1)
     }
 
@@ -864,6 +881,50 @@ mod tests {
         assert!(store.pr_summary(&snap.key).unwrap().unwrap().archived);
         assert!(store.set_archived(&snap.key, false).unwrap());
         assert!(!store.pr_summary(&snap.key).unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn a_prs_effort_sticks_through_polls_and_reaches_its_runs() {
+        let mut store = Store::open_in_memory().unwrap();
+        let snap = snapshot();
+        assert!(!store.set_pr_effort(&snap.key, Some(Effort::High)).unwrap());
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let req = store.review_request(&snap.key).unwrap().unwrap();
+        let run = store.queue_review(&req).unwrap().unwrap();
+        assert_eq!(run.effort, None);
+
+        // Set after it was queued, it still reaches the queued run.
+        assert!(store.set_pr_effort(&snap.key, Some(Effort::High)).unwrap());
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let page = store.pr_page(&snap.key).unwrap().unwrap();
+        assert_eq!(page.effort, Some(Effort::High));
+        assert_eq!(page.profile, "default");
+        let queued = store.queued_review(&snap.key).unwrap().unwrap();
+        assert_eq!(queued.effort, Some(Effort::High));
+        assert_eq!(
+            store.queued_reviews().unwrap()[0].effort,
+            Some(Effort::High)
+        );
+        store.claim_run(run.id).unwrap();
+
+        // A run's own effort wins over the PR's.
+        let mut newer = req.clone();
+        newer.head_sha = "h2".into();
+        let own = store
+            .queue_review_by_hand(&newer, Some(Effort::Low))
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.effort, Some(Effort::Low));
+        assert_eq!(
+            store.queued_review(&snap.key).unwrap().unwrap().effort,
+            Some(Effort::Low)
+        );
+
+        assert!(store.set_pr_effort(&snap.key, None).unwrap());
+        assert_eq!(store.pr_page(&snap.key).unwrap().unwrap().effort, None);
+        let mut newest = req;
+        newest.head_sha = "h3".into();
+        assert_eq!(store.queue_review(&newest).unwrap().unwrap().effort, None);
     }
 
     #[test]
