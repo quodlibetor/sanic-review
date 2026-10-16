@@ -2072,8 +2072,11 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
 - A confirm can also open as a dialog over the index or a PR page. Only
   the page's own script opens it, on your click or key there: it fetches
   the confirm page and shows that page's card, so another site has no
-  way to open it, and its form posts exactly as the page's does, with the
-  token and the same-origin checks. Keys and clicks settle again when it
+  way to open it. The script sends its form as the page's would, with the
+  token and the same-origin checks. When the answer redirects, the page
+  it leads to replaces the one you were on in history, so one Back
+  leaves it; an answer that's a card, a refusal or a result, shows in
+  the dialog, and any other error as a notice. Keys and clicks settle again when it
   opens, keys are ignored while held, and it opens with focus on the card,
   not its Confirm, so a stray `Enter` or `Space` presses nothing; the
   Agent card's focus is in its text box, where `y` is only a letter, so

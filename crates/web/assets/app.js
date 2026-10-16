@@ -173,38 +173,85 @@
           go(href);
           return;
         }
-        // Confirmed from the index, it comes back to the index, filtered as
-        // it is.
-        const next = card.querySelector('input[name="next"]');
-        if (next && page === "index") {
-          next.value = "index";
-          const back = document.createElement("input");
-          back.type = "hidden";
-          back.name = "back";
-          back.value = window.location.pathname + window.location.search;
-          next.after(back);
-        }
-        const popup = dialog.firstElementChild;
-        popup.replaceChildren(document.importNode(card, true));
-        homeLinks(popup);
-        dialog.hidden = false;
-        behind(true);
+        showCard(card);
         opener = from;
-        shown = Date.now();
-        sendOnce(dialog.querySelector("#confirm"));
-        // Focus is on the card, not a button, so a stray Enter or Space
-        // presses nothing: y confirms, or Tab to a button. A card that asks
-        // for text starts in its text box; y there is only a letter.
-        popup.tabIndex = -1;
-        const field = popup.querySelector("[autofocus]");
-        (field || popup).focus();
       })
       .catch(function (err) {
         if (ask === asked) say("That failed (" + err.message + "); reload the page to see why.");
       });
   }
 
+  function showCard(card) {
+    // Confirmed from the index, it comes back to the index, filtered as
+    // it is.
+    const next = card.querySelector('input[name="next"]');
+    if (next && page === "index") {
+      next.value = "index";
+      const back = document.createElement("input");
+      back.type = "hidden";
+      back.name = "back";
+      back.value = window.location.pathname + window.location.search;
+      next.after(back);
+    }
+    const popup = dialog.firstElementChild;
+    popup.replaceChildren(document.importNode(card, true));
+    homeLinks(popup);
+    dialog.hidden = false;
+    behind(true);
+    shown = Date.now();
+    sendOnce(dialog.querySelector("#confirm"));
+    // Focus is on the card, not a button, so a stray Enter or Space presses
+    // nothing; a card that asks for text starts in its box, where y is a letter.
+    popup.tabIndex = -1;
+    const field = popup.querySelector("[autofocus]");
+    (field || popup).focus();
+  }
+
+  // The dialog sends its form itself so the page it leads to replaces this
+  // one in history: a plain post would add it, and Back would land here.
+  function sendFromDialog(e) {
+    const form = e.target;
+    if (e.defaultPrevented || form.method !== "post") return;
+    e.preventDefault();
+    fetch(form.action, {
+      method: "POST",
+      credentials: "same-origin",
+      body: new URLSearchParams(new FormData(form, e.submitter)),
+    })
+      .then(function (resp) {
+        if (resp.redirected) {
+          window.location.replace(resp.url);
+          return;
+        }
+        return resp.text().then(function (text) {
+          const answer = new DOMParser().parseFromString(text, "text/html");
+          const card = answer.querySelector(".cf");
+          // Closed, or another opened, while it was sent: don't bring it back.
+          const current = form.isConnected;
+          if (card) {
+            if (current) {
+              showCard(card);
+              dialog.dataset.result = "true";
+            } else say(card.querySelector("h1").textContent);
+            return;
+          }
+          if (current) closeDialog();
+          const title = answer.querySelector("h1");
+          const why = title ? answer.querySelector("pre.error") : answer.body;
+          say(
+            (title ? title.textContent : String(resp.status)) +
+              (why && why.textContent.trim() ? ": " + why.textContent.trim().slice(0, 300) : "")
+          );
+        });
+      })
+      .catch(function (err) {
+        if (form.isConnected) closeDialog();
+        say("That failed (" + err.message + "); reload the page to see why.");
+      });
+  }
+
   function closeDialog() {
+    delete dialog.dataset.result;
     dialog.hidden = true;
     dialog.firstElementChild.replaceChildren();
     behind(false);
@@ -684,6 +731,7 @@
     openDialog(link.href);
   });
   if (dialog) {
+    dialog.addEventListener("submit", sendFromDialog);
     dialog.addEventListener("click", function (e) {
       // Clicks settle as keys do: the second click of a double click on a
       // link that opened it mustn't land on its Confirm.
@@ -691,8 +739,10 @@
         e.preventDefault();
         return;
       }
-      // Cancel, or a click outside the card, closes it.
-      if (e.target === dialog || e.target.closest("#cancel")) {
+      // Cancel, or a click outside the card, closes it. A post's result card
+      // has nothing to cancel, so its back link goes where it says.
+      const result = dialog.dataset.result && !dialog.querySelector("#confirm");
+      if (e.target === dialog || (!result && e.target.closest("#cancel"))) {
         e.preventDefault();
         closeDialog();
       }
