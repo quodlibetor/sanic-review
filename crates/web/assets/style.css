@@ -2341,6 +2341,10 @@ form.choose select {
 }
 
 /* Sized like the `.btn`s it sits among in the PR's actions. */
+form.effort {
+  display: flex;
+}
+
 form.effort select {
   font: inherit;
   font-size: 13px;
