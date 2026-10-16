@@ -5,7 +5,11 @@ use std::collections::HashSet;
 
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{OptionalExtension, Row, params};
-use sanic_core::{config::Effort, pr::PrKey, run::RunKind};
+use sanic_core::{
+    config::Effort,
+    pr::PrKey,
+    run::{ProcedureCheck, RunKind},
+};
 
 use crate::{NOW, Store, overview::key_columns};
 
@@ -62,6 +66,8 @@ pub struct ReviewRun {
     /// resumed, whose drafts it carries: the agent's word on what it
     /// checked.
     pub no_update: Option<String>,
+    /// For a whole review, how its procedure check came out, if one ran.
+    pub procedure_check: Option<ProcedureCheck>,
 }
 
 /// A stored draft with everything the dashboard shows and edits.
@@ -297,7 +303,7 @@ impl Store {
             "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
                     source_run, instruction, draft_id,
                     (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id),
-                    in_progress_comments, no_update, started_at, profile
+                    in_progress_comments, no_update, started_at, profile, procedure_check
              FROM runs
              WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
@@ -322,6 +328,10 @@ impl Store {
                         no_update: row.get(12)?,
                         started_at: row.get(13)?,
                         profile: row.get(14)?,
+                        // One this build can't read is shown as none.
+                        procedure_check: row
+                            .get::<_, Option<String>>(15)?
+                            .and_then(|json| serde_json::from_str(&json).ok()),
                     })
                 },
             )?

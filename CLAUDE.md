@@ -10,9 +10,10 @@ explicit user action (a dashboard click or a command they run). sanic-review
 never hands an agent GitHub credentials: it strips token variables from the
 agent's environment, and its tools can't write, run commands or reach the
 network. Skills and subagents are trusted: with Skill or Agent in an agent's
-tools, the skills and agents Claude Code loads (yours, the PR's own
-`.claude/`, and those of each `--add-dir` checkout) run as the user and could
-reach credentials stored on disk. Don't add code paths that weaken the rest of
+tools, the skills and agents Claude Code loads (your `skills`, linked into
+each run's `sanic` plugin, and possibly the PR's own `.claude/` and those of
+each `--add-dir` checkout) run as the user and could reach credentials stored
+on disk. Never link a PR checkout's skills into the plugin. Don't add code paths that weaken the rest of
 this, and keep the trust boundary documented in `docs/DESIGN.md` (Tools,
 Security) when it changes. A review of someone else's PR whose commits touch a
 `.claude` path, or a path a `.claude` symlink leads to, never starts unless

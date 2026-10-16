@@ -13,6 +13,7 @@ use maud::{Markup, html};
 use sanic_core::{
     config::Effort,
     pr::{PrKey, Thread, is_login},
+    run::ProcedureCheck,
     state::PrState,
 };
 use sanic_runner::diff::DiffIndex;
@@ -307,6 +308,9 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                         @if let Some(error) = &run.error {
                             " — " span.error { (first_line(error)) }
                         }
+                        @if let Some(check) = &run.procedure_check {
+                            (procedure_check(check))
+                        }
                         // What the agent checked, which opens to all of it.
                         @if let Some(note) = &run.no_update {
                             details.instruction {
@@ -328,6 +332,38 @@ fn run_list(key: &PrKey, runs: &[ReviewRun], shown: Option<&ReviewRun>) -> Marku
                                 (markdown::render(instruction, &markdown::Context::default()))
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A run's procedure check: whether it passed, and, opened, each miss and
+/// what the agent reported for each skill.
+fn procedure_check(check: &ProcedureCheck) -> Markup {
+    let misses = check.misses.len();
+    html! {
+        details.instruction {
+            summary {
+                @if misses == 0 {
+                    span.dim { "procedure check passed" }
+                } @else {
+                    span.error {
+                        "procedure check: " (misses) @if misses == 1 { " miss" } @else { " misses" }
+                    }
+                }
+                @if check.attempts > 1 { " after " (check.attempts) " attempts" }
+            }
+            ul {
+                @for miss in &check.misses {
+                    li.error { (markdown::render(miss, &markdown::Context::default())) }
+                }
+                @for report in &check.report {
+                    li {
+                        code { (report.skill) } " " (report.status.as_str())
+                        @if let Some(count) = report.findings_count { ", " (count) " found" }
+                        @if let Some(reason) = &report.reason { ": " (reason) }
                     }
                 }
             }

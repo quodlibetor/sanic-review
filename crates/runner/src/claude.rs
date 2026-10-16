@@ -66,6 +66,8 @@ pub struct Invocation<'a> {
     pub cwd: &'a Path,
     /// Further directories the agent may read.
     pub add_dirs: &'a [PathBuf],
+    /// The `sanic` plugin, whose skills the agent can invoke.
+    pub plugin_dir: Option<&'a Path>,
     /// The tools it may use: the profile's.
     pub tools: &'a [String],
     /// Sent on stdin, which has no length limit, unlike arguments.
@@ -155,6 +157,9 @@ impl Claude {
         }
         for dir in inv.add_dirs {
             cmd.arg("--add-dir").arg(dir);
+        }
+        if let Some(dir) = inv.plugin_dir {
+            cmd.arg("--plugin-dir").arg(dir);
         }
         for var in token_vars() {
             cmd.env_remove(var);
@@ -297,6 +302,7 @@ mod tests {
         Invocation {
             cwd: Path::new("/wt"),
             add_dirs: dirs,
+            plugin_dir: Some(Path::new("/run/plugin")),
             tools: &[],
             prompt: "p",
             system_prompt: "s",
@@ -355,6 +361,7 @@ mod tests {
         assert_eq!(after("--model"), "claude-sonnet-5");
         assert_eq!(after("--effort"), "high");
         assert_eq!(after("--add-dir"), "/skills");
+        assert_eq!(after("--plugin-dir"), "/run/plugin");
         assert!(args.contains(&"--restricted"));
         assert!(args.contains(&"--strict-mcp-config"));
         let mut removed: Vec<_> = std

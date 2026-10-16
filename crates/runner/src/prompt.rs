@@ -36,7 +36,9 @@ Your answer is JSON matching the provided schema:
 - `suggested_verdict`: `request_changes` only for problems that should block \
 merging, `approve` when you'd merge it as it stands and your comments are \
 optional, `comment` otherwise, or `none` if there is nothing worth saying. \
-It's only a suggestion: the reviewer picks the verdict that's posted.
+It's only a suggestion: the reviewer picks the verdict that's posted. \
+`request_changes` needs a `blocker` or `major` comment, `approve` none that's \
+a `blocker` or `major`, and `none` no `blocker`.
 - `comments`: inline comments on the diff. `line` (and `start_line` for a \
 range) must be lines shown in the diff: `side` `RIGHT` numbers lines in the \
 new file, `LEFT` in the old file, for removed lines. Keep a range inside one \
@@ -85,9 +87,13 @@ session. Map their steps onto this one:
 each draft's private `note` (`summary_note` for the summary).
 - Revising from the user's verdicts: the reviewer's revision requests, for the \
 whole review or one draft, arrive later, in a prompt that resumes this session.
-- Delivering, posting or confirming: stop at the drafts.
-- Steps that need tools you don't have: skip them silently. They aren't \
-failures; don't report them.
+- Delivering, posting, confirming, and other steps that act outside this \
+session: stop at the drafts, without reporting them.
+- Steps that find problems, by running a skill, command or agent or by reading \
+code: never skip them silently. If one can't run as written, do it another \
+way, as below, and say what you did.
+- Never start a subagent, of any type, to get a tool you don't have, such as \
+Bash: subagents get only your tools.
 
 Otherwise, the instructions, procedure and skills below govern the review's \
 style and content.
@@ -105,24 +111,118 @@ message has its metadata, threads and diff: steps that fetch, check out or \
 view the PR are done.
 ";
 
-/// For a run with the Skill tool; `{effort}` and `{diff}` are the run's. A
-/// forked skill can't see the brief, and inherits the `StructuredOutput` tool.
+/// For a run with the Skill tool; `{args}` is [`finder_args`]. A forked
+/// skill can't see the brief, and inherits the `StructuredOutput` tool.
 const FIND_WITH_SKILL: &str = "\
 - Steps that run `/code-review`, or hand finding problems to another skill you \
-can load: run it with the `Skill` tool (`code-review` for `/code-review`), \
+can load: run it with the `Skill` tool, by the name it takes there \
+(`code-review` for `/code-review`, `sanic:<name>` for the profile's skills), \
 never with a PR number, branch, `--comment` or `--fix`. It runs apart from \
 you, sees nothing but its `args`, and anything it answers through \
 `StructuredOutput` never reaches you, so pass exactly this as its `args` \
-(dropping the leading level for a skill that takes none): `{effort} The PR's \
-diff is in {diff} and its code is in the working directory. You can't run \
-commands; read those instead. Give your findings as your final text reply. \
-Never call StructuredOutput: it is reserved for the caller.` Don't skip a \
-step whose skill loads, or do it yourself instead: it's what gives the review \
-its breadth. What it finds is allegations, for the procedure's later steps to \
-verify.
+(dropping the leading level for a skill that takes none): `{args}` Don't skip \
+a step whose skill loads, or do it yourself instead: it's what gives the \
+review its breadth. What it finds is allegations, for the procedure's later \
+steps to verify. A skill whose only answer is `Skill execution completed` gave \
+you nothing back: it failed, which is never \"no findings\".
+";
+
+/// After [`FIND_WITH_SKILL`]: what to do with a skill that doesn't load.
+const FIND_UNLOADED: &str = "\
 - Steps that hand finding problems to a skill you can't load, or to a command \
 or agent you can't run: do that finding yourself.
 ";
+
+/// [`FIND_UNLOADED`] for a run that has the Agent tool.
+const FIND_UNLOADED_AGENT: &str = "\
+- Steps that hand finding problems to a skill you can't load, or to a command \
+or agent you can't run: hand that finding to a `general-purpose` subagent, \
+giving it the skill's `SKILL.md` path, if it has one, and the same `args`, or \
+do it yourself.
+";
+
+/// What a procedure that requires skills adds; `{skills}` lists them.
+const REQUIRED: &str = "\
+- This procedure requires these skills, each by its `Skill` name: {skills}. \
+Run every one on every review, with exactly the `args` above, even where the \
+procedure runs it only on some PRs: each skill judges for itself whether this \
+PR is its concern. Report every one in `run_report`: `ran`, or `failed` with \
+what went wrong, such as a skill that printed its usage and stopped. \
+sanic-review checks the report against the calls you made, and asks again \
+where they disagree.
+";
+
+/// The `args` a finder skill gets: the run's `effort` as its level, and
+/// where to read the diff, `diff`, since a forked skill can't see the brief.
+#[must_use]
+pub fn finder_args(effort: Effort, diff: &Path) -> String {
+    format!(
+        "{} The PR's diff is in {} and its code is in the working directory. You can't run \
+         commands; read those instead. Give your findings as your final text reply. Never \
+         call StructuredOutput: it is reserved for the caller. Never start a subagent to get \
+         a tool you don't have, such as Bash: subagents get only your tools.",
+        effort.name(),
+        diff.display()
+    )
+}
+
+/// `skills` as a list for the prompt: each in backticks.
+fn skill_list(skills: &[String]) -> String {
+    skills
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What a resumed run is told before it answers: to run `required` again,
+/// with `args`, and report them. `unless_no_update` is for a push review,
+/// which needn't when it answers with no update. Empty without `required`.
+#[must_use]
+pub fn finder_reminder(required: &[String], args: &str, unless_no_update: bool) -> String {
+    if required.is_empty() {
+        return String::new();
+    }
+    let unless = if unless_no_update {
+        ", unless you answer with no update"
+    } else {
+        ""
+    };
+    format!(
+        "\n## Required skills\n\nBefore you answer{unless}, run the procedure's required skills \
+         again on the diff as it now stands: {}, each through the `Skill` tool with exactly \
+         these `args`, never a git range: `{args}` Report each in `run_report`. Runs from \
+         earlier in this session don't count: they read another diff.\n",
+        skill_list(required)
+    )
+}
+
+/// The prompt that resumes a session whose answer failed the procedure
+/// check: what it got wrong, `misses`, and how to run the `required`
+/// skills, with `args`, if there are any.
+#[must_use]
+pub fn corrective(misses: &[String], required: &[String], args: &str) -> String {
+    let mut out = String::from("# Your answer didn't pass sanic-review's procedure check\n\n");
+    for miss in misses {
+        let _ = writeln!(out, "- {miss}");
+    }
+    if required.is_empty() {
+        out.push_str(
+            "\nAnswer again with the whole review in the same format, its verdict fitting its \
+             comments' severities.\n",
+        );
+    } else {
+        let _ = write!(
+            out,
+            "\nRun each skill a miss names through the `Skill` tool with exactly these `args`: \
+             `{args}` Calls earlier in this session that used them still count. Then answer \
+             again with the whole review in the same format, `run_report` included, its \
+             verdict fitting its comments' severities. A skill that can't run is `failed`, with \
+             why, never `ran`.\n"
+        );
+    }
+    out
+}
 
 const FIND_YOURSELF: &str = "\
 - Steps that hand finding problems to a skill, command or agent you can't \
@@ -153,15 +253,17 @@ them as if someone else had made them.";
 /// The system prompt: fixed review instructions and where the agent runs,
 /// with `tools`, then each of the profile's instruction files, then its
 /// procedure, each `SKILL.md` as `(path, text)`, to be run at `effort` on
-/// the diff at `diff_path`, then where its skills and the reference
-/// checkouts are.
+/// the diff at `diff_path`, with the skills it `required`, then where its
+/// skills and the reference checkouts are.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn system_prompt(
     tools: &[String],
     effort: Effort,
     diff_path: &Path,
     instructions: &[(String, String)],
     procedure: &[(String, String)],
+    required: &[String],
     skills: &[&Path],
     references: &[&Path],
 ) -> String {
@@ -182,11 +284,15 @@ pub fn system_prompt(
     if !procedure.is_empty() {
         out.push_str(PROCEDURE);
         if tools.iter().any(|t| t == "Skill") {
-            out.push_str(
-                &FIND_WITH_SKILL
-                    .replace("{effort}", effort.name())
-                    .replace("{diff}", &diff_path.display().to_string()),
-            );
+            out.push_str(&FIND_WITH_SKILL.replace("{args}", &finder_args(effort, diff_path)));
+            out.push_str(if tools.iter().any(|t| t == "Agent") {
+                FIND_UNLOADED_AGENT
+            } else {
+                FIND_UNLOADED
+            });
+            if !required.is_empty() {
+                out.push_str(&REQUIRED.replace("{skills}", &skill_list(required)));
+            }
         } else {
             out.push_str(FIND_YOURSELF);
         }
@@ -1123,6 +1229,7 @@ mod tests {
                 "/skills/triage/SKILL.md".into(),
                 "Run `gh pr view`, then present the findings.\n".into()
             )],
+            &["code-review".into(), "sanic:lint".into()],
             &[Path::new("/skills/ring")],
             &[Path::new("/src/services"), Path::new("/src/sanic-cli")]
         ));
@@ -1141,6 +1248,7 @@ mod tests {
             diff,
             &[],
             &procedure,
+            &[],
             &[],
             &[],
         );
@@ -1164,10 +1272,20 @@ mod tests {
             &procedure,
             &[],
             &[],
+            &[],
         );
         assert!(!without.contains("`Skill` tool"), "{without}");
         assert!(without.contains("do that finding yourself"), "{without}");
-        let no_procedure = system_prompt(&["Skill".into()], Effort::Max, diff, &[], &[], &[], &[]);
+        let no_procedure = system_prompt(
+            &["Skill".into()],
+            Effort::Max,
+            diff,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert!(!no_procedure.contains("code-review"), "{no_procedure}");
     }
 
@@ -1182,6 +1300,7 @@ mod tests {
                 "Present each finding for triage.\n".into(),
             )],
             &[("/skills/triage/SKILL.md".into(), "Post it.\n".into())],
+            &[],
             &[Path::new("/skills/ring")],
             &[],
         );
