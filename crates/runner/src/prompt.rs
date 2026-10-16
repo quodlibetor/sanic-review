@@ -8,6 +8,7 @@
 use std::{fmt::Write as _, path::Path};
 
 use sanic_core::{
+    config::Effort,
     pr::{Comment, InProgressReview, Thread, is_login},
     run::{BaselineDraft, PrContext, Resume, ReviewRequest, ReviewTrigger, Side},
 };
@@ -103,15 +104,16 @@ message has its metadata, threads and diff: steps that fetch, check out or \
 view the PR are done.
 ";
 
-/// For a run with the Skill tool; `{diff}` is the run's. A forked skill
-/// can't see the brief, and inherits the `StructuredOutput` tool.
+/// For a run with the Skill tool; `{effort}` and `{diff}` are the run's. A
+/// forked skill can't see the brief, and inherits the `StructuredOutput` tool.
 const FIND_WITH_SKILL: &str = "\
 - Steps that run `/code-review`, or hand finding problems to another skill you \
 can load: run it with the `Skill` tool (`code-review` for `/code-review`), \
 never with a PR number, branch, `--comment` or `--fix`. It runs apart from \
 you, sees nothing but its `args`, and anything it answers through \
-`StructuredOutput` never reaches you, so pass exactly this as its `args`: `The \
-PR's diff is in {diff} and its code is in the working directory. You can't run \
+`StructuredOutput` never reaches you, so pass exactly this as its `args` \
+(dropping the leading level for a skill that takes none): `{effort} The PR's \
+diff is in {diff} and its code is in the working directory. You can't run \
 commands; read those instead. Give your findings as your final text reply. \
 Never call StructuredOutput: it is reserved for the caller.` Don't skip a \
 step whose skill loads, or do it yourself instead: it's what gives the review \
@@ -149,11 +151,13 @@ them as if someone else had made them.";
 
 /// The system prompt: fixed review instructions and where the agent runs,
 /// with `tools`, then each of the profile's instruction files, then its
-/// procedure, each `SKILL.md` as `(path, text)`, to be run on the diff at
-/// `diff_path`, then where its skills and the reference checkouts are.
+/// procedure, each `SKILL.md` as `(path, text)`, to be run at `effort` on
+/// the diff at `diff_path`, then where its skills and the reference
+/// checkouts are.
 #[must_use]
 pub fn system_prompt(
     tools: &[String],
+    effort: Effort,
     diff_path: &Path,
     instructions: &[(String, String)],
     procedure: &[(String, String)],
@@ -177,7 +181,11 @@ pub fn system_prompt(
     if !procedure.is_empty() {
         out.push_str(PROCEDURE);
         if tools.iter().any(|t| t == "Skill") {
-            out.push_str(&FIND_WITH_SKILL.replace("{diff}", &diff_path.display().to_string()));
+            out.push_str(
+                &FIND_WITH_SKILL
+                    .replace("{effort}", effort.name())
+                    .replace("{diff}", &diff_path.display().to_string()),
+            );
         } else {
             out.push_str(FIND_YOURSELF);
         }
@@ -1107,6 +1115,7 @@ mod tests {
     fn system_prompt_appends_instructions_procedure_skills_and_references() {
         insta::assert_snapshot!(system_prompt(
             &["Read".into(), "Skill".into()],
+            Effort::High,
             Path::new("/data/runs/1/pr.diff"),
             &[("general.md".into(), "Be terse.\n".into())],
             &[(
@@ -1127,6 +1136,7 @@ mod tests {
         let diff = Path::new("/data/runs/1/pr.diff");
         let with = system_prompt(
             &["Read".into(), "Skill".into()],
+            Effort::Max,
             diff,
             &[],
             &procedure,
@@ -1136,16 +1146,27 @@ mod tests {
         assert!(with.contains("`code-review` for `/code-review`"), "{with}");
         assert!(with.contains("as its `args`"), "{with}");
         assert!(
-            with.contains("`The PR's diff is in /data/runs/1/pr.diff and"),
+            with.contains("`max The PR's diff is in /data/runs/1/pr.diff and"),
             "{with}"
         );
         assert!(with.contains("Never call StructuredOutput"), "{with}");
         assert!(with.contains("a skill you can't load"), "{with}");
-        assert!(!with.contains("{diff}"), "{with}");
-        let without = system_prompt(&["Read".into()], diff, &[], &procedure, &[], &[]);
+        assert!(
+            !with.contains("{effort}") && !with.contains("{diff}"),
+            "{with}"
+        );
+        let without = system_prompt(
+            &["Read".into()],
+            Effort::Max,
+            diff,
+            &[],
+            &procedure,
+            &[],
+            &[],
+        );
         assert!(!without.contains("`Skill` tool"), "{without}");
         assert!(without.contains("do that finding yourself"), "{without}");
-        let no_procedure = system_prompt(&["Skill".into()], diff, &[], &[], &[], &[]);
+        let no_procedure = system_prompt(&["Skill".into()], Effort::Max, diff, &[], &[], &[], &[]);
         assert!(!no_procedure.contains("code-review"), "{no_procedure}");
     }
 
@@ -1153,6 +1174,7 @@ mod tests {
     fn where_it_runs_comes_before_the_profiles_instructions_procedure_and_skills() {
         let text = system_prompt(
             &[],
+            Effort::Medium,
             Path::new("/data/runs/1/pr.diff"),
             &[(
                 "general.md".into(),
