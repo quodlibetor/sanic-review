@@ -5,7 +5,9 @@
 //! real jj/git repos.
 
 use std::{
+    fmt,
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 
@@ -245,6 +247,58 @@ pub enum Keys {
     Vi,
 }
 
+/// How hard the agent thinks: `claude --effort`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+    /// [`Effort::ALL`]'s names, in order.
+    pub const NAMES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+    /// As the config and `claude --effort` write it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = color_eyre::eyre::Report;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|e| e.name() == s)
+            .ok_or_else(|| {
+                eyre!(
+                    "`{s}` isn't an effort level; use one of {}",
+                    Self::NAMES.join(", ")
+                )
+            })
+    }
+}
+
 impl Keys {
     /// As the config writes it.
     #[must_use]
@@ -267,6 +321,9 @@ pub struct Profile {
     /// The profile's own `model`, or else `runner.model`. `None` is
     /// [`AUTO_MODEL`]: `claude` gets no `--model`.
     pub model: Option<String>,
+    /// The profile's own `effort`, or else `runner.effort`, or else
+    /// [`Effort::Medium`]. A run started with an effort of its own uses that.
+    pub effort: Effort,
     /// The tools its agent may use: the profile's own `tools`, or else
     /// `runner.tools`, or else [`DEFAULT_TOOLS`]. Each is one of
     /// [`SAFE_TOOLS`].
@@ -552,7 +609,11 @@ impl Config {
         }
         let paths = PathContext { base };
         // Folded into each profile, which is all a run reads.
-        let defaults = ProfileDefaults::new(raw.runner.model.take(), raw.runner.tools.take())?;
+        let defaults = ProfileDefaults::new(
+            raw.runner.model.take(),
+            raw.runner.effort.take(),
+            raw.runner.tools.take(),
+        )?;
         let runner = resolve_runner(raw.runner, &paths)?;
         let profiles = raw
             .profile
@@ -690,14 +751,20 @@ pub fn contract_path_in(path: &Path, home: Option<&Path>) -> String {
 /// What `[runner]` sets for profiles that don't set their own.
 struct ProfileDefaults {
     model: Option<String>,
+    effort: Effort,
     tools: Vec<String>,
 }
 
 impl ProfileDefaults {
-    fn new(model: Option<String>, tools: Option<Vec<String>>) -> Result<Self> {
+    fn new(
+        model: Option<String>,
+        effort: Option<Effort>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Self> {
         let builtin: Vec<String> = DEFAULT_TOOLS.iter().map(|&t| t.into()).collect();
         Ok(Self {
             model: resolve_model(model, None).wrap_err("in `runner.model`")?,
+            effort: effort.unwrap_or_default(),
             tools: resolve_tools(tools, &builtin).wrap_err("in `runner.tools`")?,
         })
     }
@@ -758,6 +825,7 @@ fn resolve_profile(
         procedure: expand_all(&raw.procedure)?,
         skills: expand_all(&raw.skills)?,
         model: resolve_model(raw.model, defaults.model.as_deref())?,
+        effort: raw.effort.unwrap_or(defaults.effort),
         tools: resolve_tools(raw.tools, &defaults.tools).wrap_err("in `tools`")?,
         auto_fix: raw.auto_fix,
         skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
@@ -913,6 +981,7 @@ struct RawRunner {
     #[serde(default)]
     read_paths: Vec<String>,
     model: Option<String>,
+    effort: Option<Effort>,
     manual_reviews: Option<bool>,
     tools: Option<Vec<String>>,
     #[serde(default)]
@@ -955,6 +1024,7 @@ struct RawProfile {
     #[serde(default)]
     skills: Vec<String>,
     model: Option<String>,
+    effort: Option<Effort>,
     tools: Option<Vec<String>>,
     #[serde(default)]
     auto_fix: bool,
@@ -1415,6 +1485,46 @@ mod tests {
             unset.profiles[0].model, None,
             "unset leaves claude's default"
         );
+    }
+
+    #[test]
+    fn runner_effort_is_the_default_and_profiles_override_it() {
+        let config = parse(
+            r#"
+            [runner]
+            effort = "high"
+            [profile.own]
+            effort = "max"
+            repos = [{ github = "a/b" }]
+            [profile.inherits]
+            repos = [{ github = "c/d" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles[0].effort, Effort::Max);
+        assert_eq!(config.profiles[1].effort, Effort::High);
+        let unset = parse("[profile.p]\nrepos = [{ github = \"a/b\" }]").unwrap();
+        assert_eq!(unset.profiles[0].effort, Effort::Medium);
+    }
+
+    #[test]
+    fn an_unknown_effort_is_an_error() {
+        for toml in [
+            "[runner]\neffort = \"huge\"\n[profile.p]\nrepos = [{ github = \"a/b\" }]",
+            "[profile.p]\neffort = \"High\"\nrepos = [{ github = \"a/b\" }]",
+        ] {
+            assert!(parse(toml).is_err(), "{toml}");
+        }
+    }
+
+    #[test]
+    fn effort_names_round_trip() {
+        for (effort, name) in Effort::ALL.into_iter().zip(Effort::NAMES) {
+            assert_eq!(effort.name(), *name);
+            assert_eq!(name.parse::<Effort>().unwrap(), effort);
+        }
+        assert_eq!(Effort::ALL.len(), Effort::NAMES.len());
+        assert!("huge".parse::<Effort>().is_err());
     }
 
     #[test]

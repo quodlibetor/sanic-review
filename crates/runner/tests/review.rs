@@ -15,7 +15,7 @@ use std::{
 
 use common::{key, remote};
 use sanic_core::{
-    config::RunnerSettings,
+    config::{Effort, RunnerSettings},
     manual::AutoAuthors,
     run::{
         BaselineDraft, DraftRevision, PrContext, QueuedRun, ReviewRequest, ReviewResult,
@@ -118,6 +118,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
         resume: None,
         worktree: None,
         lineage: vec![],
+        effort: None,
     };
     Setup {
         _remote: remote,
@@ -149,8 +150,16 @@ fn profile(instructions: Vec<PathBuf>) -> AgentProfile {
         procedure: vec![],
         skills: vec![],
         model: Some("claude-sonnet-5".into()),
+        effort: Effort::Medium,
         tools: ["Read", "Grep", "Glob"].map(String::from).into(),
     }
+}
+
+/// The value `claude` was given after `flag`.
+fn arg_after(args: &str, flag: &str) -> Option<String> {
+    let mut lines = args.lines();
+    lines.find(|l| *l == flag)?;
+    lines.next().map(String::from)
 }
 
 fn read(dir: &Path, name: &str) -> String {
@@ -179,6 +188,22 @@ async fn a_procedures_finder_skill_is_pointed_at_the_runs_diff() {
         run_dir.join("pr.diff").display()
     );
     assert!(system.contains(&args), "{system}");
+}
+
+#[tokio::test]
+async fn a_runs_own_effort_overrides_its_profiles() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "none", "comments": []
+    }));
+    let mut s = setup("", &output, Duration::from_secs(30));
+    s.run.effort = Some(Effort::Xhigh);
+    s.runner
+        .review(&s.run, &context(), &s.settings(profile(vec![])), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let args = read(s.fake.path(), "args");
+    assert_eq!(arg_after(&args, "--effort").as_deref(), Some("xhigh"));
 }
 
 #[tokio::test]
@@ -226,6 +251,7 @@ async fn review_flags_comments_outside_the_diff() {
     let args = read(fake, "args");
     assert!(args.contains("Prefer small diffs."), "{args}");
     assert!(args.contains("claude-sonnet-5"), "{args}");
+    assert_eq!(arg_after(&args, "--effort").as_deref(), Some("medium"));
 
     // Run files are kept; the worktree is not.
     let run_dir = s.data.path().join("runs/3");

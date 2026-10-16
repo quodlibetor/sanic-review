@@ -3,12 +3,12 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # hold queued reviews until you start them                                   │"
-"│ manual_reviews = true                                                        │"
 "│ # logins and `org/team`s whose PRs are reviewed without waiting for you      │"
 "│ # auto_review_authors = []                                         (default) │"
 "│ # the agent's tools; none that write, run commands or reach the network      │"
 "│ # tools = ["Read", "Grep", "Glob", "Agent", "Skill"]               (default) │"
+"│ # how hard the agent thinks; a review started with its own effort uses that  │"
+"│ # effort = "medium"                                                (default) │"
 "│                                                                              │"
 "│ [tui]                                                                        │"
 "│ # `emacs` or `vi` keys in text fields; unset, guessed from readline and $EDI │"

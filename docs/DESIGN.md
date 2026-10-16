@@ -196,8 +196,10 @@ worktree afterwards. Only the chat prints them; `serve`'s checkouts don't.
 
 `sanic-review review <PR url>` asks the running `serve` to review a PR now:
 its held review, or else a review of its current head, subject to the
-usual idempotency. It writes a row to a `start_requests` table in the
-shared SQLite database, which `serve` checks every couple of seconds and
+usual idempotency. `--effort <level>` runs it at that effort rather than
+its profile's (see Effort under Runner). It writes a row to a
+`start_requests` table in the shared SQLite database, which `serve`
+checks every couple of seconds and
 empties as it goes. There's no network listener. A request made while
 `serve` isn't running is handled when it next starts. The review it starts
 is full, unless the PR's latest run succeeded on an older head: then it's
@@ -272,6 +274,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # timeout_secs = ...                   # kill a run that takes longer
 # read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
 # model = "auto"                       # default model; see Model below
+# effort = "medium"                    # claude --effort; see Effort below
 # manual_reviews = true                # hold queued reviews until you start them
 # auto_review_authors = ["alice", "my-org/backend"]  # never held: logins, org/team
 # tools = ["Read", "Grep", "Glob"]   # narrower than the default; see Tools
@@ -288,6 +291,7 @@ instructions = ["~/.config/sanic-review/instructions/general.md"]
 procedure = []                         # skill dirs whose SKILL.md it follows
 skills = []                            # skill dirs made available to the agent
 model = "claude-sonnet-5"
+# effort = "high"                      # overrides runner.effort
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
 # authors = ["!renovate"]              # checked after review_requests.authors
 # skip_drafts = false                  # overrides review_requests.skip_drafts
@@ -905,6 +909,20 @@ default model at run time; an unset `runner.model` means the same. A
 profile's `"auto"` overrides a named `runner.model`. `auto` ignores case. An
 empty `model` is an error.
 
+**Effort.** Every run passes `claude --effort`: `--restricted` ignores
+settings files, so the `effortLevel` your own settings choose never
+applies. A profile's `effort` overrides `runner.effort`, and unset both
+mean `medium`. The values are `claude`'s: `low`, `medium`, `high`,
+`xhigh` and `max`, lowercase; anything else is an error. A review can be
+started with an effort of its own, `sanic-review review --effort <level>
+<PR url>`, which the run records in its `effort` column; NULL there
+means its profile's, read when it runs, so a reload applies to queued
+runs. A queued run started that way, held or waiting for a slot, takes
+the new effort; a head already running or reviewed isn't reviewed again
+for it, and `serve` warns that the effort wasn't applied. A regeneration
+takes its source run's. A stored effort this build doesn't know follows
+the profile's. The TUI and dashboard don't set one yet.
+
 ### Output schema (sketch)
 
 ```json
@@ -949,12 +967,12 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, whether you started it by hand, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, whether you started it by hand, the effort it was started at if not its profile's, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted/dismissed`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, why a push review dismissed it as obsolete, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
 | `closed_prs` | PRs a refresh found closed or not visible, and when |
-| `start_requests` | PRs `sanic-review review` asked the running `serve` to review now |
+| `start_requests` | PRs `sanic-review review` asked the running `serve` to review now, each with the effort it asked for, if any |
 | `views` | last time you looked at each PR in the dashboard. Drives "unseen" |
 | `reactions` | everyone's latest reaction to each comment, as last polled |
 | `poll_state` | the poller's values carried between runs, the recency window picked on the dashboard, and each list's hidden count |
