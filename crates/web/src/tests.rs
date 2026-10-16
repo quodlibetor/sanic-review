@@ -5940,7 +5940,7 @@ async fn reviewing_an_unchanged_pr_again_revises_its_review_with_your_instructio
     let regenerate = format!("/pr/org/repo/7/runs/{}/regenerate", f.run);
     assert!(
         card.contains(&format!(
-            r#"<form id="confirm" method="post" action="{regenerate}">"#
+            r#"<form id="confirm" method="post" action="{regenerate}" data-in-place>"#
         )),
         "{card}"
     );

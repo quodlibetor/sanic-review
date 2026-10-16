@@ -168,7 +168,7 @@ fn start(app: &App, pr: &PrPage, why: &Why, owed: Option<&OwedReview>) -> Parts 
     };
     let go = |label: &str| {
         html! {
-            form #confirm method="post" action={ (pr_href(&pr.key)) "/review-now" } {
+            form #confirm method="post" action={ (pr_href(&pr.key)) "/review-now" } data-in-place {
                 (csrf_field(app))
                 // A dialog over the index sets it to `index`.
                 input type="hidden" name="next" value="pr";

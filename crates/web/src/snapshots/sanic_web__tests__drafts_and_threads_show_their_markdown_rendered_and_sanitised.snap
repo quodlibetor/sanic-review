@@ -165,7 +165,7 @@ expression: "readable(&f, card)"
 <details class="revise">
 <summary class="btn" title="Revise just this draft with the agent, from your note">Revise…<span class="k">a</span>
 </summary>
-<form method="post" action="/drafts/2/revise">
+<form method="post" action="/drafts/2/revise" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <textarea name="instruction" rows="2" required placeholder="e.g. not true because …; focus on the fix; reword">
 </textarea>

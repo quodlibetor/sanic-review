@@ -853,7 +853,7 @@ fn revise_form(app: &App, draft: &DraftRow) -> Markup {
             summary.btn title="Revise just this draft with the agent, from your note" {
                 "Revise…" (keycap("a"))
             }
-            form method="post" action=(action) {
+            form method="post" action=(action) data-in-place {
                 (csrf_field(app))
                 textarea name="instruction" rows="2" required
                     placeholder="e.g. not true because …; focus on the fix; reword" {}

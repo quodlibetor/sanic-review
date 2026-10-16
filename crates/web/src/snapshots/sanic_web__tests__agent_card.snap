@@ -22,7 +22,7 @@ expression: "readable(&f, card_of(&ask.body))"
 </div>
 <p class="cost">Spends tokens: the agent works again, with your instruction.</p>
 <div class="btns">
-<form id="confirm" method="post" action="/pr/org/repo/7/runs/1/regenerate">
+<form id="confirm" method="post" action="/pr/org/repo/7/runs/1/regenerate" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <button class="btn go" type="submit">Revise the review<span class="k">y</span>
 </button>

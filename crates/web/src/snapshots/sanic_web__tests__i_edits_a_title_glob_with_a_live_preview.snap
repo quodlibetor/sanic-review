@@ -36,7 +36,7 @@ expression: "readable(&f, &page.body)"
 <p>Fix &lt;script&gt; escaping, in detail.</p>
 </div>
 </details>
-<form id="confirm" method="post" action="/pr/org/repo/8/ignore" data-resend>
+<form id="confirm" method="post" action="/pr/org/repo/8/ignore" data-resend data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <p>
 <label for="pattern">Pattern </label>

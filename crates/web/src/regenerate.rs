@@ -31,7 +31,7 @@ pub const COST: &str = "Spends tokens: the agent works again, with your instruct
 pub fn go(app: &App, pr: &PrKey, run: i64) -> Markup {
     let action = format!("{}/runs/{run}/regenerate", pr_href(pr));
     html! {
-        form #confirm method="post" action=(action) {
+        form #confirm method="post" action=(action) data-in-place {
             (csrf_field(app))
             button.btn.go type="submit" { "Revise the review" (keycap("y")) }
         }

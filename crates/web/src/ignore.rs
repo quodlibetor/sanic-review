@@ -100,7 +100,7 @@ pub async fn editor(State(app): State<Shared>, Path(path): Path<PrPath>) -> Resu
         }
         // Sent again when you come back to fix a refused pattern: adding
         // one twice leaves it there once.
-        form #confirm method="post" action={ (href) "/ignore" } data-resend {
+        form #confirm method="post" action={ (href) "/ignore" } data-resend data-in-place {
             (csrf_field(&app))
             p {
                 label for="pattern" { "Pattern " }

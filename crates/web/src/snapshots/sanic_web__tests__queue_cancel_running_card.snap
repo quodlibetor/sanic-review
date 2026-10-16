@@ -37,7 +37,7 @@ expression: "readable(&f, &started.body)"
 </div>
 <p class="cost">Nothing is posted to GitHub. <span class="k">r</span> reviews it again later.</p>
 <div class="btns">
-<form id="confirm" method="post" action="/queue/3/cancel">
+<form id="confirm" method="post" action="/queue/3/cancel" data-in-place>
 <input type="hidden" name="csrf" value="<token>">
 <button class="btn go" type="submit">Stop the review <span class="k">y</span>
 </button>
