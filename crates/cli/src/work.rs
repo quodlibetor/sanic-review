@@ -19,7 +19,7 @@ use color_eyre::eyre::{Result, eyre};
 use sanic_core::{
     config::{Config, RunnerSettings},
     hold::findings,
-    manual::ManualReviews,
+    manual::{ManualReviews, TeamMembers},
     pr::PrKey,
     run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
     skip::SkipRules,
@@ -246,11 +246,14 @@ impl Worker {
     /// Applies a reloaded config to runs that start from now on. Lowering
     /// `max_concurrent` takes effect as running runs finish.
     pub fn configure(&self, config: &Config) {
-        let new = Settings::new(config);
+        let mut new = Settings::new(config);
         let mut settings = self
             .settings
             .write()
             .unwrap_or_else(PoisonError::into_inner);
+        new.manual_reviews = new
+            .manual_reviews
+            .with_members(Arc::clone(&settings.manual_reviews.members));
         let (old_max, new_max) = (settings.runner.max_concurrent, new.runner.max_concurrent);
         *settings = new;
         if new_max > old_max {
@@ -346,7 +349,7 @@ impl Worker {
                     }
                     match self
                         .store()
-                        .claim_next(|profile| self.holds_reviews(profile))
+                        .claim_next(|profile, author| self.holds(profile, author))
                     {
                         Ok(run) => run,
                         Err(err) => {
@@ -407,7 +410,7 @@ impl Worker {
     /// Whether an automatic `run` is held: by manual reviews, or by a
     /// `.claude` hold.
     fn holds_run(&self, run: &QueuedRun) -> bool {
-        if self.holds_reviews(&run.request.profile) {
+        if self.holds(&run.request.profile, &run.request.author) {
             return true;
         }
         match self.store().claude_holds_run(
@@ -426,14 +429,25 @@ impl Worker {
         }
     }
 
-    /// Whether manual reviews hold automatic runs of `profile`'s PRs, as
-    /// the config last loaded.
-    fn holds_reviews(&self, profile: &str) -> bool {
+    /// Whether manual reviews hold automatic runs of PRs by `author`
+    /// matched to `profile`, as the config last loaded with the teams'
+    /// members as last fetched.
+    fn holds(&self, profile: &str, author: &str) -> bool {
         self.settings
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .manual_reviews
-            .holds(profile)
+            .holds(profile, author)
+    }
+
+    /// Takes the teams' members as fetched now. Called before `serve`
+    /// publishes them, so the worker never holds a run `hold()` released.
+    pub fn set_members(&self, members: Arc<TeamMembers>) {
+        let mut settings = self
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        settings.manual_reviews = settings.manual_reviews.clone().with_members(members);
     }
 
     /// Stops the running review of `run`'s PR, if it's of another head.
@@ -975,6 +989,7 @@ mod tests {
                     repo: RepoName::new("org", "repo"),
                     number: 7,
                 },
+                author: "alice".into(),
                 profile: "p".into(),
                 head_sha: "h1".into(),
                 base_sha: "b1".into(),
@@ -1343,6 +1358,7 @@ mod tests {
             .unwrap()
             .queue_review(&sanic_core::run::ReviewRequest {
                 key,
+                author: "alice".into(),
                 profile: "p".into(),
                 head_sha: first,
                 base_sha: base,
@@ -1877,6 +1893,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let request = |head: &str| sanic_core::run::ReviewRequest {
             key: key.clone(),
+            author: "alice".into(),
             profile: "p".into(),
             head_sha: head.into(),
             base_sha: base.clone(),

@@ -524,6 +524,45 @@ async fn my_teams_follow_pages() {
 }
 
 #[tokio::test]
+async fn team_members_follow_pages_and_a_missing_team_is_none() {
+    let server = MockServer::start().await;
+    let members = "/orgs/org/teams/backend/members";
+    let page2 = format!("{}{members}?page=2", server.uri());
+    Mock::given(path(members))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{ "login": "Bob" }])))
+        .mount(&server)
+        .await;
+    Mock::given(path(members))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([{ "login": "alice" }]))
+                .insert_header("link", format!(r#"<{page2}>; rel="next""#).as_str()),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(path("/orgs/org/teams/gone/members"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    assert_eq!(
+        client
+            .team_members(&TeamRef::new("org", "backend"))
+            .await
+            .unwrap(),
+        Some(vec!["alice".to_owned(), "bob".to_owned()])
+    );
+    assert_eq!(
+        client
+            .team_members(&TeamRef::new("org", "gone"))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn my_orgs_are_lowercased_logins() {
     let server = MockServer::start().await;
     Mock::given(path("/user/orgs"))

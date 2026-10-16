@@ -25,7 +25,7 @@ use color_eyre::eyre::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sanic_core::{
     config::{DEFAULT_MANUAL_REVIEWS, Keys, contract_path},
-    manual::ManualReviews,
+    manual::{AutoAuthors, ManualReviews},
 };
 
 pub use self::check::{Checked, Checker};
@@ -625,14 +625,28 @@ impl ConfigEditor {
                 _ => None,
             }
         };
+        // A list that doesn't parse lets nobody through, so it releases
+        // nothing.
+        let auto = |table: Table| {
+            let key = Key::new(table, "auto_review_authors")?;
+            match self.doc.list(&key) {
+                Setting::Set(list) => AutoAuthors::new(list).ok(),
+                _ => None,
+            }
+        };
+        let profiles = self.doc.profiles();
         ManualReviews {
             runner: set(Table::Runner).unwrap_or(DEFAULT_MANUAL_REVIEWS),
-            overrides: self
-                .doc
-                .profiles()
-                .into_iter()
-                .filter_map(|name| Some((name.clone(), set(Table::Profile(name))?)))
+            overrides: profiles
+                .iter()
+                .filter_map(|name| Some((name.clone(), set(Table::Profile(name.clone()))?)))
                 .collect(),
+            auto: auto(Table::Runner).unwrap_or_default(),
+            profile_auto: profiles
+                .iter()
+                .filter_map(|name| Some((name.clone(), auto(Table::Profile(name.clone()))?)))
+                .collect(),
+            members: std::sync::Arc::default(),
         }
     }
 

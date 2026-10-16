@@ -21,9 +21,9 @@ use crate::{
 /// off starts. A profile's own holds its reviews, or doesn't, either way.
 fn held(app: &App) -> Result<u32, Error> {
     let manual = app.manual_reviews();
-    Ok(app
-        .store()
-        .queued_review_count(|profile| manual.follows_runner(profile))?)
+    Ok(app.store().queued_review_count(|profile, author| {
+        manual.follows_runner(profile) && !manual.auto_reviews(profile, author)
+    })?)
 }
 
 /// `n` held reviews, in words.
@@ -98,6 +98,43 @@ pub async fn page(State(app): State<Shared>) -> Result<Markup, Error> {
                     li {
                         code { "profile." (name) } ": "
                         @if *own { span.held { "on" } } @else { "off" }
+                    }
+                }
+            }
+        }
+        @let lists = std::iter::once(("runner", &manual.auto))
+            .chain(manual.profile_auto.iter().map(|(name, auto)| (name.as_str(), auto)))
+            .filter(|(_, auto)| !auto.logins.is_empty() || !auto.teams.is_empty())
+            .collect::<Vec<_>>();
+        @if !lists.is_empty() {
+            h3 #auto-review-authors { "Reviewed without waiting" }
+            p {
+                code { "auto_review_authors" } ": PRs by these people, or by members of these "
+                "teams, are never held. A team counts its child teams' members too."
+            }
+            ul {
+                @for (table, auto) in &lists {
+                    li {
+                        @if *table == "runner" {
+                            code { "runner" }
+                        } @else {
+                            code { "profile." (table) }
+                        }
+                        ": "
+                        @for (i, login) in auto.logins.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            (login)
+                        }
+                        @for (i, team) in auto.teams.iter().enumerate() {
+                            @if i > 0 || !auto.logins.is_empty() { ", " }
+                            (team) " "
+                            span.dim {
+                                @match manual.members.get(team) {
+                                    Some(members) => { "(" (members.len()) " members)" }
+                                    None => { "(members unknown)" }
+                                }
+                            }
+                        }
                     }
                 }
             }

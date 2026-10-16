@@ -62,6 +62,9 @@ impl ReviewTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRequest {
     pub key: PrKey,
+    /// The PR's author, which decides with `profile` whether manual reviews
+    /// hold it.
+    pub author: String,
     pub profile: String,
     pub head_sha: String,
     pub base_sha: String,

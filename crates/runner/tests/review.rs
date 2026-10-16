@@ -16,6 +16,7 @@ use std::{
 use common::{key, remote};
 use sanic_core::{
     config::RunnerSettings,
+    manual::AutoAuthors,
     run::{
         BaselineDraft, DraftRevision, PrContext, QueuedRun, ReviewRequest, ReviewResult,
         ReviewTrigger, Revision, Verdict,
@@ -99,6 +100,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
         timeout,
         read_paths: vec![],
         manual_reviews: false,
+        auto_review_authors: AutoAuthors::default(),
     };
     let runner = ReviewRunner::new(data.path());
     let git_url = remote.root.path().to_string_lossy().into_owned();
@@ -106,6 +108,7 @@ fn setup(script_body: &str, output: &str, timeout: Duration) -> Setup {
         id: 3,
         request: ReviewRequest {
             key: key(),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: remote.head.clone(),
             base_sha: remote.base.clone(),

@@ -486,9 +486,13 @@ fn save_config(app: &mut App, host: &Host, shared: &Shared, store: &Store, told:
     let Some(editor) = app.editor_mut() else {
         return;
     };
-    let after = editor.manual_reviews();
+    let after = editor
+        .manual_reviews()
+        .with_members(Arc::clone(&before.members));
     if before.releases_any(&after) {
-        match count_held(store, |profile| before.releases(&after, profile)) {
+        match count_held(store, |profile, author| {
+            before.releases(&after, profile, author)
+        }) {
             Ok(held) if held > told => return editor.ask_held(held),
             Ok(_) => {}
             Err(err) => {
@@ -530,7 +534,7 @@ type ConfigFile<'a> = (&'a Path, &'a dyn CheckoutResolver);
 fn switch_manual_reviews(app: &mut App, config: ConfigFile, store: &Store) -> Option<String> {
     let (path, resolver) = config;
     let manual = match config_edit::manual_reviews_in_file(path, resolver) {
-        Ok(manual) => manual,
+        Ok(manual) => manual.with_members(Arc::clone(&app.overview.manual_reviews.members)),
         Err(why) => return Some(unloadable(&why)),
     };
     let held = if manual.runner {
@@ -560,7 +564,7 @@ fn turn_off_manual_reviews(
 ) -> Option<String> {
     let (path, resolver) = config;
     let manual = match config_edit::manual_reviews_in_file(path, resolver) {
-        Ok(manual) => manual,
+        Ok(manual) => manual.with_members(Arc::clone(&app.overview.manual_reviews.members)),
         Err(why) => return Some(unloadable(&why)),
     };
     match count_released(store, &manual) {
@@ -576,7 +580,7 @@ fn turn_off_manual_reviews(
 
 /// The queued reviews of profiles `counted`: the held reviews a switch
 /// starts.
-fn count_held(store: &Store, counted: impl Fn(&str) -> bool) -> Result<u32> {
+fn count_held(store: &Store, counted: impl Fn(&str, &str) -> bool) -> Result<u32> {
     store
         .queued_review_count(counted)
         .wrap_err("counting the held reviews")
@@ -586,7 +590,9 @@ fn count_held(store: &Store, counted: impl Fn(&str) -> bool) -> Result<u32> {
 /// profiles that follow it in `manual`, which the config file says, since
 /// that's what the switch writes to.
 fn count_released(store: &Store, manual: &ManualReviews) -> Result<u32> {
-    count_held(store, |profile| manual.follows_runner(profile))
+    count_held(store, |profile, author| {
+        manual.follows_runner(profile) && !manual.auto_reviews(profile, author)
+    })
 }
 
 /// Turns manual reviews on or off in the config file, and says how that
@@ -1383,7 +1389,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             // still reads "queued".
             let held = matches!(
                 &a.kind,
-                ActivityKind::RunQueued { profile } if overview.manual_reviews.holds(profile)
+                ActivityKind::RunQueued { profile, author }
+                    if overview.manual_reviews.holds(profile, author)
             ) && !events[..i].iter().any(|newer| {
                 newer.key == a.key
                     && matches!(
@@ -2613,6 +2620,7 @@ mod tests {
             manual_reviews: ManualReviews {
                 runner: false,
                 overrides: vec![("ring".into(), true), ("docs".into(), false)],
+                ..ManualReviews::default()
             },
             ..Overview::default()
         };
@@ -2630,6 +2638,7 @@ mod tests {
                 key: pr("org/web", number),
                 kind: ActivityKind::RunQueued {
                     profile: profile.into(),
+                    author: "alice".into(),
                 },
             });
         }
@@ -2666,6 +2675,7 @@ mod tests {
                 key: pr("org/web", 79),
                 kind: ActivityKind::RunQueued {
                     profile: "default".into(),
+                    author: "alice".into(),
                 },
             });
             app.set_overview(overview);
@@ -2690,6 +2700,7 @@ mod tests {
                 "2026-09-23T16:36:00.000Z",
                 ActivityKind::RunQueued {
                     profile: "default".into(),
+                    author: "alice".into(),
                 },
             ),
         ] {
@@ -2924,6 +2935,7 @@ mod tests {
         let manual = ManualReviews {
             runner: false,
             overrides: vec![("ring".into(), true)],
+            ..ManualReviews::default()
         };
         let one = |pr_profile: &str, run_profile: &str| {
             let mut app = App::new();

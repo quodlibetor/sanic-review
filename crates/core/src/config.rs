@@ -18,7 +18,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::{
-    manual::ManualReviews,
+    manual::{AutoAuthors, ManualReviews},
     pr::TeamRef,
     repo::RepoName,
     skip::{AuthorFilter, ProfileSkips, SkipRules, TitleFilter},
@@ -223,6 +223,8 @@ pub struct RunnerSettings {
     /// config turns it off. A profile's own overrides it for its PRs; see
     /// [`Config::manual_reviews`].
     pub manual_reviews: bool,
+    /// Authors whose PRs manual reviews never hold.
+    pub auto_review_authors: AutoAuthors,
 }
 
 #[derive(Debug, Default)]
@@ -278,6 +280,8 @@ pub struct Profile {
     pub skip_drafts: Option<bool>,
     /// Overrides `runner.manual_reviews` for PRs this profile matches.
     pub manual_reviews: Option<bool>,
+    /// Added to `runner.auto_review_authors` for PRs this profile matches.
+    pub auto_review_authors: AutoAuthors,
     pub targets: Vec<Target>,
 }
 
@@ -474,6 +478,14 @@ impl Config {
                 .iter()
                 .filter_map(|p| Some((p.name.clone(), p.manual_reviews?)))
                 .collect(),
+            auto: self.runner.auto_review_authors.clone(),
+            profile_auto: self
+                .profiles
+                .iter()
+                .filter(|p| p.auto_review_authors != AutoAuthors::default())
+                .map(|p| (p.name.clone(), p.auto_review_authors.clone()))
+                .collect(),
+            members: std::sync::Arc::default(),
         }
     }
 
@@ -518,7 +530,7 @@ impl Config {
 
     /// Parses config text. Relative paths resolve against `base`.
     pub fn parse(text: &str, base: &Path, resolver: &dyn CheckoutResolver) -> Result<Self> {
-        let raw: RawConfig = toml::from_str(text)?;
+        let mut raw: RawConfig = toml::from_str(text)?;
         // Zero would make `serve` poll GitHub in a tight loop.
         for (key, value) in [
             ("reconcile_secs", raw.poll.reconcile_secs),
@@ -539,23 +551,9 @@ impl Config {
                 .suggestion("add a `[profile.<name>]` table with a `repos` list");
         }
         let paths = PathContext { base };
-        let claude = match raw.runner.claude {
-            // A bare name means PATH lookup, not a file next to the config.
-            Some(claude) if claude.contains('/') || claude.starts_with('~') => {
-                paths.expand(&claude)?
-            }
-            Some(claude) => PathBuf::from(claude),
-            None => PathBuf::from(DEFAULT_CLAUDE),
-        };
-        let read_paths = raw
-            .runner
-            .read_paths
-            .iter()
-            .map(|p| paths.expand(p))
-            .collect::<Result<_>>()
-            .wrap_err("in `runner.read_paths`")?;
         // Folded into each profile, which is all a run reads.
-        let defaults = ProfileDefaults::new(raw.runner.model, raw.runner.tools)?;
+        let defaults = ProfileDefaults::new(raw.runner.model.take(), raw.runner.tools.take())?;
+        let runner = resolve_runner(raw.runner, &paths)?;
         let profiles = raw
             .profile
             .into_iter()
@@ -608,16 +606,7 @@ impl Config {
                     .skip_drafts
                     .unwrap_or(DEFAULT_SKIP_DRAFTS),
             },
-            runner: RunnerSettings {
-                claude,
-                max_concurrent: raw.runner.max_concurrent.unwrap_or(DEFAULT_MAX_RUNS),
-                timeout: raw
-                    .runner
-                    .timeout_secs
-                    .map_or(DEFAULT_RUN_TIMEOUT, Duration::from_secs),
-                read_paths,
-                manual_reviews: raw.runner.manual_reviews.unwrap_or(DEFAULT_MANUAL_REVIEWS),
-            },
+            runner,
             tui: TuiSettings { keys: raw.tui.keys },
             profiles,
         })
@@ -714,6 +703,33 @@ impl ProfileDefaults {
     }
 }
 
+/// `[runner]`, but the defaults profiles take from it.
+fn resolve_runner(raw: RawRunner, paths: &PathContext<'_>) -> Result<RunnerSettings> {
+    let claude = match raw.claude {
+        // A bare name means PATH lookup, not a file next to the config.
+        Some(claude) if claude.contains('/') || claude.starts_with('~') => paths.expand(&claude)?,
+        Some(claude) => PathBuf::from(claude),
+        None => PathBuf::from(DEFAULT_CLAUDE),
+    };
+    let read_paths = raw
+        .read_paths
+        .iter()
+        .map(|p| paths.expand(p))
+        .collect::<Result<_>>()
+        .wrap_err("in `runner.read_paths`")?;
+    Ok(RunnerSettings {
+        claude,
+        max_concurrent: raw.max_concurrent.unwrap_or(DEFAULT_MAX_RUNS),
+        timeout: raw
+            .timeout_secs
+            .map_or(DEFAULT_RUN_TIMEOUT, Duration::from_secs),
+        read_paths,
+        manual_reviews: raw.manual_reviews.unwrap_or(DEFAULT_MANUAL_REVIEWS),
+        auto_review_authors: AutoAuthors::new(raw.auto_review_authors)
+            .wrap_err("in `runner.auto_review_authors`")?,
+    })
+}
+
 fn resolve_profile(
     name: &str,
     raw: RawProfile,
@@ -748,6 +764,8 @@ fn resolve_profile(
         authors: AuthorFilter::new(raw.authors).wrap_err("in `authors`")?,
         skip_drafts: raw.skip_drafts,
         manual_reviews: raw.manual_reviews,
+        auto_review_authors: AutoAuthors::new(raw.auto_review_authors)
+            .wrap_err("in `auto_review_authors`")?,
         targets,
     })
 }
@@ -897,6 +915,8 @@ struct RawRunner {
     model: Option<String>,
     manual_reviews: Option<bool>,
     tools: Option<Vec<String>>,
+    #[serde(default)]
+    auto_review_authors: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -944,6 +964,8 @@ struct RawProfile {
     skip_titles: Vec<String>,
     skip_drafts: Option<bool>,
     manual_reviews: Option<bool>,
+    #[serde(default)]
+    auto_review_authors: Vec<String>,
     // Entries are converted by hand so errors can say which shape was meant.
     repos: Vec<toml::Value>,
 }
@@ -1088,9 +1110,9 @@ mod tests {
                 manual.overrides,
                 [("on".to_owned(), true), ("off".to_owned(), false)]
             );
-            assert!(manual.holds("on"));
-            assert!(!manual.holds("off"));
-            assert_eq!(manual.holds("unset"), runner);
+            assert!(manual.holds_profile("on"));
+            assert!(!manual.holds_profile("off"));
+            assert_eq!(manual.holds_profile("unset"), runner);
         }
         let no = "[profile.p]\nmanual_reviews = \"no\"\nrepos = [{ github = \"a\" }]\n";
         let err = format!("{:#}", parse(no).unwrap_err());
@@ -1098,6 +1120,29 @@ mod tests {
             err.contains("invalid type: string \"no\", expected a boolean"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn auto_review_authors_add_a_profiles_own_to_the_runners() {
+        let text = r#"
+            [runner]
+            auto_review_authors = ["alice", "org/vuln-backend-dev"]
+            [profile.backend]
+            auto_review_authors = ["bob"]
+            repos = [{ github = "a" }]
+            [profile.other]
+            repos = [{ github = "b" }]
+        "#;
+        let manual = parse(text).unwrap().manual_reviews();
+        assert!(!manual.holds("backend", "bob"));
+        assert!(manual.holds("other", "bob"));
+        assert!(!manual.holds("other", "alice"));
+        assert_eq!(manual.teams(), [TeamRef::new("org", "vuln-backend-dev")]);
+
+        let bad = "[runner]\nauto_review_authors = [\"*\"]\n";
+        let err = format!("{:#}", parse(&format!("{bad}{EXAMPLE}")).unwrap_err());
+        assert!(err.contains("runner.auto_review_authors"), "{err}");
+        assert!(err.contains("patterns aren't allowed"), "{err}");
     }
 
     #[test]

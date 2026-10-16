@@ -181,6 +181,12 @@ pub const RUNNER: &[Field] = &[
         "hold queued reviews until you start them",
     ),
     Field::new(
+        "auto_review_authors",
+        Kind::List,
+        Fallback::Nothing,
+        "logins and `org/team`s whose PRs are reviewed without waiting for you",
+    ),
+    Field::new(
         "tools",
         Kind::List,
         Fallback::Value(|| format!("{DEFAULT_TOOLS:?}")),
@@ -237,6 +243,12 @@ pub const PROFILE: &[Field] = &[
         Kind::Bool,
         Fallback::Inherits(Table::Runner, "manual_reviews"),
         "overrides `runner.manual_reviews` for this profile's PRs",
+    ),
+    Field::new(
+        "auto_review_authors",
+        Kind::List,
+        Fallback::Nothing,
+        "added to `runner.auto_review_authors` for this profile's PRs",
     ),
     Field::new(
         "skip_titles",

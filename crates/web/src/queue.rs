@@ -42,7 +42,7 @@ fn list(app: &App) -> Result<Markup, Error> {
     let manual = app.manual_reviews();
     let any_held = entries
         .iter()
-        .any(|e| !e.is_running() && manual.holds(&e.profile));
+        .any(|e| !e.is_running() && manual.holds(&e.profile, &e.author));
     // Running runs have no place in the queue; the rest are numbered from 1.
     let mut place = 0;
     let placed: Vec<(usize, &QueueEntry)> = entries
@@ -73,7 +73,7 @@ fn list(app: &App) -> Result<Markup, Error> {
             } @else {
                 ol.queue {
                     @for (place, entry) in &placed {
-                        (row(app, entry, *place, queued, now, manual.holds(&entry.profile)))
+                        (row(app, entry, *place, queued, now, manual.holds(&entry.profile, &entry.author)))
                     }
                 }
             }

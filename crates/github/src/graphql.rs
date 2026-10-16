@@ -547,6 +547,32 @@ impl Client {
         Ok(teams)
     }
 
+    /// Lowercase logins of `team`'s members, its child teams' included.
+    /// `None` if the team doesn't exist or the token can't see it. Needs
+    /// `read:org`.
+    pub async fn team_members(&self, team: &TeamRef) -> Result<Option<Vec<String>>, ApiError> {
+        let what = format!("the members of {team}");
+        let path = format!("/orgs/{}/teams/{}/members", team.org, team.slug);
+        let mut url = format!("{}?per_page=100", self.url(&path));
+        let mut members = Vec::new();
+        loop {
+            let Some(resp) = self.send_or_missing(self.get(&url), &what).await? else {
+                return Ok(None);
+            };
+            let next = next_link(resp.headers());
+            let page: Vec<Login> = resp
+                .json()
+                .await
+                .wrap_err_with(|| format!("decoding {what}"))?;
+            members.extend(page.into_iter().map(|m| m.login.to_ascii_lowercase()));
+            match next {
+                Some(next) => url = next,
+                None => break,
+            }
+        }
+        Ok(Some(members))
+    }
+
     /// Logins of the orgs the authenticated user belongs to. Needs
     /// `read:org`.
     pub async fn my_orgs(&self) -> Result<Vec<String>, ApiError> {

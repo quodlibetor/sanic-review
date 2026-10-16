@@ -330,6 +330,7 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     }
     let request = |number| ReviewRequest {
         key: key(number),
+        author: "alice".into(),
         profile: "default".into(),
         head_sha: format!("head{number}"),
         base_sha: "base".into(),
@@ -468,6 +469,7 @@ impl Fixture {
     fn with_queue(&self) -> (i64, i64) {
         let request = |number: u32| ReviewRequest {
             key: key(number),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: format!("head{number}"),
             base_sha: "base".into(),
@@ -652,6 +654,7 @@ async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
         let mut store = f.dashboard.app.store();
         let run = store.queue_review(&ReviewRequest {
             key: key(7),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: "newer".into(),
             base_sha: "base".into(),
@@ -1110,6 +1113,7 @@ async fn a_run_with_no_update_is_listed_with_the_drafts_it_carried() {
         let mut store = f.dashboard.app.store();
         let request = ReviewRequest {
             key: key(7),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: "head7b".into(),
             base_sha: "base".into(),
@@ -1174,6 +1178,7 @@ fn dismissed_run(f: &Fixture) -> i64 {
         .unwrap();
     let request = ReviewRequest {
         key: key(7),
+        author: "alice".into(),
         profile: "default".into(),
         head_sha: "head7b".into(),
         base_sha: "base".into(),
@@ -2158,6 +2163,7 @@ async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
         let run = store
             .queue_review(&ReviewRequest {
                 key: key(9),
+                author: "alice".into(),
                 profile: "gone".into(),
                 head_sha: "head9".into(),
                 base_sha: "base".into(),
@@ -2267,6 +2273,7 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
         store
             .queue_review(&ReviewRequest {
                 key: key(13),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "head13".into(),
                 base_sha: "base".into(),
@@ -2318,6 +2325,7 @@ fn reviewed_pr(f: &Fixture, snap: &PrSnapshot, statuses: &[&str]) {
     let run = store
         .queue_review(&ReviewRequest {
             key: snap.key.clone(),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: snap.head_sha.clone(),
             base_sha: "base".into(),
@@ -2739,6 +2747,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
         .store()
         .queue_review(&ReviewRequest {
             key: key(7),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: "newer".into(),
             base_sha: "base".into(),
@@ -2838,6 +2847,57 @@ async fn settings_leave_manual_reviews_alone_in_a_config_that_doesnt_load() {
 }
 
 #[tokio::test]
+async fn auto_review_authors_are_not_held_and_settings_lists_them() {
+    use sanic_core::{manual::AutoAuthors, pr::TeamRef};
+
+    let f = fixture(true).await;
+    let eight = fixture_prs().into_iter().find(|s| s.key == key(8)).unwrap();
+    let team = TeamRef::new("org", "backend");
+    let auto = ManualReviews {
+        auto: AutoAuthors {
+            logins: vec!["zed".into()],
+            teams: vec![team.clone(), TeamRef::new("org", "unknown")],
+        },
+        ..ManualReviews::runner(true)
+    };
+    let sender = f.serve.manual.lock().unwrap().clone().unwrap();
+    sender.send_replace(auto.clone());
+    let run = f
+        .dashboard
+        .app
+        .store()
+        .queue_review(&ReviewRequest {
+            key: key(8),
+            author: eight.author.clone(),
+            profile: "default".into(),
+            head_sha: "h9".into(),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Requested,
+        })
+        .unwrap()
+        .unwrap();
+    let queue_row = |page: &str| {
+        let at = page.find(&format!(r#"id="run-{}""#, run.id)).unwrap();
+        page[at..at + page[at..].find("</li>").unwrap()].to_owned()
+    };
+    // Members not known yet: held.
+    let row = queue_row(&f.get("/queue").await.body);
+    assert!(row.contains("held · "), "{row}");
+
+    let author = eight.author.to_ascii_lowercase();
+    let members = HashMap::from([(team, std::collections::HashSet::from([author]))]);
+    sender.send_replace(auto.with_members(Arc::new(members)));
+    let row = queue_row(&f.get("/queue").await.body);
+    assert!(!row.contains("held · "), "{row}");
+
+    let page = f.get("/settings").await.body;
+    assert!(page.contains("Reviewed without waiting"), "{page}");
+    assert!(page.contains("zed, org/backend"), "{page}");
+    assert!(page.contains("(1 members)"), "{page}");
+    assert!(page.contains("(members unknown)"), "{page}");
+}
+
+#[tokio::test]
 async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
     // `ring` holds its own; the runner's is off.
     let f = fixture(false).await;
@@ -2845,6 +2905,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
     sender.send_replace(ManualReviews {
         runner: false,
         overrides: vec![("ring".into(), true)],
+        ..ManualReviews::default()
     });
     let eight = fixture_prs().into_iter().find(|s| s.key == key(8)).unwrap();
     // PR 8's run is queued under `profile`, then its repo moves to `now`.
@@ -2853,6 +2914,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
         store
             .queue_review(&ReviewRequest {
                 key: key(8),
+                author: "alice".into(),
                 profile: profile.into(),
                 head_sha: head.into(),
                 base_sha: "base".into(),
@@ -2905,6 +2967,7 @@ async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
             .store()
             .queue_review(&ReviewRequest {
                 key: key(number),
+                author: "alice".into(),
                 profile: profile.into(),
                 head_sha: "newer".into(),
                 base_sha: "base".into(),
@@ -2925,6 +2988,7 @@ async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
     let manual = |runner| ManualReviews {
         runner,
         overrides: vec![("ring".into(), true), ("docs".into(), false)],
+        ..ManualReviews::default()
     };
     let sender = f.serve.manual.lock().unwrap().clone().unwrap();
     sender.send_replace(manual(false));
@@ -3019,6 +3083,7 @@ async fn the_chat_card_is_for_the_run_whose_drafts_the_page_shows() {
         let run = store
             .queue_review(&ReviewRequest {
                 key: key(7),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "newer".into(),
                 base_sha: "base".into(),
@@ -5061,6 +5126,7 @@ async fn moving_a_run_down_reorders_the_queue_and_comes_back() {
         store
             .queue_review(&ReviewRequest {
                 key: key(8),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "head8".into(),
                 base_sha: "base".into(),
@@ -5244,6 +5310,7 @@ async fn a_cancelled_run_reads_cancelled_and_can_be_started_again() {
         store
             .queue_review(&ReviewRequest {
                 key: key(8),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "head8".into(),
                 base_sha: "base".into(),
@@ -5479,6 +5546,7 @@ fn queue_pr7(f: &Fixture, head: &str) -> i64 {
     f.store()
         .queue_review(&ReviewRequest {
             key: key(7),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: head.into(),
             base_sha: "base".into(),

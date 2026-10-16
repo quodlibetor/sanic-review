@@ -873,6 +873,7 @@ fn record(store: &mut Store, s: &mut Seeded, pr: &PrSnapshot, heads: &[(&str, u3
 fn queue(store: &mut Store, pr: &PrSnapshot) -> Result<i64> {
     let request = ReviewRequest {
         key: pr.key.clone(),
+        author: pr.author.clone(),
         profile: "default".into(),
         head_sha: pr.head_sha.clone(),
         base_sha: pr.base_sha.clone(),

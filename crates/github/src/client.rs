@@ -101,6 +101,17 @@ impl Client {
             .map_err(|failed| failed.err)
     }
 
+    /// [`Client::send`], but `None` for a `404 Not Found`.
+    pub(crate) async fn send_or_missing(
+        &self,
+        req: RequestBuilder,
+        what: &str,
+    ) -> Result<Option<Response>, ApiError> {
+        self.send_inner(req, what, true)
+            .await
+            .map_err(|failed| failed.err)
+    }
+
     /// [`Client::send`], saying also whether GitHub answered with a client
     /// error, so a write it refused is known not to have happened.
     pub(crate) async fn send_answered(
@@ -108,6 +119,19 @@ impl Client {
         req: RequestBuilder,
         what: &str,
     ) -> Result<Response, Failed> {
+        let resp = self.send_inner(req, what, false).await?;
+        resp.ok_or_else(|| Failed {
+            err: eyre!("GitHub returned 404 Not Found for {what}").into(),
+            refused: true,
+        })
+    }
+
+    async fn send_inner(
+        &self,
+        req: RequestBuilder,
+        what: &str,
+        missing_ok: bool,
+    ) -> Result<Option<Response>, Failed> {
         let unanswered = |err: ApiError| Failed {
             err,
             refused: false,
@@ -119,7 +143,10 @@ impl Client {
             .map_err(|err| unanswered(err.into()))?;
         let status = resp.status();
         if status.is_success() || status == StatusCode::NOT_MODIFIED {
-            return Ok(resp);
+            return Ok(Some(resp));
+        }
+        if missing_ok && status == StatusCode::NOT_FOUND {
+            return Ok(None);
         }
         let refused = |err: ApiError| Failed {
             err,

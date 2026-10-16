@@ -694,6 +694,7 @@ mod tests {
         let run = store
             .queue_review(&ReviewRequest {
                 key: key(),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "h1".into(),
                 base_sha: "b1".into(),

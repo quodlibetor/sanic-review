@@ -575,6 +575,14 @@ impl Store {
         let id = tx.last_insert_rowid();
         let baseline = baseline(&tx, source)?;
         let lineage = lineage(&tx, id)?;
+        let author: String = tx
+            .query_row(
+                "SELECT author FROM prs WHERE repo = ?1 AND number = ?2",
+                params![repo, number],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
         tx.commit()
             .wrap_err_with(|| format!("queueing a regeneration of run {source}"))?;
         Ok(Regeneration::Queued(Box::new(QueuedRun {
@@ -584,6 +592,7 @@ impl Store {
                     repo: RepoName::parse(&repo)?,
                     number,
                 },
+                author,
                 profile,
                 head_sha,
                 base_sha,
@@ -609,11 +618,13 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT profile, head_sha, base_sha FROM prs WHERE repo = ?1 AND number = ?2",
+                "SELECT profile, head_sha, base_sha, author FROM prs
+                 WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
                     Ok(ReviewRequest {
                         key: key.clone(),
+                        author: row.get(3)?,
                         profile: row.get(0)?,
                         head_sha: row.get(1)?,
                         base_sha: row.get(2)?,
@@ -696,21 +707,21 @@ impl Store {
     /// rather than taken, so manual reviews holding one profile don't stop
     /// the rest of the queue, as is one of a PR with a `.claude` hold. The
     /// claim is conditional, so a run another claimer took first is passed
-    /// over.
-    pub fn claim_next(&self, held: impl Fn(&str) -> bool) -> Result<Option<QueuedRun>> {
-        let queued: Vec<(i64, String)> = {
+    /// over. `held` takes a run's profile and its PR's author.
+    pub fn claim_next(&self, held: impl Fn(&str, &str) -> bool) -> Result<Option<QueuedRun>> {
+        let queued: Vec<(i64, String, String)> = {
             let mut stmt = self.conn.prepare_cached(&format!(
-                "SELECT id, profile FROM runs
+                "SELECT id, profile, {RUN_AUTHOR} FROM runs
                      WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NOT NULL
                            AND NOT {held}
                      ORDER BY queue_pos, id",
                 held = claude_held("runs.repo", "runs.number", "runs.base_sha", "runs.head_sha")
             ))?;
-            stmt.query_map([REVIEW], |row| Ok((row.get(0)?, row.get(1)?)))?
+            stmt.query_map([REVIEW], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for (id, profile) in queued {
-            if held(&profile) {
+        for (id, profile, author) in queued {
+            if held(&profile, &author) {
                 continue;
             }
             let row = self
@@ -719,7 +730,8 @@ impl Store {
                     &format!(
                         "UPDATE runs SET status = 'running', started_at = {NOW}
                          WHERE id = ?1 AND status = 'queued'
-                         RETURNING id, repo, number, profile, head_sha, base_sha, from_sha"
+                         RETURNING id, repo, number, profile, head_sha, base_sha, from_sha,
+                                   {RUN_AUTHOR}"
                     ),
                     [id],
                     queued_row,
@@ -1104,7 +1116,7 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
-                            status, source_run, instruction, {worktree}
+                            status, source_run, instruction, {worktree}, {RUN_AUTHOR}
                      FROM runs WHERE {filter} AND session_id IS NOT NULL
                      ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1",
                     worktree = worktree_run("runs")
@@ -1266,11 +1278,11 @@ impl Store {
     /// Every review queued but not started, in the order they'll run: under
     /// `runner.manual_reviews`, the held ones.
     pub fn queued_reviews(&self) -> Result<Vec<QueuedRun>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}
              FROM runs WHERE status = 'queued' AND kind = ?1
-             ORDER BY queue_pos, id",
-        )?;
+             ORDER BY queue_pos, id"
+        ))?;
         let rows = stmt
             .query_map([REVIEW], queued_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1404,25 +1416,29 @@ impl Store {
         Ok(code.flatten().as_deref().and_then(Stale::parse))
     }
 
-    /// How many [`Store::queued_reviews`] there are of PRs whose profile,
-    /// as each was queued, is `counted`, leaving out PRs with a `.claude`
-    /// hold: what turning manual reviews off for those profiles starts.
-    pub fn queued_review_count(&self, counted: impl Fn(&str) -> bool) -> Result<u32> {
+    /// How many [`Store::queued_reviews`] there are that `counted` picks by
+    /// the profile each was queued under and its PR's author, leaving out
+    /// PRs with a `.claude` hold: what releasing those starts.
+    pub fn queued_review_count(&self, counted: impl Fn(&str, &str) -> bool) -> Result<u32> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT profile, count(*) FROM runs WHERE status = 'queued' AND kind = ?1
-                 AND NOT {held}
-             GROUP BY profile",
+            "SELECT profile, {RUN_AUTHOR}, count(*) FROM runs
+             WHERE status = 'queued' AND kind = ?1 AND NOT {held}
+             GROUP BY profile, author",
             held = claude_held("runs.repo", "runs.number", "runs.base_sha", "runs.head_sha")
         ))?;
         let rows = stmt
             .query_map([REVIEW], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows
             .into_iter()
-            .filter(|(profile, _)| counted(profile))
-            .map(|(_, n)| n)
+            .filter(|(profile, author, _)| counted(profile, author))
+            .map(|(_, _, n)| n)
             .sum())
     }
 
@@ -1431,9 +1447,11 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT id, repo, number, profile, head_sha, base_sha, from_sha
-                 FROM runs WHERE status = 'queued' AND kind = ?1 AND repo = ?2 AND number = ?3
-                 ORDER BY id DESC LIMIT 1",
+                &format!(
+                    "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}
+                     FROM runs WHERE status = 'queued' AND kind = ?1 AND repo = ?2 AND number = ?3
+                     ORDER BY id DESC LIMIT 1"
+                ),
                 params![REVIEW, key.repo.to_string(), key.number],
                 queued_row,
             )
@@ -2202,10 +2220,25 @@ fn succeed(
     Ok(())
 }
 
-type QueuedRow = (i64, String, u32, String, String, String, Option<String>);
+type QueuedRow = (
+    i64,
+    String,
+    u32,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
+/// The author of the PR of the `runs` row being read, as last polled, as
+/// SQL that [`queued_row`] reads.
+const RUN_AUTHOR: &str = "coalesce((SELECT p.author FROM prs p
+                                    WHERE p.repo = runs.repo AND p.number = runs.number),
+                                   '') AS author";
 
 fn queued_run(
-    (id, repo, number, profile, head_sha, base_sha, from_sha): QueuedRow,
+    (id, repo, number, profile, head_sha, base_sha, from_sha, author): QueuedRow,
 ) -> Result<QueuedRun> {
     Ok(QueuedRun {
         id,
@@ -2218,6 +2251,7 @@ fn queued_run(
                 repo: RepoName::parse(&repo)?,
                 number,
             },
+            author,
             profile,
             head_sha,
             base_sha,
@@ -2228,6 +2262,7 @@ fn queued_run(
     })
 }
 
+/// Reads [`RUN_AUTHOR`] by name, so callers can add columns after it.
 fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
     Ok((
         row.get(0)?,
@@ -2237,6 +2272,7 @@ fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get("author")?,
     ))
 }
 
@@ -2323,6 +2359,7 @@ mod tests {
     fn request(head: &str) -> ReviewRequest {
         ReviewRequest {
             key: snapshot().key,
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: head.into(),
             base_sha: "b1".into(),
@@ -3330,9 +3367,10 @@ mod tests {
             store.queued_reviews().unwrap(),
             std::slice::from_ref(&source)
         );
-        assert_eq!(store.queued_review_count(|_| true).unwrap(), 1);
+        assert_eq!(store.queued_review_count(|_, _| true).unwrap(), 1);
         let profile = &source.request.profile;
-        assert_eq!(store.queued_review_count(|p| p != profile).unwrap(), 0);
+        assert_eq!(store.queued_review_count(|p, _| p != profile).unwrap(), 0);
+        assert_eq!(store.queued_review_count(|_, a| a == "alice").unwrap(), 1);
         store.claim_run(source.id).unwrap();
         store.finish_review(source.id, &result()).unwrap();
         let Regeneration::Queued(_) = store.queue_regeneration(source.id, "x", |_| false).unwrap()
@@ -3340,7 +3378,7 @@ mod tests {
             panic!("refused");
         };
         assert!(store.queued_reviews().unwrap().is_empty());
-        assert_eq!(store.queued_review_count(|_| true).unwrap(), 0);
+        assert_eq!(store.queued_review_count(|_, _| true).unwrap(), 0);
     }
 
     struct NoCheckouts;
@@ -4300,15 +4338,21 @@ mod tests {
         let second = queue_for(&mut store, 12);
         let third = queue_for(&mut store, 13);
         assert_eq!(queued_ids(&store), [first.id, second.id, third.id]);
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, first.id);
+        assert_eq!(
+            store.claim_next(|_, _| false).unwrap().unwrap().id,
+            first.id
+        );
         assert_eq!(status(&store, first.id), "running");
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, second.id);
+        assert_eq!(
+            store.claim_next(|_, _| false).unwrap().unwrap().id,
+            second.id
+        );
     }
 
     #[test]
     fn claim_next_is_none_when_nothing_is_queued() {
         let store = store();
-        assert!(store.claim_next(|_| false).unwrap().is_none());
+        assert!(store.claim_next(|_, _| false).unwrap().is_none());
     }
 
     #[test]
@@ -4321,13 +4365,16 @@ mod tests {
         let quick = store.queue_review(&req).unwrap().unwrap();
 
         // 11 is first in line, but `default` is held, so `quick` goes now.
-        let taken = store.claim_next(|p| p == "default").unwrap().unwrap();
+        let taken = store.claim_next(|p, _| p == "default").unwrap().unwrap();
         assert_eq!(taken.id, quick.id);
         assert_eq!(status(&store, held.id), "queued");
         // Nothing left that isn't held.
-        assert!(store.claim_next(|p| p == "default").unwrap().is_none());
+        assert!(store.claim_next(|p, _| p == "default").unwrap().is_none());
+        // Its author goes by the PR's, as last polled.
+        let by_author = store.claim_next(|_, author| author == "alice");
+        assert!(by_author.unwrap().is_none());
         // Once it isn't held, it's taken, and it kept its place.
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, held.id);
+        assert_eq!(store.claim_next(|_, _| false).unwrap().unwrap().id, held.id);
     }
 
     #[test]
@@ -4343,12 +4390,12 @@ mod tests {
         let next = queue_for(&mut store, 12);
 
         // 11 is first in line, but its PR is held, whatever `held` says.
-        let taken = store.claim_next(|_| false).unwrap().unwrap();
+        let taken = store.claim_next(|_, _| false).unwrap().unwrap();
         assert_eq!(taken.id, next.id);
         assert_eq!(status(&store, held.id), "queued");
-        assert!(store.claim_next(|_| false).unwrap().is_none());
+        assert!(store.claim_next(|_, _| false).unwrap().is_none());
         // Turning manual reviews off wouldn't start it either.
-        assert_eq!(store.queued_review_count(|_| true).unwrap(), 0);
+        assert_eq!(store.queued_review_count(|_, _| true).unwrap(), 0);
         // Started by hand, it runs.
         assert!(store.claim_run(held.id).unwrap());
     }
@@ -4365,7 +4412,7 @@ mod tests {
         else {
             panic!("refused");
         };
-        assert!(store.claim_next(|_| false).unwrap().is_none());
+        assert!(store.claim_next(|_, _| false).unwrap().is_none());
         assert_eq!(status(&store, regen.id), "queued");
         // Still listed, so the queue page can show what's about to run.
         assert!(
@@ -4393,7 +4440,10 @@ mod tests {
 
         store.move_run(third.id, Direction::Up).unwrap();
         assert_eq!(queued_ids(&store), [third.id, first.id, second.id]);
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, third.id);
+        assert_eq!(
+            store.claim_next(|_, _| false).unwrap().unwrap().id,
+            third.id
+        );
     }
 
     /// Places drift up as runs leave the queue, so a move that renumbered
@@ -4412,7 +4462,7 @@ mod tests {
 
         store.move_run(last.id, Direction::Up).unwrap();
         assert_eq!(queued_ids(&store), [head.id, last.id, middle.id]);
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, head.id);
+        assert_eq!(store.claim_next(|_, _| false).unwrap().unwrap().id, head.id);
     }
 
     #[test]
@@ -4479,7 +4529,10 @@ mod tests {
         ));
         assert_eq!(status(&store, first.id), "cancelled");
         assert_eq!(queued_ids(&store), [second.id]);
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, second.id);
+        assert_eq!(
+            store.claim_next(|_, _| false).unwrap().unwrap().id,
+            second.id
+        );
     }
 
     #[test]
@@ -4529,7 +4582,10 @@ mod tests {
         let mut store = store();
         let first = queue_for(&mut store, 11);
         let second = queue_for(&mut store, 12);
-        assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, first.id);
+        assert_eq!(
+            store.claim_next(|_, _| false).unwrap().unwrap().id,
+            first.id
+        );
         store.requeue_run(first.id).unwrap();
         assert_eq!(queued_ids(&store), [first.id, second.id]);
     }

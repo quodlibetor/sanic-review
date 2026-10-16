@@ -39,6 +39,7 @@ use crate::poll::Refreshed;
 #[derive(Debug, Clone)]
 pub struct Update {
     pub key: PrKey,
+    pub author: String,
     pub profile: String,
     pub head_sha: String,
     pub base_sha: String,
@@ -54,6 +55,7 @@ impl Update {
         let snap = &refreshed.snapshot;
         Self {
             key: snap.key.clone(),
+            author: snap.author.clone(),
             profile: refreshed.profile.clone(),
             head_sha: snap.head_sha.clone(),
             base_sha: snap.base_sha.clone(),
@@ -80,6 +82,7 @@ impl Update {
             .reduce(ReviewTrigger::merge)?;
         Some(ReviewRequest {
             key: self.key.clone(),
+            author: self.author.clone(),
             profile: self.profile.clone(),
             head_sha: self.head_sha.clone(),
             base_sha: self.base_sha.clone(),
@@ -243,11 +246,11 @@ pub async fn schedule(
 }
 
 /// Whether a review of `request` would be held once queued: `manual`
-/// holds its profile, or its PR's changes already reach `.claude`. A head
-/// not checked yet isn't: its check may find nothing, and then it starts
-/// by itself. Held if the store can't say.
+/// holds its profile and author, or its PR's changes already reach
+/// `.claude`. A head not checked yet isn't: its check may find nothing,
+/// and then it starts by itself. Held if the store can't say.
 fn will_hold(manual: &ManualReviews, store: &Store, request: &ReviewRequest) -> bool {
-    if manual.holds(&request.profile) {
+    if manual.holds(&request.profile, &request.author) {
         return true;
     }
     match store.has_claude_findings(&request.key) {
@@ -406,6 +409,7 @@ mod tests {
     fn update(number: u32, head: &str, triggers: Vec<Trigger>) -> Update {
         Update {
             key: key(number),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: head.into(),
             base_sha: "b".into(),
@@ -880,6 +884,7 @@ mod tests {
             .unwrap()
             .queue_review(&ReviewRequest {
                 key: key(1),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "h1".into(),
                 base_sha: "b".into(),
@@ -928,6 +933,7 @@ mod tests {
             .unwrap()
             .queue_review(&ReviewRequest {
                 key: key(1),
+                author: "alice".into(),
                 profile: "default".into(),
                 head_sha: "h1".into(),
                 base_sha: "b".into(),

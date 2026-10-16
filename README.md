@@ -260,6 +260,7 @@ when it edits it. A minimal one:
 ```toml
 [runner]
 manual_reviews = false            # run queued reviews by themselves; on unless set
+# auto_review_authors = ["alice", "your-org/backend"]  # or hold all but these
 
 [review_requests]
 skip_titles = ["build(deps)*"]    # never auto-review these
@@ -275,6 +276,7 @@ procedure = []                    # SKILL.md dirs the agent follows to review
 skills = []                       # directories of SKILL.md skills
 model = "auto"                    # your claude default; or name a model
 # manual_reviews = true           # overrides [runner]'s, for this profile's PRs
+# auto_review_authors = ["bob"]   # added to [runner]'s, for this profile's PRs
 repos = [
   { github = "your-org" },
   { repo = "~/src/your-repo", paths = ["/backend/**"] },

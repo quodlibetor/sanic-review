@@ -932,7 +932,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
         no_update: false,
         skip: None,
         waiting: None,
-        manual_reviews: run.is_some_and(|run| overview.manual.holds(&run.profile)),
+        manual_reviews: run.is_some_and(|run| overview.manual.holds(&run.profile, &app.me)),
         claude_hold: None,
         now: app.clock.now(),
     };

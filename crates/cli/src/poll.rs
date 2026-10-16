@@ -12,6 +12,7 @@ use sanic_core::pr::TeamRef;
 use sanic_core::{
     clock::{Clock, SystemClock, rfc3339, window_start},
     config::Config,
+    manual::TeamMembers,
     pr::{PrKey, PrSnapshot},
     trigger::{Trigger, detect},
 };
@@ -77,6 +78,10 @@ pub trait GithubApi {
     fn search_prs(&self, qualifiers: &str) -> impl Future<Output = Result<Vec<PrKey>, ApiError>>;
     fn count_prs(&self, qualifiers: &str) -> impl Future<Output = Result<u32, ApiError>>;
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>>;
+    fn team_members(
+        &self,
+        team: &TeamRef,
+    ) -> impl Future<Output = Result<Option<Vec<String>>, ApiError>>;
     fn pull_request(
         &self,
         key: &PrKey,
@@ -103,6 +108,13 @@ impl GithubApi for Client {
 
     fn my_teams(&self) -> impl Future<Output = Result<Vec<TeamRef>, ApiError>> {
         Client::my_teams(self)
+    }
+
+    fn team_members(
+        &self,
+        team: &TeamRef,
+    ) -> impl Future<Output = Result<Option<Vec<String>>, ApiError>> {
+        Client::team_members(self, team)
     }
 
     fn pull_request(
@@ -204,6 +216,11 @@ pub struct Poller<G> {
     /// Your teams, refreshed on each reconcile. A team review request counts
     /// as yours only if you're in the team and the config's filter allows it.
     teams: HashSet<TeamRef>,
+    /// The members of the teams `auto_review_authors` names, refreshed on
+    /// each reconcile while manual reviews hold anything.
+    members: Arc<TeamMembers>,
+    /// Teams last found missing or invisible, so that's said once.
+    missing: HashSet<TeamRef>,
     /// Dates `poll.updated_within_days`.
     clock: Arc<dyn Clock>,
 }
@@ -216,6 +233,8 @@ impl<G: GithubApi> Poller<G> {
             config,
             me,
             teams: HashSet::new(),
+            members: Arc::default(),
+            missing: HashSet::new(),
             clock: Arc::new(SystemClock),
         }
     }
@@ -248,6 +267,12 @@ impl<G: GithubApi> Poller<G> {
         &mut self.store
     }
 
+    /// The members of the teams `auto_review_authors` names, as last
+    /// fetched.
+    pub fn members(&self) -> Arc<TeamMembers> {
+        Arc::clone(&self.members)
+    }
+
     /// The GitHub login everything is judged relative to.
     pub fn me(&self) -> &str {
         &self.me
@@ -259,6 +284,53 @@ impl<G: GithubApi> Poller<G> {
 
     pub fn set_config(&mut self, config: Config) {
         self.config = config;
+    }
+
+    /// Fetches the members of the teams `auto_review_authors` names, while
+    /// manual reviews hold anything. A team that's gone or can't be seen
+    /// lets nobody through; one whose lookup fails keeps its last members.
+    async fn refresh_members(&mut self) -> Result<(), ApiError> {
+        let manual = self.config.manual_reviews();
+        // Dropped rather than kept, so turning holding back on can't let
+        // through someone who left a team meanwhile.
+        if !manual.holds_any() {
+            if !self.members.is_empty() {
+                self.members = Arc::default();
+            }
+            return Ok(());
+        }
+        let mut members = TeamMembers::new();
+        for team in manual.teams() {
+            match self.github.team_members(&team).await {
+                Ok(Some(logins)) => {
+                    self.missing.remove(&team);
+                    members.insert(team, logins.into_iter().collect());
+                }
+                Ok(None) => {
+                    if self.missing.insert(team.clone()) {
+                        tracing::warn!(
+                            %team,
+                            "`auto_review_authors` names a team that doesn't exist or the token \
+                             can't see (it needs `read:org`); it lets nobody through"
+                        );
+                    }
+                }
+                Err(ApiError::Other(report)) => {
+                    tracing::warn!(
+                        %team,
+                        "listing the team's members failed; using the last known: {report:?}"
+                    );
+                    if let Some(known) = self.members.get(&team) {
+                        members.insert(team, known.clone());
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        if *self.members != members {
+            self.members = Arc::new(members);
+        }
+        Ok(())
     }
 
     /// Open PRs that request your review or involve you, in watched repos.
@@ -275,6 +347,7 @@ impl<G: GithubApi> Poller<G> {
             ),
             Err(err) => return Err(err),
         }
+        self.refresh_members().await?;
         let window = self.window()?;
         let since = window_start(self.clock.now(), window);
         let requested = self
@@ -457,6 +530,8 @@ pub(crate) mod tests {
         pub(crate) fetched: RefCell<Vec<PrKey>>,
         pub(crate) fetched_at: RefCell<Vec<tokio::time::Instant>>,
         teams: Vec<TeamRef>,
+        /// Each team's members; a team missing here is one GitHub hides.
+        pub(crate) members: RefCell<HashMap<TeamRef, Vec<String>>>,
         /// The next search is rate limited for this long.
         pub(crate) rate_limit: Cell<Option<Duration>>,
     }
@@ -499,6 +574,10 @@ pub(crate) mod tests {
 
         async fn my_teams(&self) -> Result<Vec<TeamRef>, ApiError> {
             Ok(self.teams.clone())
+        }
+
+        async fn team_members(&self, team: &TeamRef) -> Result<Option<Vec<String>>, ApiError> {
+            Ok(self.members.borrow().get(team).cloned())
         }
 
         async fn pull_request(
@@ -610,6 +689,46 @@ pub(crate) mod tests {
             "me".into(),
         )
         .with_clock(Arc::new(FixedClock))
+    }
+
+    #[tokio::test]
+    async fn reconcile_fetches_auto_review_teams_while_anything_holds() {
+        let (backend, gone) = (TeamRef::new("org", "backend"), TeamRef::new("org", "gone"));
+        let github = FakeGithub::default();
+        github
+            .members
+            .borrow_mut()
+            .insert(backend.clone(), vec!["alice".into()]);
+        let mut poller = poller(github);
+        let auto = "[runner]\nauto_review_authors = [\"org/backend\", \"org/gone\"]\n";
+        poller.set_config(config_with(&format!("{auto}manual_reviews = false")));
+        poller.reconcile().await.unwrap();
+        // Nothing holds, so nobody is looked up.
+        assert!(poller.members().is_empty());
+
+        poller.set_config(config_with(auto));
+        poller.reconcile().await.unwrap();
+        let members = poller.members();
+        assert_eq!(
+            members.get(&backend),
+            Some(&HashSet::from(["alice".into()]))
+        );
+        // A team GitHub hides lets nobody through.
+        assert!(!members.contains_key(&gone));
+
+        // Holding nothing drops what was known, so turning it back on
+        // starts from a fresh lookup.
+        poller.set_config(config_with(&format!("{auto}manual_reviews = false")));
+        poller.reconcile().await.unwrap();
+        assert!(poller.members().is_empty());
+        poller.set_config(config_with(auto));
+        poller.reconcile().await.unwrap();
+        assert!(poller.members().contains_key(&backend));
+
+        // Losing sight of a team drops its members at once.
+        poller.github().members.borrow_mut().clear();
+        poller.reconcile().await.unwrap();
+        assert!(poller.members().is_empty());
     }
 
     #[tokio::test]

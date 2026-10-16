@@ -56,9 +56,34 @@ without one follow the runner's, as does a run whose profile the config
 no longer has. A profile's that isn't a bool is an error, as the
 runner's is. Whether a queued review is held goes by the profile it was
 queued under, not the PR's profile now, which a config change can have
-moved: the worker, the PR's status ("held" or "queued"), why it may be
-started by hand, and what `r`, Review now and `sanic-review review`
-start all go by it, so they agree. With `runner.manual_reviews` off and
+moved, and then by the PR's author: the worker, the PR's status ("held"
+or "queued"), why it may be started by hand, and what `r`, Review now
+and `sanic-review review` start all go by them, so they agree.
+
+`runner.auto_review_authors` lists people whose PRs manual reviews never
+hold: logins, and teams as `org/slug`. A profile's own list adds to the
+runner's for its PRs. Entries are names, not patterns: letters, digits,
+`-`, `_` and `.`, with at least one letter or digit to a part. A glob, a
+`!`, an empty entry, a `..` (which would widen a team's lookup to its
+whole org) or an app written with `[bot]` (GitHub gives PR authors
+without it) is refused when the config loads, since a `*` would quietly
+turn manual reviews off and each review spends tokens. Logins match
+ignoring case. A team counts its members as GitHub lists them, child
+teams' included, fetched on each reconcile while anything is held
+(`read:org`), and forgotten while nothing is, so turning holding back on
+starts from a fresh lookup. Until a team's members are first fetched, it lets nobody
+through; a team that's gone or that the token can't see lets nobody
+through, and is warned about once; a lookup that fails otherwise keeps
+the last known members, so someone just removed from a team is still let
+through until a lookup succeeds. Skips still apply first, and the list
+only lifts manual reviews' hold: a `.claude` hold still holds a listed
+author's PR. The list is decided live: when it, or a team's members,
+changes, held reviews it now lets through start, and queued ones it no
+longer does are held again unless already running. The log says "review
+not held" for a run it let through, and the dashboard's Settings page
+lists the entries, with each team's member count or "members unknown".
+
+With `runner.manual_reviews` off and
 some profiles holding theirs, the status bar and the top bar say "manual
 reviews: <profiles>", naming them in file order.
 
@@ -248,6 +273,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
 # model = "auto"                       # default model; see Model below
 # manual_reviews = true                # hold queued reviews until you start them
+# auto_review_authors = ["alice", "my-org/backend"]  # never held: logins, org/team
 # tools = ["Read", "Grep", "Glob"]   # narrower than the default; see Tools
 
 [tui]
@@ -266,6 +292,7 @@ skip_titles = ["wip*"]                 # added to review_requests.skip_titles
 # authors = ["!renovate"]              # checked after review_requests.authors
 # skip_drafts = false                  # overrides review_requests.skip_drafts
 # manual_reviews = false               # overrides runner.manual_reviews
+# auto_review_authors = ["bob"]        # added to runner.auto_review_authors
 repos = [{ github = "my-org" }]
 
 [profile.ring]

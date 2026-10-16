@@ -324,6 +324,7 @@ mod tests {
         store
             .queue_review(&ReviewRequest {
                 key: key.clone(),
+                author: "alice".into(),
                 profile: "p".into(),
                 head_sha: "h1".into(),
                 base_sha: "b1".into(),

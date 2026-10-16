@@ -599,6 +599,7 @@ mod tests {
                 repo: RepoName::new("org", "repo"),
                 number: 7,
             },
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: "h2".into(),
             base_sha: "b1".into(),

@@ -91,16 +91,16 @@ impl OwedReview {
     }
 
     /// Whether its latest run is queued and held: `manual` holds it, by
-    /// the profile it was queued under, as the worker decides, not the
-    /// PR's profile now, which a config change can have moved; or the PR
-    /// has a `.claude` hold. A regeneration is started by hand, so neither
-    /// holds it.
+    /// the profile it was queued under and its author, as the worker
+    /// decides, not the PR's profile now, which a config change can have
+    /// moved; or the PR has a `.claude` hold. A regeneration is started by
+    /// hand, so neither holds it.
     #[must_use]
     pub fn held(&self, manual: &ManualReviews) -> bool {
         self.latest_run.as_ref().is_some_and(|run| {
             run.status == "queued"
                 && run.kind == RunKind::Review
-                && (manual.holds(&run.profile) || self.claude_hold.is_some())
+                && (manual.holds(&run.profile, &self.author) || self.claude_hold.is_some())
         })
     }
 
@@ -142,7 +142,7 @@ impl OwedReview {
         let holding = match &self.latest_run {
             _ if !self.held(manual) => Holding::Nothing,
             Some(run)
-                if !manual.holds(&run.profile)
+                if !manual.holds(&run.profile, &self.author)
                     && self.claude_hold.as_ref().is_some_and(|h| !h.warns()) =>
             {
                 Holding::Check
@@ -279,9 +279,10 @@ pub struct Activity {
 pub enum ActivityKind {
     /// A detected trigger, by its kind (`review_requested`, `push`, ...).
     Trigger(String),
-    /// A run was queued, for a PR that matched `profile`.
+    /// A run was queued, for a PR by `author` that matched `profile`.
     RunQueued {
         profile: String,
+        author: String,
     },
     RunStarted,
     /// A run ended: succeeded, failed, crashed or superseded. `error` says
@@ -605,7 +606,10 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT at, repo, number, 'trigger', kind, NULL FROM events
              UNION ALL
-             SELECT queued_at, repo, number, 'queued', profile, NULL FROM runs
+             SELECT queued_at, repo, number, 'queued', profile,
+                    (SELECT p.author FROM prs p
+                     WHERE p.repo = runs.repo AND p.number = runs.number)
+             FROM runs
              UNION ALL
              SELECT started_at, repo, number, 'started', NULL, NULL FROM runs
              WHERE started_at IS NOT NULL
@@ -632,7 +636,11 @@ impl Store {
                 let detail = detail.unwrap_or_default();
                 let kind = match what.as_str() {
                     "trigger" => ActivityKind::Trigger(detail),
-                    "queued" => ActivityKind::RunQueued { profile: detail },
+                    // The column holds the PR's author for a queued run.
+                    "queued" => ActivityKind::RunQueued {
+                        profile: detail,
+                        author: error.unwrap_or_default(),
+                    },
                     "started" => ActivityKind::RunStarted,
                     _ => ActivityKind::RunFinished {
                         status: detail,
@@ -721,6 +729,7 @@ mod tests {
     fn request(snap: &PrSnapshot) -> ReviewRequest {
         ReviewRequest {
             key: snap.key.clone(),
+            author: "alice".into(),
             profile: "default".into(),
             head_sha: snap.head_sha.clone(),
             base_sha: snap.base_sha.clone(),
@@ -1484,6 +1493,7 @@ mod tests {
                 ActivityKind::RunStarted,
                 ActivityKind::RunQueued {
                     profile: run.request.profile.clone(),
+                    author: "alice".into(),
                 },
                 ActivityKind::Trigger("review_requested".into()),
             ]

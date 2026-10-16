@@ -25,7 +25,7 @@ use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
     config::{Config, DEFAULT_API_URL, Keys, Unloadable, default_config_path, default_data_dir},
     hold::HeadCheck,
-    manual::ManualReviews,
+    manual::{ManualReviews, TeamMembers},
     pr::PrKey,
     run::{QueuedRun, ReviewRequest, ReviewTrigger},
     skip::SkipRules,
@@ -378,11 +378,21 @@ impl Live {
 
     fn publish(&self, config: &Config) {
         self.skips.send_replace(config.skip_rules());
-        let manual = config.manual_reviews();
+        let members = Arc::clone(&self.manual_reviews.borrow().members);
+        let manual = config.manual_reviews().with_members(members);
         self.manual_reviews
             .send_if_modified(|was| std::mem::replace(was, manual.clone()) != manual);
         self.keys.send_replace(config.tui.keys);
         self.set_recency(|w| w.configured = config.poll.updated_within_days);
+    }
+
+    /// Takes the teams' members as last fetched.
+    fn set_members(&self, members: &Arc<TeamMembers>) {
+        self.manual_reviews.send_if_modified(|manual| {
+            let changed = manual.members != *members;
+            manual.members = Arc::clone(members);
+            changed
+        });
     }
 
     /// Picks a recency window, or with `None` goes back to the config's.
@@ -885,7 +895,10 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
             Ok(()) = manual.changed() => {
                 let now = manual.borrow_and_update().clone();
                 if holding.releases_any(&now) {
-                    for run in held_reviews(&store, |profile| holding.releases(&now, profile)) {
+                    let released = |run: &QueuedRun| {
+                        holding.releases(&now, &run.request.profile, &run.request.author)
+                    };
+                    for run in held_reviews(&store, released) {
                         send(run, true);
                     }
                 }
@@ -918,6 +931,14 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
                         "review held: {why}"
                     );
                 } else {
+                    if holding.holds_profile(&run.request.profile) {
+                        info!(
+                            url = %run.request.key.url(),
+                            run = run.id,
+                            author = %run.request.author,
+                            "review not held: `auto_review_authors` lets its author through"
+                        );
+                    }
                     send(run, true);
                 }
             }
@@ -927,14 +948,14 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
     }
 }
 
-/// Why an automatic `run` is held, if it is: `manual` holds its profile,
-/// or a `.claude` hold does. Held if the store can't say.
+/// Why an automatic `run` is held, if it is: `manual` holds its profile
+/// and author, or a `.claude` hold does. Held if the store can't say.
 pub(crate) fn held_why(
     manual: &ManualReviews,
     store: &Store,
     run: &QueuedRun,
 ) -> Option<&'static str> {
-    if manual.holds(&run.request.profile) {
+    if manual.holds(&run.request.profile, &run.request.author) {
         return Some("manual reviews are on");
     }
     match store.claude_holds_run(
@@ -953,15 +974,15 @@ pub(crate) fn held_why(
     }
 }
 
-/// The reviews manual reviews held of the profiles `released`, now that
-/// they no longer hold them, less those a `.claude` hold still keeps.
-fn held_reviews(store: &Mutex<Store>, released: impl Fn(&str) -> bool) -> Vec<QueuedRun> {
+/// The reviews manual reviews held that `released` picks, now that they
+/// no longer hold them, less those a `.claude` hold still keeps.
+fn held_reviews(store: &Mutex<Store>, released: impl Fn(&QueuedRun) -> bool) -> Vec<QueuedRun> {
     let store = store.lock().unwrap_or_else(PoisonError::into_inner);
     match store.queued_reviews() {
         Ok(mut held) => {
             // Those a `.claude` hold keeps would only nudge the worker.
             held.retain(|run| {
-                released(&run.request.profile)
+                released(run)
                     && store
                         .claude_holds_run(
                             &run.request.key,
@@ -1040,6 +1061,13 @@ async fn poll_forever<G: GithubApi>(
             next_reconcile = now + reconcile_every;
             match poller.reconcile().instrument(info_span!("reconcile")).await {
                 Ok(found) => {
+                    let members = poller.members();
+                    if live.manual_reviews.borrow().members != members {
+                        // The worker first, so it never holds a run `hold()`
+                        // has just released.
+                        worker.set_members(Arc::clone(&members));
+                        live.set_members(&members);
+                    }
                     let (requested, involved) = (found.requested.len(), found.involved.len());
                     pending.extend(found.requested, Priority::Requested);
                     pending.extend(found.involved, Priority::Involved);
@@ -1580,6 +1608,7 @@ mod tests {
         let held = ManualReviews {
             runner: false,
             overrides: vec![("p".into(), true)],
+            ..ManualReviews::default()
         };
         let started = handle(&store, held, vec![Request::Rerun(key.clone())]).await;
         assert_eq!(started, std::slice::from_ref(&queued));
@@ -1588,6 +1617,7 @@ mod tests {
         let runs = ManualReviews {
             runner: true,
             overrides: vec![("p".into(), false)],
+            ..ManualReviews::default()
         };
         assert!(
             handle(&store, runs, vec![Request::Rerun(key)])
@@ -1610,6 +1640,7 @@ mod tests {
         let holding = |profile: &str| ManualReviews {
             runner: false,
             overrides: vec![(profile.into(), true)],
+            ..ManualReviews::default()
         };
         // Only `q` holds: the run isn't held, so there's nothing to start.
         assert!(
@@ -1672,6 +1703,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_teams_members_arriving_start_their_held_reviews() {
+        use sanic_core::{manual::AutoAuthors, pr::TeamRef};
+
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let held = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let team = TeamRef::new("org", "backend");
+        let before = ManualReviews {
+            auto: AutoAuthors {
+                teams: vec![team.clone()],
+                ..AutoAuthors::default()
+            },
+            ..ManualReviews::runner(true)
+        };
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        let (_started, started_rx) = mpsc::unbounded_channel();
+        let (manual, manual_rx) = watch::channel(before.clone());
+        let (jobs, mut jobs_rx) = mpsc::unbounded_channel();
+        let gate = tokio::spawn(hold(
+            Inputs {
+                runs: runs_rx,
+                started: started_rx,
+                manual: manual_rx,
+                store: Arc::new(Mutex::new(store)),
+                checks: mpsc::unbounded_channel().0,
+            },
+            jobs,
+        ));
+        // Its members aren't known yet, so alice's review is held.
+        runs.send(held.clone()).unwrap();
+        let alice = std::collections::HashSet::from(["alice".to_owned()]);
+        let members = std::collections::HashMap::from([(team, alice)]);
+        manual.send_replace(before.with_members(Arc::new(members)));
+        let job = |run: &QueuedRun| Job {
+            run: run.clone(),
+            automatic: true,
+        };
+        assert_eq!(jobs_rx.recv().await, Some(job(&held)));
+        // From then on hers go straight through.
+        let next = QueuedRun { id: 100, ..held };
+        runs.send(next.clone()).unwrap();
+        assert_eq!(jobs_rx.recv().await, Some(job(&next)));
+        drop((runs, manual));
+        gate.abort();
+    }
+
+    #[tokio::test]
     async fn a_profiles_own_manual_reviews_hold_its_runs_whatever_the_runners_say() {
         let key = key();
         let mut store = store_with_pr(&key);
@@ -1683,6 +1764,7 @@ mod tests {
         let manual_with = |runner, p: Option<bool>| ManualReviews {
             runner,
             overrides: p.map(|on| ("p".to_owned(), on)).into_iter().collect(),
+            ..ManualReviews::default()
         };
         let (runs, runs_rx) = mpsc::unbounded_channel();
         let (started, started_rx) = mpsc::unbounded_channel::<QueuedRun>();
@@ -1820,7 +1902,7 @@ mod tests {
             store
                 .lock()
                 .unwrap()
-                .claim_next(|_| false)
+                .claim_next(|_, _| false)
                 .unwrap()
                 .is_none()
         );

@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic. 3 unsaved ┐"
-"│ # agent runs at once, across all PRs                                         │"
-"│ # max_concurrent = 2                                               (default) │"
 "│ # seconds before a run is killed                                             │"
 "│ # timeout_secs = 1800                                              (default) │"
 "│ # more directories the agent may read                                        │"
@@ -12,6 +10,8 @@ expression: draw(&editor).backend()
 "│ # the review model; `auto` is your own Claude default                        │"
 "│ # model = "auto"                                                   (default) │"
 "│ # hold queued reviews until you start them                                   │"
+"│ manual_reviews = true                                                        │"
+"│ # logins and `org/team`s whose PRs are reviewed without waiting for you      │"
 "│ ┌ Remove profile? ─────────────────────────────────────────────────────────┐ │"
 "│ │ Remove [profile.first] and everything in it?                             │ │"
 "│ │                                                                          │ │"

@@ -61,14 +61,15 @@ impl<'a> Next<'a> {
     /// From the PR's `runs`, newest first: the newest of `head`'s, unless a
     /// review `waiting` out the quiet period is newer news than a finished
     /// one. A queued one is held by the PR's `.claude` hold (`claude`), or
-    /// else if `manual` holds the profile it was queued under; one that
-    /// only waits for its head's check is on its way unless `manual`
-    /// holds it.
+    /// else if `manual` holds the profile it was queued under and the PR's
+    /// `author`; one that only waits for its head's check is on its way
+    /// unless `manual` holds it.
     pub fn of(
         runs: &'a [ReviewRun],
         head: &str,
         waiting: Option<Duration>,
         manual: &ManualReviews,
+        author: &str,
         claude: Option<&ClaudeHold>,
     ) -> Self {
         let run = runs.iter().find(|run| run.head_sha == head);
@@ -81,7 +82,9 @@ impl<'a> Next<'a> {
                     HeldBy::Claude
                 })
             }
-            Some((run, "queued")) if manual.holds(&run.profile) => Self::Held(HeldBy::Manual),
+            Some((run, "queued")) if manual.holds(&run.profile, author) => {
+                Self::Held(HeldBy::Manual)
+            }
             Some((_, "queued")) if claude.is_some() => Self::Checking,
             Some((run, "queued")) => Self::Queued(run),
             _ if let Some(left) = waiting => Self::Waiting(left),
@@ -140,11 +143,26 @@ impl<'a> Drift<'a> {
             tracing::warn!(url = %key.url(), "reading the PR's `.claude` hold failed: {err:?}");
             None
         });
+        // Unknown, it's held, as the worker would hold it.
+        let author = match app.store().pr_summary(key) {
+            Ok(pr) => pr.map(|pr| pr.author).unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(url = %key.url(), "reading the PR's author failed: {err:?}");
+                String::new()
+            }
+        };
         Some(Self {
             key,
             shown,
             pr_head,
-            next: Next::of(runs, pr_head, waiting, &overview.manual, claude.as_ref()),
+            next: Next::of(
+                runs,
+                pr_head,
+                waiting,
+                &overview.manual,
+                &author,
+                claude.as_ref(),
+            ),
             now: app.clock.now(),
             startable: owed.is_some_and(|o| owed_now(o, overview).starts()),
         })
