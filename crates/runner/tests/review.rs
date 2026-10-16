@@ -207,6 +207,28 @@ async fn a_runs_own_effort_overrides_its_profiles() {
 }
 
 #[tokio::test]
+async fn a_low_review_runs_its_agent_at_medium_and_its_skills_at_low() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "none", "comments": []
+    }));
+    let mut s = setup("", &output, Duration::from_secs(30));
+    s.run.effort = Some(Effort::Low);
+    let mut profile = profile(vec![]);
+    profile.tools.push("Skill".into());
+    profile.procedure.push(s.fake.path().to_owned());
+    std::fs::write(s.fake.path().join("SKILL.md"), "Run `/code-review`.").unwrap();
+    s.runner
+        .review(&s.run, &context(), &s.settings(profile), pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let args = read(s.fake.path(), "args");
+    assert_eq!(arg_after(&args, "--effort").as_deref(), Some("medium"));
+    let system = read(&s.data.path().join("runs/3"), "system.md");
+    assert!(system.contains("`low The PR's diff is in "), "{system}");
+}
+
+#[tokio::test]
 async fn review_flags_comments_outside_the_diff() {
     let output = success(&json!({
         "summary": "One nit.",

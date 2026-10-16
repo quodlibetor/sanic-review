@@ -74,7 +74,8 @@ pub struct Invocation<'a> {
     /// JSON Schema the final answer must match.
     pub schema: &'a Value,
     pub model: Option<&'a str>,
-    /// Always passed: `--restricted` ignores settings files' `effortLevel`.
+    /// The run's effort. Always passed, as [`Effort::agent`]: `--restricted`
+    /// ignores settings files' `effortLevel`.
     pub effort: Effort,
     /// Receives the `stream-json` transcript.
     pub transcript: &'a Path,
@@ -146,7 +147,7 @@ impl Claude {
         if let Some(model) = inv.model {
             cmd.args(["--model", model]);
         }
-        cmd.args(["--effort", inv.effort.name()]);
+        cmd.args(["--effort", inv.effort.agent().name()]);
         // A fork, so the resumed session stays as it was: a later chat with
         // that run sees only its own turns.
         if let Some(session) = inv.resume {

@@ -912,7 +912,9 @@ empty `model` is an error.
 
 **Effort.** Every run passes `claude --effort`: `--restricted` ignores
 settings files, so the `effortLevel` your own settings choose never
-applies. A profile's `effort` overrides `runner.effort`, and unset both
+applies. The agent itself never runs below `medium`: at `low`, agents
+skipped their procedure's steps outright, so `low` reaches only the
+level its skills are run at (see Prompt assembly). A profile's `effort` overrides `runner.effort`, and unset both
 mean `medium`. The values are `claude`'s: `low`, `medium`, `high`,
 `xhigh` and `max`, lowercase; anything else is an error. A review can be
 started with an effort of its own, `sanic-review review --effort <level>
@@ -932,8 +934,8 @@ again as it starts, so changing it reaches a review that's queued or
 waiting for a slot, while one already running keeps the effort it
 started at. A run started with `--effort` keeps its own. Nothing records
 the effort a finished run used. The TUI doesn't set either. A
-procedure's `/code-review` step runs at the review's effort too (see
-Prompt assembly).
+procedure's `/code-review` step runs at the review's effort, `low`
+included (see Prompt assembly).
 
 ### Output schema (sketch)
 

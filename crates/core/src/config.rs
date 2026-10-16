@@ -247,8 +247,9 @@ pub enum Keys {
     Vi,
 }
 
-/// How hard the agent thinks: `claude --effort`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// How hard a review works: its skills' level, and, no lower than
+/// [`Effort::Medium`], `claude --effort` (see [`Effort::agent`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
@@ -274,6 +275,13 @@ impl Effort {
             Self::Xhigh => "xhigh",
             Self::Max => "max",
         }
+    }
+
+    /// The `claude --effort` the agent itself runs at. Below medium, agents
+    /// skipped their procedure's steps, so a lower level reaches only skills.
+    #[must_use]
+    pub fn agent(self) -> Self {
+        self.max(Self::Medium)
     }
 }
 
@@ -1525,6 +1533,21 @@ mod tests {
         }
         assert_eq!(Effort::ALL.len(), Effort::NAMES.len());
         assert!("huge".parse::<Effort>().is_err());
+    }
+
+    #[test]
+    fn the_agent_never_runs_below_medium() {
+        let agent: Vec<_> = Effort::ALL.into_iter().map(Effort::agent).collect();
+        assert_eq!(
+            agent,
+            [
+                Effort::Medium,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max
+            ]
+        );
     }
 
     #[test]
