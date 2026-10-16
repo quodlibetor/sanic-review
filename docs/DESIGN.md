@@ -179,10 +179,10 @@ who can answer now, that it still mustn't post, run `gh` or reach the
 network, and that drafts change only on the dashboard. It keeps the review's
 limits: `--restricted` and `--strict-mcp-config` (the PR's own
 `.claude/settings.json` and `.mcp.json` don't load), the profile's tools,
-the run's `--add-dir`s, and no GitHub token. `--allow-edits` gives the
-file-reading tools plus Edit and Write, whatever the profile's tools, so
-no skill or subagent runs beside edits, and drops the `--add-dir`s, so
-only the worktree can change. The
+the run's `--add-dir`s and `sanic` plugin, and no GitHub token.
+`--allow-edits` gives the file-reading tools plus Edit and Write,
+whatever the profile's tools, so no skill or subagent runs beside edits,
+and drops the `--add-dir`s and plugin, so only the worktree can change. The
 worktree is removed when the chat ends, however it ends; it's refused while
 that path exists (a running review or another chat). `--print-command`
 prints the `cd <worktree> && …` line instead and leaves the worktree for it
@@ -290,6 +290,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 instructions = ["~/.config/sanic-review/instructions/general.md"]
 procedure = []                         # skill dirs whose SKILL.md it follows
 skills = []                            # skill dirs made available to the agent
+# finders = ["code-review"]            # skills the procedure requires
 model = "claude-sonnet-5"
 # effort = "high"                      # overrides runner.effort
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
@@ -616,9 +617,12 @@ it `superseded`.
    triage, edit and post from the dashboard; and how to map interactive
    steps. Presenting for triage or explaining to the user goes in each
    draft's private note, your revision requests arrive in a later prompt,
-   delivering, posting or confirming stops at the drafts, and steps that
-   need tools it lacks are skipped without being reported as failures.
-   Otherwise the profile's instructions govern style and content.
+   delivering, posting or confirming stops at the drafts without being
+   reported, and a step that finds problems is never skipped silently:
+   if it can't run as written, the agent does it another way and says
+   so. No subagent, of any type, may be started to get a tool the run
+   lacks, such as Bash. Otherwise the profile's instructions govern style
+   and content.
    The procedure is each `procedure` dir's `SKILL.md`, inlined whole, as
    the steps the agent follows for this review, where `skills` are only
    listed for it to read as it sees fit. It follows the instruction files,
@@ -631,16 +635,38 @@ it `superseded`.
    skipped such a step and found problems in one pass of their own); a
    step whose skill doesn't load, one that hands finding problems to a
    command or agent it can't run, or any finding step when it lacks
-   Skill, it does itself; and the mapping above applies to the rest. The
+   Skill, it does itself, or with Agent hands to a `general-purpose`
+   subagent; and the mapping above applies to the rest. The
    skill gets the run's effort as its level and no PR number, branch,
    `--comment` or `--fix`, and its `args` are spelled out: that it can't
    run commands, that the diff is
-   the run dir's `pr.diff` (a forked skill can't see the brief), and to
-   answer in text. A skill that runs forked inherits the
+   the run dir's `pr.diff` (a forked skill can't see the brief), to
+   answer in text, and not to start a subagent for a tool it lacks (in
+   one review the forked `/code-review`, given a git range, tried to get
+   Bash that way). A skill that runs forked inherits the
    `StructuredOutput` tool from `--json-schema`, and an answer given
-   through that never reaches the agent, which sees only that the skill
-   finished. A dir without a `SKILL.md` fails the run, as a missing
-   instruction file does. A regeneration gets the same system prompt.
+   through that never reaches the agent, which sees only `Skill execution
+   completed`; the prompt says that's a failure, never "no findings".
+   **Required skills.** With Skill in its tools, a procedure requires
+   each skill it names as a `/name` word of its own (not in a URL or
+   path; a `sanic:` prefix is dropped), for a name that's a built-in
+   skill (`code-review`, `simplify`) or one in the `sanic` plugin, but
+   not a procedure's own. A built-in wins a name both have. A profile's
+   `finders` list of skill names replaces what the text names, for a
+   procedure that names its finders some other way. sanic-review never
+   decides whether a skill applies to a PR, since skills can be anything:
+   every required skill runs on every review, even one the procedure runs
+   only on some PRs, and judges for itself whether the PR is its
+   concern. The system prompt lists the required skills by their Skill
+   names and asks for a `run_report` entry for each: `ran`, or `failed`
+   with what went wrong, which leaves nothing the transcript can't
+   check. A whole-review regeneration and a push
+   review are told again, at the end of their prompt, to run each one on
+   the diff as it now stands with the same `args`, since a resumed session
+   follows its earlier context: in the reviews that regenerated, agents
+   reused a git range or ran nothing. The procedure check (see Runner)
+   holds the agent to its report. A dir without a `SKILL.md` fails the
+   run, as a missing instruction file does. A regeneration gets the same system prompt.
    The metadata includes the PR's title and description. Each piece of
    PR-authored text is fenced with more backticks than it contains, so it
    can't close its own block.
@@ -693,7 +719,9 @@ it `superseded`.
    `--strict-mcp-config` loads no MCP servers. Skill and Agent widen this;
    see Tools below.
    Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
-   the agent reads their `SKILL.md` files directly. Procedure dirs are
+   the agent can read their `SKILL.md` files directly, and their skills
+   are linked into the run's `sanic` plugin, passed as `--plugin-dir`, so
+   it can invoke them (see Tools below). Procedure dirs are
    `--add-dir`s too, so the agent can read files a `SKILL.md` refers to
    beside it. A run that outlives
    `runner.timeout_secs` is killed and fails. The agent runs in its own
@@ -870,13 +898,26 @@ them; see `sanic-review chat` under Process model.
 
 Skill and Agent trust what they load. They're allowed by default because
 sanic-review trusts your skills, and with them the PR author's:
-- **Skill** runs any skill Claude Code finds: yours under
-  `~/.claude/skills`, plugin skills, and the `.claude/skills` of the
-  worktree and of each `--add-dir`. The worktree's are the PR's, written
-  by its author, and an `--add-dir` checkout's are whatever its checked
-  out branch holds. With a `procedure`, the system prompt tells the
-  agent to load `code-review`, and any finder skill the procedure names,
-  so whatever answers to that name is run, not just made available. A
+- **Skill** runs any skill Claude Code loads. Under `--restricted`,
+  runs on Claude Code 2.1.301 loaded only its built-in skills
+  (`code-review`, `simplify` and the like) and plugin skills: not
+  `~/.claude/skills`, nor the `.claude/skills` of the worktree or of an
+  `--add-dir`. That's observed, not documented, so the `.claude` hold
+  below still assumes the PR's skills could load. sanic-review makes your
+  `skills` loadable as the `sanic` plugin: each run links every skill in
+  them (a dir holding a `SKILL.md`, or each child of a dir that holds
+  one) into `<run dir>/plugin/skills/` and passes `--plugin-dir`, so the
+  agent invokes them as `sanic:<name>`. Only skills are linked, so no
+  plugin hooks, agents or MCP servers come with them. Where two dirs
+  hold a skill of one name, the first configured wins, with a warning;
+  `plugin/skills.json` records which dir each name came from. A `skills`
+  dir inside a PR worktree is skipped, as is a skill in one that a
+  link leads to, and one inside a checkout that isn't on its remote's
+  default branch (a detached head or a jj workspace included) is linked
+  with a warning, since it loads whatever that checkout holds as yours. With a
+  `procedure`, the system prompt tells the agent to load `code-review`,
+  and any finder skill the procedure names, so whatever answers to that
+  name is run, not just made available. A
   skill can run shell commands while it loads (its
   ``!`cmd` `` lines). Claude Code runs those as you, outside `--tools`,
   and `--restricted` isn't documented to stop them, so such a command can
@@ -914,8 +955,8 @@ empty `model` is an error.
 settings files, so the `effortLevel` your own settings choose never
 applies. The agent itself never runs below `medium`: at `low`, agents
 skipped their procedure's steps outright, so `low` reaches only the
-level its skills are run at (see Prompt assembly). A profile's `effort` overrides `runner.effort`, and unset both
-mean `medium`. The values are `claude`'s: `low`, `medium`, `high`,
+level its skills are run at (see Prompt assembly). A profile's `effort`
+overrides `runner.effort`, and unset both mean `medium`. The values are `claude`'s: `low`, `medium`, `high`,
 `xhigh` and `max`, lowercase; anything else is an error. A review can be
 started with an effort of its own, `sanic-review review --effort <level>
 <PR url>`, which the run records in its `effort` column; NULL there
@@ -971,7 +1012,41 @@ tag, and a posted `@Override` notifies whoever has that login.
 
 Each run kind gets its own schema with only the fields it uses: a `review`
 run's has `summary`, `suggested_verdict` and `comments`, so the agent isn't
-invited to draft replies or fixes on someone else's PR.
+invited to draft replies or fixes on someone else's PR. A whole review
+whose procedure requires skills also requires `run_report`, one entry per
+required skill, `skill` limited to their names:
+`{ "skill": "", "status": "ran|failed", "reason": null,
+"findings_count": null }`. The prompt says which verdict fits which
+comments: `request_changes` needs a `blocker` or a `major`, `approve`
+neither, and `none` no `blocker`.
+
+**Procedure check.** After a whole review (a fresh one, a whole-review
+regeneration, or a push review that doesn't answer with no update), the
+runner reads its transcript and checks the answer. A miss is: a required
+skill missing from `run_report`; one reported `ran` with no Skill call by
+that name whose `args` name this run's `pr.diff` and whose result is
+findings, not an error, not `Skill execution completed`, and not
+answered through `StructuredOutput` (a `StructuredOutput` call whose
+parent is that Skill call); one reported `failed`; one the session's
+init event doesn't list as loaded; or a verdict that doesn't fit the
+comments' severities. A call made in a subagent counts as the agent's.
+On a miss that asking again could fix (not a skill that didn't load, nor
+one reported `failed`), the runner resumes the session once, forked,
+with a prompt that lists the misses and the required skills' `args`
+again (`prompt.2.md`, `transcript.2.jsonl`), and checks the new answer
+against both transcripts. The second answer stands if it parses and is
+a review; if that session fails or times out, its answer doesn't parse,
+or it answers with no update, which would drop the first answer's
+drafts, the first does. Either way the run records the check:
+the report, any misses left, and how many sessions it took, so a bad run
+costs up to two timeouts. The PR page shows it beside the run: passed, or
+how many misses, opening to each miss and each skill's status and
+reason, for you to judge. `serve` logs a
+warning for a run that still misses. A draft revision and a no-update
+answer aren't checked, and a run without required skills is checked only
+for its verdict, recording nothing unless that misses. Only a forked
+skill's findings can be seen in the transcript: for one that runs inline,
+`ran` means it loaded, and `findings_count` is the agent's word.
 
 ## Storage (SQLite)
 
@@ -983,7 +1058,7 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, whether you started it by hand, the effort it was started at if not its profile's, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, whether you started it by hand, the effort it was started at if not its profile's, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note; for a whole review, its procedure check as JSON |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted/dismissed`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, why a push review dismissed it as obsolete, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
@@ -2073,8 +2148,10 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   far as its skills are trustworthy, and by default sanic-review trusts
   them: with `Skill` in its tools, a skill's shell commands run as you,
   outside `--tools` and, as far as Claude Code documents, `--restricted`,
-  and the PR's own `.claude/skills` and `.claude/agents`, and those of
-  each `--add-dir` checkout, load with yours. Whether subagents keep
+  and every skill in your `skills` loads as the `sanic` plugin, from
+  whatever branch its checkout has out. The PR's own `.claude/skills`
+  and `.claude/agents`, and those of each `--add-dir` checkout, didn't
+  load under `--restricted` in practice, but that isn't documented. Whether subagents keep
   `--restricted`'s file confinement isn't documented either. A PR whose
   changes touch `.claude` is never reviewed unattended (the `.claude`
   hold, under Process model); Tools under Runner says how to narrow the

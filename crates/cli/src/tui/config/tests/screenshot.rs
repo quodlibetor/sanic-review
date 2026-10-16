@@ -112,7 +112,7 @@ fn answer(q: &Query) -> Answer {
 
 #[test]
 fn the_readme_screenshot_draws_the_demo_counted() {
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 42)).unwrap();
     let editor = demo(&mut terminal);
     terminal.draw(|frame| editor.render(frame)).unwrap();
     let screen = terminal.backend().to_string();

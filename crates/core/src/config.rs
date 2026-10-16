@@ -326,6 +326,8 @@ pub struct Profile {
     /// procedure, each inlined in the system prompt.
     pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
+    /// The skills its procedure requires, replacing the `/name`s it writes.
+    pub finders: Option<Vec<String>>,
     /// The profile's own `model`, or else `runner.model`. `None` is
     /// [`AUTO_MODEL`]: `claude` gets no `--model`.
     pub model: Option<String>,
@@ -832,6 +834,7 @@ fn resolve_profile(
         instructions: expand_all(&raw.instructions)?,
         procedure: expand_all(&raw.procedure)?,
         skills: expand_all(&raw.skills)?,
+        finders: raw.finders,
         model: resolve_model(raw.model, defaults.model.as_deref())?,
         effort: raw.effort.unwrap_or(defaults.effort),
         tools: resolve_tools(raw.tools, &defaults.tools).wrap_err("in `tools`")?,
@@ -1031,6 +1034,7 @@ struct RawProfile {
     procedure: Vec<String>,
     #[serde(default)]
     skills: Vec<String>,
+    finders: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<Effort>,
     tools: Option<Vec<String>>,

@@ -3,14 +3,14 @@ source: crates/cli/src/tui/config/tests.rs
 expression: narrow.backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /hom┐"
-"│ # checked after `review_requests.authors` for  │"
-"│ # authors = []                       (default) │"
 "│ # overrides `review_requests.skip_drafts` for  │"
 "│ # skip_dr…  (from review_requests.skip_drafts) │"
 "│ # draft fixes for comments on your own PRs, in │"
 "│ # auto_fix = false                   (default) │"
 "│ # how hard the agent thinks on this profile's  │"
 "│ # effort = "medium"       (from runner.effort) │"
+"│ # skills the procedure requires; unset, the `/ │"
+"│ # finders = []                       (default) │"
 "│ # what this profile reviews; the most specific │"
 "│ repos = [                                      │"
 "│   { github = "org" },        32 repos · 30 PRs │"
