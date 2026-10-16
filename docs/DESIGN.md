@@ -632,8 +632,9 @@ it `superseded`.
    step whose skill doesn't load, one that hands finding problems to a
    command or agent it can't run, or any finding step when it lacks
    Skill, it does itself; and the mapping above applies to the rest. The
-   skill gets no PR number, branch, `--comment` or `--fix`, and its
-   `args` are spelled out: that it can't run commands, that the diff is
+   skill gets the run's effort as its level and no PR number, branch,
+   `--comment` or `--fix`, and its `args` are spelled out: that it can't
+   run commands, that the diff is
    the run dir's `pr.diff` (a forked skill can't see the brief), and to
    answer in text. A skill that runs forked inherits the
    `StructuredOutput` tool from `--json-schema`, and an answer given
@@ -921,7 +922,9 @@ runs. A queued run started that way, held or waiting for a slot, takes
 the new effort; a head already running or reviewed isn't reviewed again
 for it, and `serve` warns that the effort wasn't applied. A regeneration
 takes its source run's. A stored effort this build doesn't know follows
-the profile's. The TUI and dashboard don't set one yet.
+the profile's. The TUI and dashboard don't set one yet. A procedure's
+`/code-review` step runs at the review's effort too (see Prompt
+assembly).
 
 ### Output schema (sketch)
 

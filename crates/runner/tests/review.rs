@@ -184,7 +184,7 @@ async fn a_procedures_finder_skill_is_pointed_at_the_runs_diff() {
     let run_dir = s.data.path().join("runs/3");
     let system = read(&run_dir, "system.md");
     let args = format!(
-        "`The PR's diff is in {} and",
+        "`medium The PR's diff is in {} and",
         run_dir.join("pr.diff").display()
     );
     assert!(system.contains(&args), "{system}");

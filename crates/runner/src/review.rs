@@ -258,7 +258,7 @@ impl ReviewRunner {
 
         let effort = run.effort.unwrap_or(profile.effort);
         let references = existing_dirs(&settings.reference_dirs);
-        let system_prompt = system_prompt(profile, &diff_path, &references).await?;
+        let system_prompt = system_prompt(profile, effort, &diff_path, &references).await?;
         let target = target(run)?;
         let brief = match (&run.revision, target, &run.resume) {
             (Some(revision), Some(target), _) => {
@@ -347,10 +347,11 @@ impl ReviewRunner {
     }
 }
 
-/// The system prompt for a run of `profile` on the diff at `diff_path`,
-/// reading its instruction files and procedure.
+/// The system prompt for a run of `profile` at `effort` on the diff at
+/// `diff_path`, reading its instruction files and procedure.
 async fn system_prompt(
     profile: &AgentProfile,
+    effort: Effort,
     diff_path: &Path,
     references: &[&Path],
 ) -> Result<String> {
@@ -372,6 +373,7 @@ async fn system_prompt(
     let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
     Ok(prompt::system_prompt(
         &profile.tools,
+        effort,
         diff_path,
         &instructions,
         &procedure,
