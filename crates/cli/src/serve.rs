@@ -23,7 +23,9 @@ use color_eyre::{
 };
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
-    config::{Config, DEFAULT_API_URL, Keys, Unloadable, default_config_path, default_data_dir},
+    config::{
+        Config, DEFAULT_API_URL, Effort, Keys, Unloadable, default_config_path, default_data_dir,
+    },
     hold::HeadCheck,
     manual::{ManualReviews, TeamMembers},
     pr::PrKey,
@@ -679,7 +681,7 @@ async fn handle_requests(
     loop {
         tokio::select! {
             request = requests.recv(), if open => match request {
-                Some(Request::Rerun(key)) => review_now(&key, &store, &starter),
+                Some(Request::Rerun(key)) => review_now(&key, None, &store, &starter),
                 Some(Request::Archive { key, archived }) => archive(&key, archived, &store),
                 Some(Request::MoveRun { run, up }) => move_run(run, up, &store),
                 Some(Request::Cancel(run)) => {
@@ -700,9 +702,9 @@ async fn handle_requests(
                     .unwrap_or_else(PoisonError::into_inner)
                     .take_start_requests();
                 match taken {
-                    Ok(keys) => {
-                        for key in keys {
-                            review_now(&key, &store, &starter);
+                    Ok(requests) => {
+                        for (key, effort) in requests {
+                            review_now(&key, effort, &store, &starter);
                         }
                     }
                     Err(err) => warn!("reading `sanic-review review` requests failed: {err:?}"),
@@ -755,15 +757,28 @@ fn save_layout(sizes: Sizes, store: &Mutex<Store>) {
 /// the profile that was queued under, or its PR has a `.claude` hold;
 /// otherwise a review of its current head is queued, as the scheduler
 /// would, so a head that already has a queued, running or succeeded
-/// review is left alone. See [`by_hand`] for which kind.
-fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
+/// review is left alone. See [`by_hand`] for which kind. Given an
+/// `effort`, the review runs at that rather than its profile's, as does a
+/// queued one that isn't held.
+fn review_now(key: &PrKey, effort: Option<Effort>, store: &Mutex<Store>, starter: &Starter) {
     let _span = info_span!("review_now", url = %key.url()).entered();
+    let mut queued_at = None;
     let run = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
         let manual = starter.manual.borrow().clone();
-        let held = store
+        let queued = store
             .queued_review(key)
-            .map(|run| run.filter(|run| held_why(&manual, &store, run).is_some()));
+            .and_then(|run| match (run, effort) {
+                (Some(mut run), Some(effort)) => {
+                    if store.set_effort(run.id, effort)? {
+                        run.effort = Some(effort);
+                        queued_at = Some(effort);
+                    }
+                    Ok(Some(run))
+                }
+                (run, _) => Ok(run),
+            });
+        let held = queued.map(|run| run.filter(|run| held_why(&manual, &store, run).is_some()));
         // Marked, so a stale sweep doesn't drop it while it waits for a slot.
         let held = held.and_then(|held| match held {
             Some(run) => Ok(store.mark_by_hand(run.id)?.then_some(run)),
@@ -774,7 +789,7 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
             None => store.review_request(key).and_then(|req| match req {
                 Some(req) => {
                     let req = by_hand(&store, req)?;
-                    store.queue_review_by_hand(&req)
+                    store.queue_review_by_hand(&req, effort)
                 }
                 None => Ok(None),
             }),
@@ -798,13 +813,29 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
             let _ = starter.checks.send(run);
         }
         Ok(Some(run)) => {
-            info!(head = %run.request.head_sha, "review started by hand");
+            info!(
+                head = %run.request.head_sha,
+                effort = run.effort.map_or("the profile's", Effort::name),
+                "review started by hand"
+            );
             let _ = starter.start.send(run);
         }
-        Ok(None) => info!(
-            "not started: the PR isn't tracked, or its head already has a queued, \
-             running or finished review"
-        ),
+        Ok(None) => match (effort, queued_at) {
+            (_, Some(effort)) => info!(
+                effort = effort.name(),
+                "not started now: its queued review waits for a slot, and will run at this effort"
+            ),
+            (Some(effort), None) => warn!(
+                url = %key.url(),
+                effort = effort.name(),
+                "not started, so the effort wasn't applied: the PR isn't tracked, or its head \
+                 already has a running or finished review"
+            ),
+            (None, None) => info!(
+                "not started: the PR isn't tracked, or its head already has a queued, \
+                 running or finished review"
+            ),
+        },
         Err(err) => warn!(url = %key.url(), "starting the review failed: {err:?}"),
     }
 }
@@ -1531,14 +1562,22 @@ mod tests {
             .queue_review(&store.review_request(&key).unwrap().unwrap())
             .unwrap()
             .unwrap();
-        // What `sanic-review review <url>` writes.
-        store.request_start(&key).unwrap();
+        // What `sanic-review review --effort high <url>` writes.
+        store.request_start(&key, Some(Effort::High)).unwrap();
         let store = Arc::new(Mutex::new(store));
 
-        // The CLI's request starts the held run; `r` then finds nothing
-        // left to start, since that head's review is under way.
+        // The CLI's request starts the held run, at its effort; `r` then
+        // finds nothing left to start, since that head's review is under way.
         let started = handle(&store, ManualReviews::runner(true), vec![]).await;
+        let held = QueuedRun {
+            effort: Some(Effort::High),
+            ..held
+        };
         assert_eq!(started, std::slice::from_ref(&held));
+        assert_eq!(
+            store.lock().unwrap().queued_review(&key).unwrap(),
+            Some(held.clone())
+        );
         store.lock().unwrap().claim_run(held.id).unwrap();
         assert!(
             handle(
@@ -1549,6 +1588,42 @@ mod tests {
             .await
             .is_empty()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_requested_effort_reaches_a_new_run_and_an_unheld_queued_one() {
+        let key = key();
+        let store = store_with_pr(&key);
+        store.request_start(&key, Some(Effort::Max)).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let started = handle(&store, ManualReviews::runner(false), vec![]).await;
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].effort, Some(Effort::Max));
+
+        // Queued and waiting for a slot, not held: it isn't started again,
+        // but runs at the effort asked for.
+        let other = PrKey { number: 8, ..key };
+        let queued = {
+            let mut store = store.lock().unwrap();
+            store.record(&pr_snapshot(&other), "me", "p", &[]).unwrap();
+            let req = store.review_request(&other).unwrap().unwrap();
+            let queued = store.queue_review(&req).unwrap().unwrap();
+            store.request_start(&other, Some(Effort::Low)).unwrap();
+            queued
+        };
+        assert!(
+            handle(&store, ManualReviews::runner(false), vec![])
+                .await
+                .is_empty()
+        );
+        let claimed = store
+            .lock()
+            .unwrap()
+            .queued_review(&other)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, queued.id);
+        assert_eq!(claimed.effort, Some(Effort::Low));
     }
 
     #[test]

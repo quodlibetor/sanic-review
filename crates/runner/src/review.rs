@@ -14,7 +14,7 @@ use std::{
 
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use sanic_core::{
-    config::{Profile, RunnerSettings},
+    config::{Effort, Profile, RunnerSettings},
     pr::PrKey,
     run::{
         BaselineDraft, Basis, Carried, Dismissal, DraftComment, DraftOutput, DraftRevision,
@@ -38,6 +38,8 @@ pub struct AgentProfile {
     pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
     pub model: Option<String>,
+    /// For runs started without an effort of their own.
+    pub effort: Effort,
     pub tools: Vec<String>,
 }
 
@@ -48,6 +50,7 @@ impl From<&Profile> for AgentProfile {
             procedure: profile.procedure.clone(),
             skills: profile.skills.clone(),
             model: profile.model.clone(),
+            effort: profile.effort,
             tools: profile.tools.clone(),
         }
     }
@@ -253,6 +256,7 @@ impl ReviewRunner {
         let diff_path = run_dir.join("pr.diff");
         write(&diff_path, &diff).await?;
 
+        let effort = run.effort.unwrap_or(profile.effort);
         let references = existing_dirs(&settings.reference_dirs);
         let system_prompt = system_prompt(profile, &diff_path, &references).await?;
         let target = target(run)?;
@@ -316,6 +320,7 @@ impl ReviewRunner {
                 system_prompt: &system_prompt,
                 schema: &schema,
                 model: profile.model.as_deref(),
+                effort,
                 transcript: &transcript,
                 stderr: &run_dir.join("stderr.log"),
                 resume: run

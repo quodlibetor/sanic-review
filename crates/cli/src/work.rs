@@ -999,6 +999,7 @@ mod tests {
             resume: None,
             worktree: None,
             lineage: vec![],
+            effort: None,
         }
     }
 

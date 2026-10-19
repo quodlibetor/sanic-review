@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # seconds before a run is killed                                             │"
-"│ # timeout_secs = 1800                                              (default) │"
 "│ # more directories the agent may read                                        │"
 "│ # read_paths = []                                                  (default) │"
 "│ # the review model; `auto` is your own Claude default                        │"
@@ -15,6 +13,8 @@ expression: draw(&editor).backend()
 "│ # auto_review_authors = []                                         (default) │"
 "│ # the agent's tools; none that write, run commands or reach the network      │"
 "│ # tools = ["Read", "Grep", "Glob", "Agent", "Skill"]               (default) │"
+"│ # how hard the agent thinks; a review started with its own effort uses that  │"
+"│ # effort = "medium"                                                (default) │"
 "│                                                                              │"
 "│ [tui]                                                                        │"
 "│ # `emacs` or `vi` keys in text fields; unset, guessed from readline and $EDI │"

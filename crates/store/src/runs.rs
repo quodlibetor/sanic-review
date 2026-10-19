@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use color_eyre::eyre::{Result, WrapErr, bail};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use sanic_core::{
+    config::Effort,
     pr::{Comment, InProgressReview, Placement, PrKey, Reaction, Thread, is_login},
     repo::RepoName,
     run::{
@@ -363,13 +364,28 @@ impl Store {
     /// PR that hasn't started. `None` if this head is already queued,
     /// running or reviewed; a failed or superseded run of it is requeued.
     pub fn queue_review(&mut self, req: &ReviewRequest) -> Result<Option<QueuedRun>> {
-        self.queue_by(req, false)
+        self.queue_by(req, false, None)
     }
 
     /// [`Store::queue_review`] for a review you started, which
-    /// [`Store::supersede_stale_reviews`] leaves alone.
-    pub fn queue_review_by_hand(&mut self, req: &ReviewRequest) -> Result<Option<QueuedRun>> {
-        self.queue_by(req, true)
+    /// [`Store::supersede_stale_reviews`] leaves alone, at `effort` if
+    /// given, rather than its profile's.
+    pub fn queue_review_by_hand(
+        &mut self,
+        req: &ReviewRequest,
+        effort: Option<Effort>,
+    ) -> Result<Option<QueuedRun>> {
+        self.queue_by(req, true, effort)
+    }
+
+    /// Has queued run `id` run at `effort` rather than its profile's.
+    /// `false` if it's no longer queued.
+    pub fn set_effort(&self, id: i64, effort: Effort) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE runs SET effort = ?2 WHERE id = ?1 AND status = 'queued'",
+            params![id, effort.name()],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Marks queued run `id` as started by hand; see
@@ -382,7 +398,13 @@ impl Store {
         Ok(changed > 0)
     }
 
-    fn queue_by(&mut self, req: &ReviewRequest, by_hand: bool) -> Result<Option<QueuedRun>> {
+    fn queue_by(
+        &mut self,
+        req: &ReviewRequest,
+        by_hand: bool,
+        effort: Option<Effort>,
+    ) -> Result<Option<QueuedRun>> {
+        let effort_name = effort.map(Effort::name);
         let repo = req.key.repo.to_string();
         let number = req.key.number;
         let key = req.idempotency_key();
@@ -426,7 +448,8 @@ impl Store {
                          status = 'queued', error = NULL, suggested_verdict = NULL,
                          session_id = NULL, transcript_path = NULL, resumed_from = NULL,
                          worktree_run = NULL, no_update = NULL, queue_pos = ?6,
-                         queued_at = {NOW}, started_at = NULL, finished_at = NULL, by_hand = ?7
+                         queued_at = {NOW}, started_at = NULL, finished_at = NULL, by_hand = ?7,
+                         effort = ?8
                      WHERE id = ?1"
                 ),
                 params![
@@ -436,7 +459,8 @@ impl Store {
                     req.base_sha,
                     from_sha,
                     pos,
-                    by_hand
+                    by_hand,
+                    effort_name
                 ],
             )?;
             id
@@ -444,8 +468,9 @@ impl Store {
             tx.execute(
                 &format!(
                     "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
-                                       base_sha, from_sha, status, queue_pos, queued_at, by_hand)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, {NOW}, ?11)"
+                                       base_sha, from_sha, status, queue_pos, queued_at, by_hand,
+                                       effort)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, {NOW}, ?11, ?12)"
                 ),
                 params![
                     repo,
@@ -458,7 +483,8 @@ impl Store {
                     req.base_sha,
                     from_sha,
                     pos,
-                    by_hand
+                    by_hand,
+                    effort_name
                 ],
             )?;
             tx.last_insert_rowid()
@@ -472,6 +498,7 @@ impl Store {
             resume: None,
             worktree: None,
             lineage: Vec::new(),
+            effort,
         }))
     }
 
@@ -554,9 +581,10 @@ impl Store {
             &format!(
                 "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
                                    base_sha, status, queued_at, source_run, instruction,
-                                   draft_id, in_progress_comments, resumed_from)
+                                   draft_id, in_progress_comments, resumed_from, effort)
                  VALUES (?1, ?2, ?3, 'regenerate', ?4, ?5, ?6, ?7, 'queued', {NOW}, ?8, ?9,
-                         ?10, (SELECT in_progress_comments FROM runs WHERE id = ?11), ?11)"
+                         ?10, (SELECT in_progress_comments FROM runs WHERE id = ?11), ?11,
+                         (SELECT effort FROM runs WHERE id = ?11))"
             ),
             params![
                 repo,
@@ -573,6 +601,10 @@ impl Store {
             ],
         )?;
         let id = tx.last_insert_rowid();
+        let effort: Option<String> =
+            tx.query_row("SELECT effort FROM runs WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })?;
         let baseline = baseline(&tx, source)?;
         let lineage = lineage(&tx, id)?;
         let author: String = tx
@@ -609,6 +641,7 @@ impl Store {
             resume: None,
             worktree: Some(home),
             lineage,
+            effort: known_effort(effort.as_deref()),
         })))
     }
 
@@ -731,7 +764,7 @@ impl Store {
                         "UPDATE runs SET status = 'running', started_at = {NOW}
                          WHERE id = ?1 AND status = 'queued'
                          RETURNING id, repo, number, profile, head_sha, base_sha, from_sha,
-                                   {RUN_AUTHOR}"
+                                   {RUN_AUTHOR}, effort"
                     ),
                     [id],
                     queued_row,
@@ -1116,7 +1149,7 @@ impl Store {
             .query_row(
                 &format!(
                     "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, session_id,
-                            status, source_run, instruction, {worktree}, {RUN_AUTHOR}
+                            status, source_run, instruction, {worktree}, {RUN_AUTHOR}, effort
                      FROM runs WHERE {filter} AND session_id IS NOT NULL
                      ORDER BY coalesce(finished_at, queued_at) DESC, id DESC LIMIT 1",
                     worktree = worktree_run("runs")
@@ -1279,7 +1312,7 @@ impl Store {
     /// `runner.manual_reviews`, the held ones.
     pub fn queued_reviews(&self) -> Result<Vec<QueuedRun>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}
+            "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}, effort
              FROM runs WHERE status = 'queued' AND kind = ?1
              ORDER BY queue_pos, id"
         ))?;
@@ -1448,7 +1481,8 @@ impl Store {
             .conn
             .query_row(
                 &format!(
-                    "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR}
+                    "SELECT id, repo, number, profile, head_sha, base_sha, from_sha, {RUN_AUTHOR},
+                            effort
                      FROM runs WHERE status = 'queued' AND kind = ?1 AND repo = ?2 AND number = ?3
                      ORDER BY id DESC LIMIT 1"
                 ),
@@ -1459,36 +1493,42 @@ impl Store {
         row.map(queued_run).transpose()
     }
 
-    /// Asks the running `serve` to review `key` now; see
-    /// [`Store::take_start_requests`].
-    pub fn request_start(&self, key: &PrKey) -> Result<()> {
+    /// Asks the running `serve` to review `key` now, at `effort` if given
+    /// rather than its profile's; see [`Store::take_start_requests`].
+    pub fn request_start(&self, key: &PrKey, effort: Option<Effort>) -> Result<()> {
         self.conn.execute(
             &format!(
-                "INSERT INTO start_requests (repo, number, requested_at) VALUES (?1, ?2, {NOW})"
+                "INSERT INTO start_requests (repo, number, requested_at, effort)
+                 VALUES (?1, ?2, {NOW}, ?3)"
             ),
-            params![key.repo.to_string(), key.number],
+            params![key.repo.to_string(), key.number, effort.map(Effort::name)],
         )?;
         Ok(())
     }
 
     /// Removes and returns the PRs `sanic-review review` asked to review
-    /// now, oldest first.
-    pub fn take_start_requests(&mut self) -> Result<Vec<PrKey>> {
+    /// now, oldest first, each with the effort it asked for.
+    pub fn take_start_requests(&mut self) -> Result<Vec<(PrKey, Option<Effort>)>> {
         let tx = self.conn.transaction()?;
         let rows = tx
-            .prepare("SELECT repo, number FROM start_requests ORDER BY id")?
+            .prepare("SELECT repo, number, effort FROM start_requests ORDER BY id")?
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         tx.execute("DELETE FROM start_requests", [])?;
         tx.commit().wrap_err("taking start requests")?;
         rows.into_iter()
-            .map(|(repo, number)| {
-                Ok(PrKey {
+            .map(|(repo, number, effort)| {
+                let key = PrKey {
                     repo: RepoName::parse(&repo)?,
                     number,
-                })
+                };
+                Ok((key, known_effort(effort.as_deref())))
             })
             .collect()
     }
@@ -2229,6 +2269,7 @@ type QueuedRow = (
     String,
     Option<String>,
     String,
+    Option<String>,
 );
 
 /// The author of the PR of the `runs` row being read, as last polled, as
@@ -2238,7 +2279,7 @@ const RUN_AUTHOR: &str = "coalesce((SELECT p.author FROM prs p
                                    '') AS author";
 
 fn queued_run(
-    (id, repo, number, profile, head_sha, base_sha, from_sha, author): QueuedRow,
+    (id, repo, number, profile, head_sha, base_sha, from_sha, author, effort): QueuedRow,
 ) -> Result<QueuedRun> {
     Ok(QueuedRun {
         id,
@@ -2246,6 +2287,7 @@ fn queued_run(
         resume: None,
         worktree: None,
         lineage: Vec::new(),
+        effort: known_effort(effort.as_deref()),
         request: ReviewRequest {
             key: PrKey {
                 repo: RepoName::parse(&repo)?,
@@ -2262,7 +2304,14 @@ fn queued_run(
     })
 }
 
-/// Reads [`RUN_AUTHOR`] by name, so callers can add columns after it.
+/// A stored effort; one this build doesn't know, as after a downgrade,
+/// follows the profile's rather than failing every read of the queue.
+fn known_effort(effort: Option<&str>) -> Option<Effort> {
+    effort.and_then(|e| e.parse().ok())
+}
+
+/// Reads [`RUN_AUTHOR`] and `effort` by name, so callers can add columns
+/// after them.
 fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
     Ok((
         row.get(0)?,
@@ -2273,6 +2322,7 @@ fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
         row.get(5)?,
         row.get(6)?,
         row.get("author")?,
+        row.get("effort")?,
     ))
 }
 
@@ -2572,10 +2622,77 @@ mod tests {
     fn start_requests_are_taken_once() {
         let mut store = store();
         let key = snapshot().key;
-        store.request_start(&key).unwrap();
-        store.request_start(&key).unwrap();
-        assert_eq!(store.take_start_requests().unwrap(), [key.clone(), key]);
+        store.request_start(&key, None).unwrap();
+        store.request_start(&key, Some(Effort::High)).unwrap();
+        assert_eq!(
+            store.take_start_requests().unwrap(),
+            [(key.clone(), None), (key, Some(Effort::High))]
+        );
         assert!(store.take_start_requests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_runs_own_effort_is_kept_until_it_runs() {
+        let mut store = store();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        let run = store
+            .queue_review_by_hand(&request("h1"), Some(Effort::Max))
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.effort, Some(Effort::Max));
+        let queued = store.queued_review(&snapshot().key).unwrap().unwrap();
+        assert_eq!(queued.effort, Some(Effort::Max));
+
+        assert!(store.set_effort(run.id, Effort::Low).unwrap());
+        let claimed = store.claim_next(|_, _| false).unwrap().unwrap();
+        assert_eq!(claimed.effort, Some(Effort::Low));
+        assert!(
+            !store.set_effort(run.id, Effort::High).unwrap(),
+            "only a queued run's effort changes"
+        );
+
+        let automatic = store.queue_review(&request("h2")).unwrap().unwrap();
+        assert_eq!(automatic.effort, None);
+    }
+
+    #[test]
+    fn requeueing_a_failed_run_replaces_its_effort() {
+        let mut store = store();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        let req = request("h1");
+        let run = store
+            .queue_review_by_hand(&req, Some(Effort::Max))
+            .unwrap()
+            .unwrap();
+        store.claim_run(run.id).unwrap();
+        store.fail_run(run.id, "boom").unwrap();
+        let again = store.queue_review(&req).unwrap().unwrap();
+        assert_eq!(again.id, run.id);
+        assert_eq!(again.effort, None);
+        assert_eq!(
+            store
+                .queued_review(&snapshot().key)
+                .unwrap()
+                .unwrap()
+                .effort,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_stored_effort_follows_the_profile() {
+        let mut store = store();
+        store.record(&snapshot(), "me", "default", &[]).unwrap();
+        let run = store.queue_review(&request("h1")).unwrap().unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET effort = 'ludicrous' WHERE id = ?1",
+                [run.id],
+            )
+            .unwrap();
+        let queued = store.queued_review(&snapshot().key).unwrap().unwrap();
+        assert_eq!(queued.effort, None);
     }
 
     #[test]
@@ -2594,6 +2711,24 @@ mod tests {
         assert_eq!(found.status, "succeeded");
         assert_eq!(store.session_run(first.id).unwrap().unwrap().run, first);
         assert_eq!(store.session_run(second.id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_regeneration_runs_at_its_sources_effort() {
+        let mut store = store();
+        let source = store
+            .queue_review_by_hand(&request("h1"), Some(Effort::High))
+            .unwrap()
+            .unwrap();
+        store.claim_run(source.id).unwrap();
+        store.finish_review(source.id, &result()).unwrap();
+        let Regeneration::Queued(run) = store
+            .queue_regeneration(source.id, "be terser", |_| false)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_eq!(run.effort, Some(Effort::High));
     }
 
     #[test]
@@ -3556,7 +3691,7 @@ mod tests {
             req
         };
         let (fresh, held) = (queue_mine(1), queue_mine(2));
-        let fresh = store.queue_review_by_hand(&fresh).unwrap().unwrap();
+        let fresh = store.queue_review_by_hand(&fresh, None).unwrap().unwrap();
         let held = store.queue_review(&held).unwrap().unwrap();
         assert!(store.mark_by_hand(held.id).unwrap());
 

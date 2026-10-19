@@ -5,7 +5,7 @@ use sanic_core::config::{
     AUTO_MODEL, DEFAULT_API_URL, DEFAULT_AUTHORS, DEFAULT_CLAUDE, DEFAULT_GIT_URL,
     DEFAULT_MANUAL_REVIEWS, DEFAULT_MAX_RUNS, DEFAULT_MIN_NOTIFICATION_POLL, DEFAULT_QUIET,
     DEFAULT_RECONCILE, DEFAULT_RUN_TIMEOUT, DEFAULT_SKIP_DRAFTS, DEFAULT_TEAMS, DEFAULT_TOOLS,
-    DEFAULT_UPDATED_WITHIN_DAYS, SAFE_TOOLS,
+    DEFAULT_UPDATED_WITHIN_DAYS, Effort, SAFE_TOOLS,
 };
 
 use super::Table;
@@ -193,6 +193,13 @@ pub const RUNNER: &[Field] = &[
         "the agent's tools; none that write, run commands or reach the network",
     )
     .choices(SAFE_TOOLS),
+    Field::new(
+        "effort",
+        Kind::Text,
+        Fallback::Value(|| Effort::default().name().into()),
+        "how hard the agent thinks; a review started with its own effort uses that",
+    )
+    .choices(Effort::NAMES),
 ];
 
 pub const TUI: &[Field] = &[Field::new(
@@ -274,6 +281,13 @@ pub const PROFILE: &[Field] = &[
         Fallback::Nothing,
         "draft fixes for comments on your own PRs, in a workspace of their checkout",
     ),
+    Field::new(
+        "effort",
+        Kind::Text,
+        Fallback::Inherits(Table::Runner, "effort"),
+        "how hard the agent thinks on this profile's PRs",
+    )
+    .choices(Effort::NAMES),
     Field::new(
         "repos",
         Kind::Repos,

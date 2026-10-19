@@ -6,6 +6,7 @@
 use std::process::Command;
 
 use sanic_core::{
+    config::Effort,
     pr::{PrKey, PrSnapshot},
     repo::RepoName,
 };
@@ -90,10 +91,23 @@ fn pr_commands_update_the_store() {
 
     let output = run("review", &key.url());
     assert!(output.status.success(), "{output:?}");
+    let output = sanic_review()
+        .args(["review", &key.url(), "--effort", "xhigh", "--data-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(
         store.take_start_requests().unwrap(),
-        std::slice::from_ref(&key)
+        [(key.clone(), None), (key.clone(), Some(Effort::Xhigh))]
     );
+    let output = sanic_review()
+        .args(["review", &key.url(), "--effort", "huge", "--data-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(store.take_start_requests().unwrap().is_empty());
 
     let output = run("archive", "https://github.com/org/repo/pull/8");
     assert!(!output.status.success());
