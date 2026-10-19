@@ -225,6 +225,8 @@ pub struct RevisedOutput {
     /// For a resumed push review, the earlier drafts it dismisses.
     #[serde(default)]
     pub dismiss: Vec<Dismissal>,
+    #[serde(default)]
+    pub run_report: Vec<SkillReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -270,6 +272,7 @@ impl RevisedOutput {
             summary_note: self.summary_note,
             suggested_verdict: self.suggested_verdict,
             comments,
+            run_report: self.run_report,
         };
         (
             output,
@@ -477,6 +480,51 @@ pub struct ReviewOutput {
     pub suggested_verdict: Verdict,
     #[serde(default)]
     pub comments: Vec<InlineComment>,
+    /// What the agent says it did with each skill its procedure requires.
+    #[serde(default)]
+    pub run_report: Vec<SkillReport>,
+}
+
+/// What the agent says it did with one skill its procedure requires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillReport {
+    /// As the Skill tool invokes it: `code-review`, `sanic:lakehouse-review`.
+    pub skill: String,
+    pub status: SkillStatus,
+    /// Why it failed, or what it found.
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub findings_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillStatus {
+    Ran,
+    Failed,
+}
+
+impl SkillStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ran => "ran",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// How a review's procedure check came out: the agent's report, what the
+/// transcript contradicts or leaves out, and how many sessions it took.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureCheck {
+    pub report: Vec<SkillReport>,
+    /// Empty when the check passed.
+    pub misses: Vec<String>,
+    /// 1, or 2 when a corrective retry ran.
+    pub attempts: u8,
 }
 
 /// An inline comment plus whether its anchor is outside the PR's diff.

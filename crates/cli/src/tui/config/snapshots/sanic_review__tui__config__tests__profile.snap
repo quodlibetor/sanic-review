@@ -19,7 +19,7 @@ expression: draw(&editor).backend()
 "│ # instructions = []                                                (default) │"
 "│ # skill directories whose `SKILL.md` the agent follows to review             │"
 "│ # procedure = []                                                   (default) │"
-"│ # skill directories the agent may read                                       │"
+"│ # skill directories the agent may read and invoke                            │"
 "│ # skills = []                                                      (default) │"
 "│ What this config does ───────────────────────────────────────────────────────│"
 "│ Counting starts once the config loads.                                       │"

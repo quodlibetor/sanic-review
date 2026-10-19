@@ -229,7 +229,7 @@ pub const PROFILE: &[Field] = &[
         "skills",
         Kind::List,
         Fallback::Nothing,
-        "skill directories the agent may read",
+        "skill directories the agent may read and invoke",
     )
     .paths(),
     Field::new(
@@ -288,6 +288,12 @@ pub const PROFILE: &[Field] = &[
         "how hard the agent thinks on this profile's PRs",
     )
     .choices(Effort::NAMES),
+    Field::new(
+        "finders",
+        Kind::List,
+        Fallback::Nothing,
+        "skills the procedure requires; unset, the `/name`s it writes",
+    ),
     Field::new(
         "repos",
         Kind::Repos,

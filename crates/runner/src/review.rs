@@ -18,16 +18,18 @@ use sanic_core::{
     pr::PrKey,
     run::{
         BaselineDraft, Basis, Carried, Dismissal, DraftComment, DraftOutput, DraftRevision,
-        PrContext, QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput, Side, Verdict,
+        PrContext, ProcedureCheck, QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput,
+        Side, Verdict,
     },
 };
 use serde_json::{Value, json};
 
 use crate::{
-    chat,
+    chat, check,
     claude::{Claude, Ended, Invocation, Outcome},
     diff::{DiffIndex, LineMap},
     mirror::{ClaudeTree, Mirrors, Step, Worktree},
+    plugin::{self, Plugin},
     prompt,
 };
 
@@ -37,6 +39,7 @@ pub struct AgentProfile {
     pub instructions: Vec<PathBuf>,
     pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
+    pub finders: Option<Vec<String>>,
     pub model: Option<String>,
     /// For runs started without an effort of their own.
     pub effort: Effort,
@@ -49,6 +52,7 @@ impl From<&Profile> for AgentProfile {
             instructions: profile.instructions.clone(),
             procedure: profile.procedure.clone(),
             skills: profile.skills.clone(),
+            finders: profile.finders.clone(),
             model: profile.model.clone(),
             effort: profile.effort,
             tools: profile.tools.clone(),
@@ -222,6 +226,13 @@ impl ReviewRunner {
             session_id: session_id.to_owned(),
             cwd: self.worktree_path(run),
             add_dirs: self.chat_dirs(run, settings),
+            plugin_dir: Some(
+                self.data_dir
+                    .join("runs")
+                    .join(run.id.to_string())
+                    .join("plugin"),
+            )
+            .filter(|dir| dir.is_dir()),
             tools: settings.profile.tools.clone(),
             allow_edits,
         }
@@ -258,40 +269,24 @@ impl ReviewRunner {
 
         let effort = run.effort.unwrap_or(profile.effort);
         let references = existing_dirs(&settings.reference_dirs);
-        let system_prompt = system_prompt(profile, effort, &diff_path, &references).await?;
+        let plugin = plugin::build(
+            &run_dir.join("plugin"),
+            &profile.skills,
+            worktree.path().parent().unwrap_or(worktree.path()),
+            &ctx.url,
+        )?;
+        let (system_prompt, required) =
+            system_prompt(profile, effort, &diff_path, &references, &plugin).await?;
+        let args = prompt::finder_args(effort, &diff_path);
         let target = target(run)?;
-        let brief = match (&run.revision, target, &run.resume) {
-            (Some(revision), Some(target), _) => {
-                prompt::draft_revision(&revision.instruction, target, ctx)
-            }
-            (Some(revision), None, _) => {
-                prompt::revision(&revision.instruction, &revision.baseline, ctx)
-            }
-            (None, _, Some(resume)) => {
-                let Some(interdiff) = worktree
-                    .interdiff(&resume.head_sha, &resume.base_sha)
-                    .await?
-                else {
-                    return Ok(Reviewed::NotResumed {
-                        why: format!(
-                            "the mirror no longer has {} or {}",
-                            resume.head_sha, resume.base_sha
-                        ),
-                    });
-                };
-                let interdiff_path = run_dir.join("interdiff.diff");
-                write(&interdiff_path, interdiff.text()).await?;
-                prompt::update(
-                    &run.request,
-                    ctx,
-                    resume,
-                    &interdiff,
-                    &interdiff_path,
-                    &diff_path,
-                )
-            }
-            (None, _, None) => prompt::brief(&run.request, ctx, &diff, &diff_path),
+        let mut brief = match Self::brief(worktree, run_dir, run, ctx, &diff, &diff_path).await? {
+            Ok(brief) => brief,
+            Err(not_resumed) => return Ok(not_resumed),
         };
+        // A resumed session follows its old context, so it's told again.
+        if target.is_none() && (run.revision.is_some() || run.resume.is_some()) {
+            brief += &prompt::finder_reminder(&required, &args, run.revision.is_none());
+        }
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
 
@@ -303,58 +298,251 @@ impl ReviewRunner {
             .chain(profile.skills.iter().cloned())
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
-        let transcript = run_dir.join("transcript.jsonl");
-        let schema = match (&run.revision, target) {
-            (Some(_), Some(target)) => draft_revision_schema(&target.kind),
-            (Some(_), None) => revision_schema(),
-            // It names the drafts it keeps, as a regeneration does.
-            (None, _) if run.resume.is_some() => resume_schema(),
-            (None, _) => review_schema(),
-        };
-        let outcome = claude
-            .run(&Invocation {
-                cwd: worktree.path(),
-                add_dirs: &add_dirs,
-                tools: &profile.tools,
-                prompt: &brief,
-                system_prompt: &system_prompt,
-                schema: &schema,
-                model: profile.model.as_deref(),
-                effort,
-                transcript: &transcript,
-                stderr: &run_dir.join("stderr.log"),
-                resume: run
-                    .revision
-                    .as_ref()
-                    .map(|r| r.session_id.as_str())
-                    .or(run.resume.as_ref().map(|r| r.session_id.as_str())),
-            })
-            .await?;
-        let outcome = match outcome {
-            Ended::Answered(outcome) => outcome,
-            Ended::NoSession => {
-                return Ok(Reviewed::NotResumed {
-                    why: "its agent session is gone".into(),
-                });
-            }
-        };
+        let schema = schema(run, target, &required);
         let index = DiffIndex::parse(&diff);
-        let reviewed = match target {
-            Some(target) => Self::draft_revised(outcome, target, &index, &transcript)?,
-            None => Self::reviewed(outcome, &index, run, &transcript)?,
-        };
-        resumed(reviewed, run, worktree, &index).await
+        let mut transcripts = vec![run_dir.join("transcript.jsonl")];
+        let mut session = run
+            .revision
+            .as_ref()
+            .map(|r| r.session_id.clone())
+            .or(run.resume.as_ref().map(|r| r.session_id.clone()));
+        let mut answered: Option<Reviewed> = None;
+        loop {
+            let attempt = transcripts.len();
+            let transcript = transcripts.last().cloned().unwrap_or_default();
+            let outcome = claude
+                .run(&Invocation {
+                    cwd: worktree.path(),
+                    add_dirs: &add_dirs,
+                    plugin_dir: Some(&plugin.dir),
+                    tools: &profile.tools,
+                    prompt: &brief,
+                    system_prompt: &system_prompt,
+                    schema: &schema,
+                    model: profile.model.as_deref(),
+                    effort,
+                    transcript: &transcript,
+                    stderr: &run_dir.join(if attempt == 1 {
+                        "stderr.log".to_owned()
+                    } else {
+                        format!("stderr.{attempt}.log")
+                    }),
+                    resume: session.as_deref(),
+                })
+                .await;
+            let parse = |outcome| match target {
+                Some(target) => Self::draft_revised(outcome, target, &index, &transcript),
+                None => Self::reviewed(outcome, &index, run, &transcript),
+            };
+            let (mut reviewed, session_id) =
+                match settle(outcome, answered.take(), parse, &ctx.url)? {
+                    Settled::Answer(reviewed, session_id) => (reviewed, session_id),
+                    Settled::First(first) => return resumed(first, run, worktree, &index).await,
+                    Settled::NoSession => {
+                        return Ok(Reviewed::NotResumed {
+                            why: "its agent session is gone".into(),
+                        });
+                    }
+                };
+            let misses = procedure_misses(&mut reviewed, &transcripts, &required, &diff_path);
+            let retry = misses.iter().any(|m| m.retry);
+            if !retry || attempt > 1 || session_id.is_none() {
+                return resumed(reviewed, run, worktree, &index).await;
+            }
+            let texts: Vec<String> = misses.into_iter().map(|m| m.text).collect();
+            tracing::warn!(url = %ctx.url, misses = ?texts, "the review failed its procedure check; asking again");
+            brief = prompt::corrective(&texts, &required, &args);
+            write(&run_dir.join("prompt.2.md"), &brief).await?;
+            transcripts.push(run_dir.join("transcript.2.jsonl"));
+            session = session_id;
+            answered = Some(reviewed);
+        }
+    }
+
+    /// The prompt for `run`: its brief, or for a resumed or regenerated run,
+    /// what it's asked now. `Err` when the session it resumes can't be.
+    async fn brief(
+        worktree: &Worktree,
+        run_dir: &Path,
+        run: &QueuedRun,
+        ctx: &PrContext,
+        diff: &str,
+        diff_path: &Path,
+    ) -> Result<Result<String, Reviewed>> {
+        Ok(Ok(match (&run.revision, target(run)?, &run.resume) {
+            (Some(revision), Some(target), _) => {
+                prompt::draft_revision(&revision.instruction, target, ctx)
+            }
+            (Some(revision), None, _) => {
+                prompt::revision(&revision.instruction, &revision.baseline, ctx)
+            }
+            (None, _, Some(resume)) => {
+                let Some(interdiff) = worktree
+                    .interdiff(&resume.head_sha, &resume.base_sha)
+                    .await?
+                else {
+                    return Ok(Err(Reviewed::NotResumed {
+                        why: format!(
+                            "the mirror no longer has {} or {}",
+                            resume.head_sha, resume.base_sha
+                        ),
+                    }));
+                };
+                let interdiff_path = run_dir.join("interdiff.diff");
+                write(&interdiff_path, interdiff.text()).await?;
+                prompt::update(
+                    &run.request,
+                    ctx,
+                    resume,
+                    &interdiff,
+                    &interdiff_path,
+                    diff_path,
+                )
+            }
+            (None, _, None) => prompt::brief(&run.request, ctx, diff, diff_path),
+        }))
+    }
+}
+
+/// How one session of a run ended.
+enum Settled {
+    /// An answer to check, and the session to resume to ask again.
+    Answer(Reviewed, Option<String>),
+    /// A retry that failed, answered badly or answered with no update,
+    /// which would drop the first answer's drafts: the first stands.
+    First(Reviewed),
+    /// The session to resume is gone.
+    NoSession,
+}
+
+/// Settles `outcome`, a session's, parsed by `parse`; `first` is the
+/// answer a retry follows, which stands if the retry's doesn't.
+fn settle(
+    outcome: Result<Ended>,
+    first: Option<Reviewed>,
+    parse: impl FnOnce(Outcome) -> Result<Reviewed>,
+    url: &str,
+) -> Result<Settled> {
+    let outcome = match (outcome, first) {
+        (Ok(Ended::Answered(outcome)), first) => (outcome, first),
+        (Ok(Ended::NoSession), None) => return Ok(Settled::NoSession),
+        (Err(err), None) => return Err(err),
+        (failed, Some(first)) => {
+            if let Err(err) = failed {
+                tracing::warn!(url, "the procedure check's retry failed: {err:#}");
+            }
+            return Ok(Settled::First(retried(first)));
+        }
+    };
+    let (outcome, first) = outcome;
+    let session_id = outcome.session_id.clone();
+    match (parse(outcome), first) {
+        (Ok(reviewed), None) => Ok(Settled::Answer(reviewed, session_id)),
+        (Err(err), None) => Err(err),
+        (Ok(reviewed @ (Reviewed::Review { .. } | Reviewed::Resumed { .. })), Some(_)) => {
+            Ok(Settled::Answer(reviewed, session_id))
+        }
+        (parsed, Some(first)) => {
+            if let Err(err) = parsed {
+                tracing::warn!(url, "the procedure check's retry answered badly: {err:#}");
+            }
+            Ok(Settled::First(retried(first)))
+        }
+    }
+}
+
+/// `reviewed`, whose procedure check's retry got no answer, counting it.
+fn retried(mut reviewed: Reviewed) -> Reviewed {
+    if let Reviewed::Review {
+        check: Some(check), ..
+    }
+    | Reviewed::Resumed {
+        check: Some(check), ..
+    } = &mut reviewed
+    {
+        check.attempts = 2;
+    }
+    reviewed
+}
+
+/// Checks `reviewed`, a whole review answered in `transcripts`, against
+/// `required` and records the result on it. Returns its misses.
+fn procedure_misses(
+    reviewed: &mut Reviewed,
+    transcripts: &[PathBuf],
+    required: &[String],
+    diff: &Path,
+) -> Vec<check::Miss> {
+    let (Reviewed::Review { result, check, .. } | Reviewed::Resumed { result, check, .. }) =
+        reviewed
+    else {
+        return Vec::new();
+    };
+    let report = check.as_ref().map(|c| c.report.clone()).unwrap_or_default();
+    let comments: Vec<_> = result.comments.iter().map(|c| c.comment.clone()).collect();
+    let answer = check::Answer {
+        report: &report,
+        verdict: result.verdict,
+        comments: &comments,
+    };
+    let misses = check::misses(transcripts, &answer, required, diff);
+    *check = (!required.is_empty() || !misses.is_empty()).then(|| ProcedureCheck {
+        report,
+        misses: misses.iter().map(|m| m.text.clone()).collect(),
+        attempts: u8::try_from(transcripts.len()).unwrap_or(u8::MAX),
+    });
+    misses
+}
+
+/// The schema `run`'s answer must match: a whole review's, with the
+/// `run_report` `required` calls for, or `target`'s, for a draft revision.
+fn schema(run: &QueuedRun, target: Option<&BaselineDraft>, required: &[String]) -> Value {
+    let mut schema = match (&run.revision, target) {
+        (Some(_), Some(target)) => return draft_revision_schema(&target.kind),
+        (Some(_), None) => revision_schema(),
+        // It names the drafts it keeps, as a regeneration does.
+        (None, _) if run.resume.is_some() => resume_schema(),
+        (None, _) => review_schema(),
+    };
+    with_run_report(&mut schema, required);
+    schema
+}
+
+/// Adds the required `run_report` to `schema`, a whole review's, when
+/// `required` names any skills: one entry per skill.
+fn with_run_report(schema: &mut Value, required: &[String]) {
+    if required.is_empty() {
+        return;
+    }
+    schema["properties"]["run_report"] = json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["skill", "status"],
+            "properties": {
+                "skill": { "enum": required },
+                "status": { "enum": ["ran", "failed"] },
+                "reason": { "type": ["string", "null"] },
+                "findings_count": { "type": ["integer", "null"], "minimum": 0 }
+            }
+        }
+    });
+    if let Some(list) = schema["required"].as_array_mut() {
+        list.push(json!("run_report"));
     }
 }
 
 /// The system prompt for a run of `profile` at `effort` on the diff at
-/// `diff_path`, reading its instruction files and procedure.
+/// `diff_path`, reading its instruction files and procedure, and the
+/// skills that procedure requires of `plugin`'s and the built-ins.
 async fn system_prompt(
     profile: &AgentProfile,
     effort: Effort,
     diff_path: &Path,
     references: &[&Path],
-) -> Result<String> {
+    plugin: &Plugin,
+) -> Result<(String, Vec<String>)> {
     let mut instructions = Vec::new();
     for path in &profile.instructions {
         let text = tokio::fs::read_to_string(path)
@@ -363,23 +551,36 @@ async fn system_prompt(
         instructions.push((path.display().to_string(), text));
     }
     let mut procedure = Vec::new();
+    let mut named = Vec::new();
     for dir in &profile.procedure {
         let path = dir.join("SKILL.md");
         let text = tokio::fs::read_to_string(&path)
             .await
             .wrap_err_with(|| format!("reading procedure {}", path.display()))?;
+        let own = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        named.push((own, text.clone()));
         procedure.push((path.display().to_string(), text));
     }
+    let required = if profile.tools.iter().any(|t| t == "Skill") {
+        check::required_skills(&named, &plugin.skills, profile.finders.as_deref())
+    } else {
+        Vec::new()
+    };
     let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
-    Ok(prompt::system_prompt(
+    let prompt = prompt::system_prompt(
         &profile.tools,
         effort,
         diff_path,
         &instructions,
         &procedure,
+        &required,
         &skills,
         references,
-    ))
+    );
+    Ok((prompt, required))
 }
 
 /// `reviewed`, `run`'s answer, with, when `run` resumed a session, where
@@ -407,11 +608,13 @@ async fn resumed(
         Reviewed::Review {
             result,
             basis: Some(basis),
+            check,
         } => Ok(Reviewed::Resumed {
             result,
             basis,
             resume: resume.clone(),
             moved: carried,
+            check,
         }),
         reviewed => Ok(reviewed),
     }
@@ -487,7 +690,16 @@ impl ReviewRunner {
                 dismissed: basis.map(|b| b.dismissed).unwrap_or_default(),
             });
         }
-        Ok(Reviewed::Review { result, basis })
+        let check = ProcedureCheck {
+            report: output.run_report,
+            misses: Vec::new(),
+            attempts: 1,
+        };
+        Ok(Reviewed::Review {
+            result,
+            basis,
+            check: Some(check),
+        })
     }
 }
 
@@ -512,6 +724,8 @@ pub enum Reviewed {
     Review {
         result: ReviewResult,
         basis: Option<Basis>,
+        /// How its procedure check came out, if one ran.
+        check: Option<ProcedureCheck>,
     },
     /// A regeneration of one draft: that draft revised, or dropped.
     Draft {
@@ -536,6 +750,7 @@ pub enum Reviewed {
         basis: Basis,
         resume: Resume,
         moved: Vec<Carried>,
+        check: Option<ProcedureCheck>,
     },
     /// The session it was to resume couldn't be, and nothing ran: `why`
     /// says why. A push review can start afresh instead.
