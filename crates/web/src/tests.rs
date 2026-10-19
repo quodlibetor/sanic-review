@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use sanic_core::hold::Finding;
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
-    config::{CheckoutResolver, Config, Unloadable, Vcs},
+    config::{CheckoutResolver, Config, Effort, Unloadable, Vcs},
     manual::ManualReviews,
     pr::{Comment, Placement, PrKey, PrSnapshot, Reaction, Review, ReviewState, Thread},
     repo::RepoName,
@@ -774,6 +774,7 @@ async fn state_changes_need_the_token_and_the_dashboards_own_origin() {
         f.submit_uri(),
         "/pr/org/repo/8/review-now".into(),
         "/pr/org/repo/7/archive".into(),
+        "/pr/org/repo/7/effort".into(),
         format!("/drafts/{}/thread", f.drafts[1]),
         format!("/queue/{queued}/move"),
         format!("/queue/{queued}/cancel"),
@@ -1689,6 +1690,51 @@ async fn archiving_and_review_now_from_a_filtered_index_go_back_to_it() {
         )
         .await;
     assert_eq!(reply.headers[header::LOCATION], "/?author=bob&q=escaping");
+}
+
+#[tokio::test]
+async fn a_prs_effort_is_chosen_on_its_page_and_saved_in_the_store() {
+    let f = fixture(false).await;
+    let key = PrKey {
+        repo: RepoName::new("org", "repo"),
+        number: 8,
+    };
+    let page = f.get("/pr/org/repo/8").await.body;
+    assert!(
+        page.contains(r#"<option value="" selected>Effort: profile's (medium)</option>"#),
+        "{page}"
+    );
+
+    // htmx: saved, and nothing comes back to swap in.
+    let fields = [("effort", "high")];
+    let reply = f
+        .send(
+            form("/pr/org/repo/8/effort")
+                .header("hx-request", "true")
+                .header("x-csrf-token", f.token())
+                .body(encode(&fields))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let effort = |f: &Fixture| f.store().pr_page(&key).unwrap().unwrap().effort;
+    assert_eq!(effort(&f), Some(Effort::High));
+    let page = f.get("/pr/org/repo/8").await.body;
+    assert!(
+        page.contains(r#"<option value="high" selected>Effort: high</option>"#),
+        "{page}"
+    );
+
+    // A plain form goes back to the page; empty is the profile's again.
+    let reply = f.post("/pr/org/repo/8/effort", &[("effort", "")]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.headers[header::LOCATION], "/pr/org/repo/8");
+    assert_eq!(effort(&f), None);
+
+    let reply = f.post("/pr/org/repo/8/effort", &[("effort", "huge")]).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    let reply = f.post("/pr/org/repo/99/effort", &[("effort", "low")]).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

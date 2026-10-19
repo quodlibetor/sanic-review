@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{OptionalExtension, Row, params};
-use sanic_core::{pr::PrKey, run::RunKind};
+use sanic_core::{config::Effort, pr::PrKey, run::RunKind};
 
 use crate::{NOW, Store, overview::key_columns};
 
@@ -26,6 +26,10 @@ pub struct PrPage {
     pub is_draft: bool,
     pub archived: bool,
     pub open: bool,
+    /// The profile it was last matched to.
+    pub profile: String,
+    /// The effort you chose for its reviews; `None` follows the profile's.
+    pub effort: Option<Effort>,
 }
 
 /// One review run of a PR.
@@ -261,7 +265,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT title, body, url, author, head_sha, is_draft, archived, open
+                "SELECT title, body, url, author, head_sha, is_draft, archived, open, profile,
+                        effort
                  FROM prs WHERE repo = ?1 AND number = ?2",
                 params![key.repo.to_string(), key.number],
                 |row| {
@@ -275,6 +280,10 @@ impl Store {
                         is_draft: row.get(5)?,
                         archived: row.get(6)?,
                         open: row.get(7)?,
+                        profile: row.get(8)?,
+                        effort: row
+                            .get::<_, Option<String>>(9)?
+                            .and_then(|e| e.parse().ok()),
                     })
                 },
             )
