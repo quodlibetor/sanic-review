@@ -639,8 +639,7 @@ async fn write(path: &Path, contents: &str) -> Result<()> {
         .wrap_err_with(|| format!("writing {}", path.display()))
 }
 
-/// The JSON Schema for [`ReviewOutput`]. `approve` is deliberately not a
-/// verdict.
+/// The JSON Schema for [`ReviewOutput`].
 #[must_use]
 pub fn review_schema() -> Value {
     json!({
@@ -650,7 +649,7 @@ pub fn review_schema() -> Value {
         "properties": {
             "summary": { "type": "string" },
             "summary_note": { "type": ["string", "null"] },
-            "suggested_verdict": { "enum": ["comment", "request_changes", "none"] },
+            "suggested_verdict": { "enum": ["comment", "request_changes", "approve", "none"] },
             "comments": {
                 "type": "array",
                 "items": {
