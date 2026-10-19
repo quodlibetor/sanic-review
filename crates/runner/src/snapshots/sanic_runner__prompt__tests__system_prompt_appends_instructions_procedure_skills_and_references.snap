@@ -1,6 +1,6 @@
 ---
 source: crates/runner/src/prompt.rs
-expression: "system_prompt(&[\"Read\".into(), \"Skill\".into()],\nPath::new(\"/data/runs/1/pr.diff\"),\n&[(\"general.md\".into(), \"Be terse.\\n\".into())],\n&[(\"/skills/triage/SKILL.md\".into(),\n\"Run `gh pr view`, then present the findings.\\n\".into())],\n&[Path::new(\"/skills/ring\")],\n&[Path::new(\"/src/services\"), Path::new(\"/src/sanic-cli\")])"
+expression: "system_prompt(&[\"Read\".into(), \"Skill\".into()], Effort::High,\nPath::new(\"/data/runs/1/pr.diff\"),\n&[(\"general.md\".into(), \"Be terse.\\n\".into())],\n&[(\"/skills/triage/SKILL.md\".into(),\n\"Run `gh pr view`, then present the findings.\\n\".into())],\n&[Path::new(\"/skills/ring\")],\n&[Path::new(\"/src/services\"), Path::new(\"/src/sanic-cli\")])"
 ---
 You are drafting a code review of a GitHub pull request for a human reviewer, who will read, edit, accept or reject each draft before anything is posted.
 
@@ -40,7 +40,7 @@ Be terse.
 
 Follow the procedure below for this review. Where it assumes more than you have:
 - The working directory is already a checkout of the PR head, and the user message has its metadata, threads and diff: steps that fetch, check out or view the PR are done.
-- Steps that run `/code-review`, or hand finding problems to another skill you can load: run it with the `Skill` tool (`code-review` for `/code-review`), never with a PR number, branch, `--comment` or `--fix`. It runs apart from you, sees nothing but its `args`, and anything it answers through `StructuredOutput` never reaches you, so pass exactly this as its `args`: `The PR's diff is in /data/runs/1/pr.diff and its code is in the working directory. You can't run commands; read those instead. Give your findings as your final text reply. Never call StructuredOutput: it is reserved for the caller.` Don't skip a step whose skill loads, or do it yourself instead: it's what gives the review its breadth. What it finds is allegations, for the procedure's later steps to verify.
+- Steps that run `/code-review`, or hand finding problems to another skill you can load: run it with the `Skill` tool (`code-review` for `/code-review`), never with a PR number, branch, `--comment` or `--fix`. It runs apart from you, sees nothing but its `args`, and anything it answers through `StructuredOutput` never reaches you, so pass exactly this as its `args` (dropping the leading level for a skill that takes none): `high The PR's diff is in /data/runs/1/pr.diff and its code is in the working directory. You can't run commands; read those instead. Give your findings as your final text reply. Never call StructuredOutput: it is reserved for the caller.` Don't skip a step whose skill loads, or do it yourself instead: it's what gives the review its breadth. What it finds is allegations, for the procedure's later steps to verify.
 - Steps that hand finding problems to a skill you can't load, or to a command or agent you can't run: do that finding yourself.
 - The mapping under "Where you're running" applies to the rest: presenting goes in private notes, delivering or posting stops at the drafts, and so on.
 
